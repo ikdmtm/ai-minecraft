@@ -1,0 +1,157 @@
+import {
+  FFmpegManager,
+  buildFFmpegArgs,
+  type FFmpegConfig,
+  type ProcessSpawner,
+  type FFmpegProcess,
+} from './ffmpeg';
+
+const BASE_CONFIG: FFmpegConfig = {
+  display: ':99',
+  resolution: '1920x1080',
+  fps: 30,
+  videoBitrate: '4500k',
+  audioBitrate: '128k',
+  rtmpUrl: 'rtmp://a.rtmp.youtube.com/live2/test-key',
+  pulseAudioSource: 'combined_sink.monitor',
+  avatarBasePath: 'assets/avatar',
+};
+
+describe('buildFFmpegArgs', () => {
+  it('includes x11grab input', () => {
+    const args = buildFFmpegArgs(BASE_CONFIG);
+    expect(args).toContain('-f');
+    expect(args).toContain('x11grab');
+    expect(args).toContain('-i');
+    expect(args).toContain(':99');
+  });
+
+  it('includes pulse audio input', () => {
+    const args = buildFFmpegArgs(BASE_CONFIG);
+    const pulseIdx = args.indexOf('pulse');
+    expect(pulseIdx).toBeGreaterThan(0);
+    expect(args[pulseIdx - 1]).toBe('-f');
+    expect(args).toContain('-i');
+    expect(args).toContain('combined_sink.monitor');
+  });
+
+  it('includes resolution and framerate', () => {
+    const args = buildFFmpegArgs(BASE_CONFIG);
+    expect(args).toContain('1920x1080');
+    expect(args).toContain('30');
+  });
+
+  it('includes RTMP output', () => {
+    const args = buildFFmpegArgs(BASE_CONFIG);
+    expect(args[args.length - 1]).toBe('rtmp://a.rtmp.youtube.com/live2/test-key');
+  });
+
+  it('includes video codec settings', () => {
+    const args = buildFFmpegArgs(BASE_CONFIG);
+    expect(args).toContain('-c:v');
+    expect(args).toContain('h264_nvenc');
+  });
+
+  it('includes audio codec settings', () => {
+    const args = buildFFmpegArgs(BASE_CONFIG);
+    expect(args).toContain('-c:a');
+    expect(args).toContain('aac');
+  });
+
+  it('includes avatar overlay filter', () => {
+    const args = buildFFmpegArgs(BASE_CONFIG);
+    const filterIdx = args.indexOf('-filter_complex');
+    expect(filterIdx).toBeGreaterThan(0);
+    const filterStr = args[filterIdx + 1];
+    expect(filterStr).toContain('overlay');
+  });
+});
+
+describe('FFmpegManager', () => {
+  let spawner: jest.Mocked<ProcessSpawner>;
+  let mockProcess: jest.Mocked<FFmpegProcess>;
+  let manager: FFmpegManager;
+
+  beforeEach(() => {
+    mockProcess = {
+      pid: 12345,
+      kill: jest.fn().mockReturnValue(true),
+      on: jest.fn(),
+      stderr: { on: jest.fn() },
+    } as unknown as jest.Mocked<FFmpegProcess>;
+
+    spawner = { spawn: jest.fn().mockReturnValue(mockProcess) };
+    manager = new FFmpegManager(BASE_CONFIG, spawner);
+  });
+
+  it('is not running initially', () => {
+    expect(manager.isRunning()).toBe(false);
+  });
+
+  it('starts FFmpeg process', () => {
+    manager.start();
+    expect(spawner.spawn).toHaveBeenCalledTimes(1);
+    const [cmd, args] = spawner.spawn.mock.calls[0];
+    expect(cmd).toBe('ffmpeg');
+    expect(args.length).toBeGreaterThan(0);
+    expect(manager.isRunning()).toBe(true);
+  });
+
+  it('does not start twice', () => {
+    manager.start();
+    manager.start();
+    expect(spawner.spawn).toHaveBeenCalledTimes(1);
+  });
+
+  it('stops running process', () => {
+    manager.start();
+    manager.stop();
+    expect(mockProcess.kill).toHaveBeenCalledWith('SIGTERM');
+    expect(manager.isRunning()).toBe(false);
+  });
+
+  it('stop is no-op when not running', () => {
+    manager.stop();
+    expect(mockProcess.kill).not.toHaveBeenCalled();
+  });
+
+  it('getPid returns process pid', () => {
+    manager.start();
+    expect(manager.getPid()).toBe(12345);
+  });
+
+  it('getPid returns null when not running', () => {
+    expect(manager.getPid()).toBeNull();
+  });
+
+  it('marks as not running on process exit', () => {
+    manager.start();
+    const onCall = mockProcess.on.mock.calls.find((c) => c[0] === 'exit');
+    expect(onCall).toBeDefined();
+    const exitHandler = onCall![1] as (code: number | null) => void;
+    exitHandler(0);
+    expect(manager.isRunning()).toBe(false);
+  });
+
+  it('calls onExit callback when process exits', () => {
+    const onExit = jest.fn();
+    manager = new FFmpegManager(BASE_CONFIG, spawner, { onExit });
+    manager.start();
+    const onCall = mockProcess.on.mock.calls.find((c) => c[0] === 'exit');
+    const exitHandler = onCall![1] as (code: number | null) => void;
+    exitHandler(1);
+    expect(onExit).toHaveBeenCalledWith(1);
+  });
+
+  it('updateOverlayText stores text for filter update', () => {
+    manager.start();
+    manager.updateOverlayText('鉄装備を完成させる');
+    expect(manager.getCurrentOverlay()).toBe('鉄装備を完成させる');
+  });
+
+  it('updateAvatarImage stores current avatar path', () => {
+    manager.start();
+    manager.updateAvatarImage('assets/avatar/happy_open.png');
+    expect(manager.getCurrentAvatar()).toBe('assets/avatar/happy_open.png');
+  });
+});
