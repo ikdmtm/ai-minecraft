@@ -1,0 +1,145 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>星守レイ 配信コントロール</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: 'Segoe UI', system-ui, sans-serif; background: #0f1117; color: #e4e4e7; min-height: 100vh; }
+  .container { max-width: 800px; margin: 0 auto; padding: 24px; }
+  h1 { font-size: 1.5rem; margin-bottom: 24px; color: #a78bfa; }
+  .card { background: #1c1e2a; border-radius: 12px; padding: 20px; margin-bottom: 16px; }
+  .card h2 { font-size: 0.85rem; text-transform: uppercase; letter-spacing: 0.05em; color: #71717a; margin-bottom: 12px; }
+  .status-row { display: flex; align-items: center; gap: 12px; margin-bottom: 8px; }
+  .dot { width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0; }
+  .dot.ok { background: #22c55e; }
+  .dot.warn { background: #f59e0b; }
+  .dot.err { background: #ef4444; }
+  .big-stat { font-size: 2rem; font-weight: 700; color: #fff; }
+  .stat-label { font-size: 0.8rem; color: #71717a; }
+  .stats-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-bottom: 8px; }
+  .stat-box { text-align: center; }
+  .btn { padding: 10px 24px; border: none; border-radius: 8px; cursor: pointer; font-size: 0.9rem; font-weight: 600; }
+  .btn-start { background: #22c55e; color: #000; }
+  .btn-stop { background: #ef4444; color: #fff; }
+  .btn:disabled { opacity: 0.4; cursor: not-allowed; }
+  .btn-row { display: flex; gap: 12px; margin-bottom: 8px; }
+  .log-list { max-height: 200px; overflow-y: auto; font-size: 0.85rem; font-family: monospace; }
+  .log-item { padding: 4px 0; border-bottom: 1px solid #27272a; }
+  .log-time { color: #71717a; }
+  .health-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  .config-form label { display: block; font-size: 0.85rem; color: #a1a1aa; margin-top: 8px; }
+  .config-form input, .config-form select { background: #27272a; border: 1px solid #3f3f46; color: #e4e4e7; padding: 6px 10px; border-radius: 6px; width: 100%; margin-top: 4px; }
+  .config-form .btn { margin-top: 12px; background: #6366f1; color: #fff; }
+  .history-table { width: 100%; font-size: 0.85rem; border-collapse: collapse; }
+  .history-table td { padding: 6px 8px; border-bottom: 1px solid #27272a; }
+</style>
+</head>
+<body>
+<div class="container">
+  <h1>星守レイ 配信コントロール</h1>
+
+  <div class="card">
+    <div class="status-row">
+      <span class="dot" id="state-dot"></span>
+      <span class="big-stat" id="state-label">---</span>
+    </div>
+    <div class="btn-row">
+      <button class="btn btn-start" id="btn-start" onclick="doStart()">配信開始</button>
+      <button class="btn btn-stop" id="btn-stop" onclick="doStop()">停止</button>
+    </div>
+    <div class="stats-grid">
+      <div class="stat-box"><div class="big-stat" id="gen">-</div><div class="stat-label">世代</div></div>
+      <div class="stat-box"><div class="big-stat" id="survival">-</div><div class="stat-label">生存時間</div></div>
+      <div class="stat-box"><div class="big-stat" id="best">-</div><div class="stat-label">最高記録</div></div>
+      <div class="stat-box"><div class="big-stat" id="mode">-</div><div class="stat-label">モード</div></div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>プロセスヘルス</h2>
+    <div class="health-grid" id="health-grid"></div>
+  </div>
+
+  <div class="card">
+    <h2>直近の実況</h2>
+    <div class="log-list" id="log-list"></div>
+  </div>
+
+  <div class="card">
+    <h2>設定</h2>
+    <form class="config-form" id="config-form" onsubmit="saveConfig(event)">
+      <label>配信タイトルテンプレート<input id="cfg-title" type="text"></label>
+      <label>運用モード
+        <select id="cfg-mode"><option value="MANUAL">MANUAL</option><option value="AUTO">AUTO</option></select>
+      </label>
+      <label>クールタイム (分)<input id="cfg-cooldown" type="number" min="1"></label>
+      <button class="btn" type="submit">保存</button>
+    </form>
+  </div>
+
+  <div class="card">
+    <h2>死亡履歴</h2>
+    <table class="history-table" id="history-table"><tbody></tbody></table>
+  </div>
+</div>
+
+<script>
+function fmt(min) { return Math.floor(min/60) + ':' + String(min%60).padStart(2,'0'); }
+
+async function refresh() {
+  try {
+    const s = await (await fetch('/api/status')).json();
+    document.getElementById('state-label').textContent = s.state;
+    const dot = document.getElementById('state-dot');
+    dot.className = 'dot ' + (s.state === 'LIVE_RUNNING' ? 'ok' : s.state === 'IDLE' ? 'warn' : 'err');
+    document.getElementById('gen').textContent = '#' + s.generation;
+    document.getElementById('survival').textContent = fmt(s.survivalMinutes);
+    document.getElementById('best').textContent = fmt(s.bestRecordMinutes);
+    document.getElementById('mode').textContent = s.operationMode;
+    document.getElementById('btn-start').disabled = s.state !== 'IDLE';
+    document.getElementById('btn-stop').disabled = s.state === 'IDLE';
+
+    const hg = document.getElementById('health-grid');
+    hg.innerHTML = s.healthStatuses.map(h =>
+      `<div class="status-row"><span class="dot ${h.healthy?'ok':'err'}"></span>${h.name}</div>`
+    ).join('');
+
+    const logs = await (await fetch('/api/logs')).json();
+    document.getElementById('log-list').innerHTML = logs.slice(0,50).map(l =>
+      `<div class="log-item"><span class="log-time">${l.timestamp.slice(11,19)}</span> ${l.content.slice(0,80)}</div>`
+    ).join('');
+
+    const cfg = await (await fetch('/api/config')).json();
+    document.getElementById('cfg-title').value = cfg.streamTitleTemplate || '';
+    document.getElementById('cfg-mode').value = cfg.operationMode || 'MANUAL';
+    document.getElementById('cfg-cooldown').value = cfg.cooldownMinutes || 10;
+
+    const hist = await (await fetch('/api/history')).json();
+    document.getElementById('history-table').querySelector('tbody').innerHTML = hist.map(d =>
+      `<tr><td>#${d.generation}</td><td>${fmt(d.survivalMinutes)}</td><td>${d.cause}</td><td>${d.lesson||''}</td></tr>`
+    ).join('');
+  } catch(e) { console.error('refresh error', e); }
+}
+
+async function doStart() { await fetch('/api/start', {method:'POST'}); refresh(); }
+async function doStop() { await fetch('/api/stop', {method:'POST'}); refresh(); }
+async function saveConfig(e) {
+  e.preventDefault();
+  await fetch('/api/config', {
+    method: 'PUT', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({
+      streamTitleTemplate: document.getElementById('cfg-title').value,
+      operationMode: document.getElementById('cfg-mode').value,
+      cooldownMinutes: parseInt(document.getElementById('cfg-cooldown').value),
+    })
+  });
+  refresh();
+}
+
+refresh();
+setInterval(refresh, 5000);
+</script>
+</body>
+</html>
