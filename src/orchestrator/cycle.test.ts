@@ -120,4 +120,119 @@ describe('CycleRunner', () => {
       currentGoal: '鉄装備を完成させる',
     }));
   });
+
+  // ── 新規: speakCommentary 障害耐性 ──
+
+  describe('fault isolation', () => {
+    it('executeSteps succeeds even when speakCommentary throws', async () => {
+      const deps = createMockDeps({
+        speakCommentary: jest.fn().mockRejectedValue(new Error('VOICEVOX down')),
+      });
+      const runner = new CycleRunner(deps);
+      const result = await runner.runOneCycle();
+
+      expect(result.ok).toBe(true);
+      expect(deps.executeSteps).toHaveBeenCalled();
+    });
+
+    it('logs error when speakCommentary fails', async () => {
+      const deps = createMockDeps({
+        speakCommentary: jest.fn().mockRejectedValue(new Error('VOICEVOX down')),
+      });
+      const runner = new CycleRunner(deps);
+      await runner.runOneCycle();
+
+      expect(deps.logAction).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: 'error',
+          content: expect.stringContaining('VOICEVOX down'),
+        }),
+      );
+    });
+
+    it('speakCommentary succeeds even when executeSteps throws', async () => {
+      const deps = createMockDeps({
+        executeSteps: jest.fn().mockRejectedValue(new Error('Bot disconnected')),
+      });
+      const runner = new CycleRunner(deps);
+      const result = await runner.runOneCycle();
+
+      expect(result.ok).toBe(true);
+      expect(deps.speakCommentary).toHaveBeenCalled();
+    });
+
+    it('logs error when executeSteps fails', async () => {
+      const deps = createMockDeps({
+        executeSteps: jest.fn().mockRejectedValue(new Error('Bot disconnected')),
+      });
+      const runner = new CycleRunner(deps);
+      await runner.runOneCycle();
+
+      expect(deps.logAction).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: 'error',
+          content: expect.stringContaining('Bot disconnected'),
+        }),
+      );
+    });
+
+    it('both failures are logged independently', async () => {
+      const deps = createMockDeps({
+        executeSteps: jest.fn().mockRejectedValue(new Error('bot error')),
+        speakCommentary: jest.fn().mockRejectedValue(new Error('tts error')),
+      });
+      const runner = new CycleRunner(deps);
+      await runner.runOneCycle();
+
+      const errorLogs = (deps.logAction as jest.Mock).mock.calls
+        .filter((c: any) => c[0].type === 'error');
+      expect(errorLogs).toHaveLength(2);
+    });
+  });
+
+  // ── 新規: 同時実行ガード ──
+
+  describe('concurrent execution guard', () => {
+    it('rejects concurrent cycle runs', async () => {
+      let resolveFirst: () => void;
+      const blockingPromise = new Promise<void>((r) => { resolveFirst = r; });
+
+      const deps = createMockDeps({
+        executeSteps: jest.fn().mockReturnValue(blockingPromise),
+      });
+      const runner = new CycleRunner(deps);
+
+      const first = runner.runOneCycle();
+      const second = runner.runOneCycle();
+
+      const secondResult = await second;
+      expect(secondResult.ok).toBe(false);
+      if (!secondResult.ok) expect(secondResult.error).toContain('実行中');
+
+      resolveFirst!();
+      const firstResult = await first;
+      expect(firstResult.ok).toBe(true);
+    });
+
+    it('isRunning reflects cycle state', async () => {
+      const deps = createMockDeps();
+      const runner = new CycleRunner(deps);
+      expect(runner.isRunning()).toBe(false);
+
+      const promise = runner.runOneCycle();
+      // Note: since deps are all sync-resolved mocks, running flag toggles fast
+      await promise;
+      expect(runner.isRunning()).toBe(false);
+    });
+
+    it('allows next cycle after previous completes', async () => {
+      const deps = createMockDeps();
+      const runner = new CycleRunner(deps);
+
+      await runner.runOneCycle();
+      const result = await runner.runOneCycle();
+      expect(result.ok).toBe(true);
+      expect(deps.callLLM).toHaveBeenCalledTimes(2);
+    });
+  });
 });

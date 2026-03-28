@@ -1,4 +1,4 @@
-import { LLMClient, type LLMApiAdapter } from './client';
+import { LLMClient, callWithTimeout, type LLMApiAdapter } from './client';
 import type { GameState } from '../types/gameState';
 
 const VALID_LLM_JSON = JSON.stringify({
@@ -7,6 +7,8 @@ const VALID_LLM_JSON = JSON.stringify({
   current_goal_update: null,
   threat_level: 'low',
 });
+
+const INVALID_LLM_JSON = 'これはJSONではありません';
 
 function sampleGameState(): GameState {
   return {
@@ -29,79 +31,183 @@ function sampleGameState(): GameState {
   };
 }
 
-function createMockAdapter(response: string, shouldFail = false): LLMApiAdapter {
-  return {
-    call: jest.fn().mockImplementation(async () => {
-      if (shouldFail) throw new Error('API error');
-      return response;
-    }),
-  };
-}
-
 describe('LLMClient', () => {
-  it('calls adapter and parses valid response', async () => {
-    const adapter = createMockAdapter(VALID_LLM_JSON);
-    const client = new LLMClient(adapter);
-    const result = await client.call(sampleGameState());
-    expect(result.ok).toBe(true);
-    if (result.ok) {
-      expect(result.value.action.goal).toBe('木を伐採する');
-      expect(result.value.commentary).toBe('木材が足りないな。');
-    }
-    expect(adapter.call).toHaveBeenCalledTimes(1);
-  });
-
-  it('returns error when adapter throws', async () => {
-    const adapter = createMockAdapter('', true);
-    const client = new LLMClient(adapter);
-    const result = await client.call(sampleGameState());
-    expect(result.ok).toBe(false);
-  });
-
-  it('returns error when response is invalid JSON', async () => {
-    const adapter = createMockAdapter('not json at all');
-    const client = new LLMClient(adapter);
-    const result = await client.call(sampleGameState());
-    expect(result.ok).toBe(false);
-  });
-
-  it('tracks consecutive failures', async () => {
-    const adapter = createMockAdapter('', true);
-    const client = new LLMClient(adapter);
-    expect(client.getConsecutiveFailures()).toBe(0);
-
-    await client.call(sampleGameState());
-    expect(client.getConsecutiveFailures()).toBe(1);
-
-    await client.call(sampleGameState());
-    expect(client.getConsecutiveFailures()).toBe(2);
-  });
-
-  it('resets failure count on success', async () => {
-    const failAdapter = createMockAdapter('', true);
-    const client = new LLMClient(failAdapter);
-    await client.call(sampleGameState());
-    await client.call(sampleGameState());
-    expect(client.getConsecutiveFailures()).toBe(2);
-
-    // Swap to successful adapter
-    (client as any).adapter = createMockAdapter(VALID_LLM_JSON);
-    await client.call(sampleGameState());
-    expect(client.getConsecutiveFailures()).toBe(0);
-  });
-
-  it('generates death lesson', async () => {
-    const adapter: LLMApiAdapter = {
-      call: jest.fn().mockResolvedValue('夜間に拠点外を移動しないこと'),
-    };
-    const client = new LLMClient(adapter);
-    const lesson = await client.generateDeathLesson({
-      position: { x: 100, y: 64, z: -50 },
-      cause: 'クリーパー爆発',
-      recentActions: [{ time: 'now', event: 'walking', detail: '夜の森を移動中' }],
-      survivalMinutes: 30,
+  describe('successful call', () => {
+    it('calls adapter and parses valid response', async () => {
+      const adapter: LLMApiAdapter = { call: jest.fn().mockResolvedValue(VALID_LLM_JSON) };
+      const client = new LLMClient(adapter, { maxRetries: 0 });
+      const result = await client.call(sampleGameState());
+      expect(result.ok).toBe(true);
+      if (result.ok) {
+        expect(result.value.action.goal).toBe('木を伐採する');
+      }
+      expect(adapter.call).toHaveBeenCalledTimes(1);
     });
-    expect(lesson.ok).toBe(true);
-    if (lesson.ok) expect(lesson.value).toContain('夜間');
+
+    it('resets consecutive failures on success', async () => {
+      const adapter: LLMApiAdapter = {
+        call: jest.fn()
+          .mockRejectedValueOnce(new Error('fail'))
+          .mockResolvedValueOnce(VALID_LLM_JSON),
+      };
+      const client = new LLMClient(adapter, { maxRetries: 1, retryDelayMs: 0 });
+      const result = await client.call(sampleGameState());
+      expect(result.ok).toBe(true);
+      expect(client.getConsecutiveFailures()).toBe(0);
+    });
+  });
+
+  describe('retry on parse failure', () => {
+    it('retries immediately when response is invalid JSON', async () => {
+      const adapter: LLMApiAdapter = {
+        call: jest.fn()
+          .mockResolvedValueOnce(INVALID_LLM_JSON)
+          .mockResolvedValueOnce(VALID_LLM_JSON),
+      };
+      const client = new LLMClient(adapter, { maxRetries: 2, retryDelayMs: 0 });
+      const result = await client.call(sampleGameState());
+      expect(result.ok).toBe(true);
+      expect(adapter.call).toHaveBeenCalledTimes(2);
+    });
+
+    it('retries when LLM returns truncated JSON', async () => {
+      const truncated = '{"action":{"goal":"帰る","reason":"夜","steps":["帰';
+      const adapter: LLMApiAdapter = {
+        call: jest.fn()
+          .mockResolvedValueOnce(truncated)
+          .mockResolvedValueOnce(VALID_LLM_JSON),
+      };
+      const client = new LLMClient(adapter, { maxRetries: 1, retryDelayMs: 0 });
+      const result = await client.call(sampleGameState());
+      expect(result.ok).toBe(true);
+    });
+
+    it('fails after max retries on persistent parse failure', async () => {
+      const adapter: LLMApiAdapter = {
+        call: jest.fn().mockResolvedValue(INVALID_LLM_JSON),
+      };
+      const client = new LLMClient(adapter, { maxRetries: 2, retryDelayMs: 0 });
+      const result = await client.call(sampleGameState());
+      expect(result.ok).toBe(false);
+      if (!result.ok) expect(result.error).toContain('3回試行後');
+      expect(adapter.call).toHaveBeenCalledTimes(3);
+    });
+  });
+
+  describe('retry on API error', () => {
+    it('retries with backoff on API failure', async () => {
+      const adapter: LLMApiAdapter = {
+        call: jest.fn()
+          .mockRejectedValueOnce(new Error('rate limit'))
+          .mockResolvedValueOnce(VALID_LLM_JSON),
+      };
+      const client = new LLMClient(adapter, { maxRetries: 2, retryDelayMs: 10 });
+      const result = await client.call(sampleGameState());
+      expect(result.ok).toBe(true);
+      expect(adapter.call).toHaveBeenCalledTimes(2);
+    });
+
+    it('fails after max retries on persistent API error', async () => {
+      const adapter: LLMApiAdapter = {
+        call: jest.fn().mockRejectedValue(new Error('server down')),
+      };
+      const client = new LLMClient(adapter, { maxRetries: 2, retryDelayMs: 10 });
+      const result = await client.call(sampleGameState());
+      expect(result.ok).toBe(false);
+      if (!result.ok) expect(result.error).toContain('server down');
+      expect(adapter.call).toHaveBeenCalledTimes(3);
+    });
+
+    it('increments consecutiveFailures on final failure', async () => {
+      const adapter: LLMApiAdapter = {
+        call: jest.fn().mockRejectedValue(new Error('fail')),
+      };
+      const client = new LLMClient(adapter, { maxRetries: 0, retryDelayMs: 0 });
+      await client.call(sampleGameState());
+      expect(client.getConsecutiveFailures()).toBe(1);
+      await client.call(sampleGameState());
+      expect(client.getConsecutiveFailures()).toBe(2);
+    });
+  });
+
+  describe('mixed failure scenarios', () => {
+    it('handles API error then parse error then success', async () => {
+      const adapter: LLMApiAdapter = {
+        call: jest.fn()
+          .mockRejectedValueOnce(new Error('network'))
+          .mockResolvedValueOnce(INVALID_LLM_JSON)
+          .mockResolvedValueOnce(VALID_LLM_JSON),
+      };
+      const client = new LLMClient(adapter, { maxRetries: 2, retryDelayMs: 10 });
+      const result = await client.call(sampleGameState());
+      expect(result.ok).toBe(true);
+      expect(adapter.call).toHaveBeenCalledTimes(3);
+    });
+  });
+
+  describe('generateDeathLesson', () => {
+    it('generates death lesson', async () => {
+      const adapter: LLMApiAdapter = {
+        call: jest.fn().mockResolvedValue('夜間に拠点外を移動しないこと'),
+      };
+      const client = new LLMClient(adapter);
+      const lesson = await client.generateDeathLesson({
+        position: { x: 100, y: 64, z: -50 },
+        cause: 'クリーパー爆発',
+        recentActions: [{ time: 'now', event: 'walking', detail: '夜の森を移動中' }],
+        survivalMinutes: 30,
+      });
+      expect(lesson.ok).toBe(true);
+      if (lesson.ok) expect(lesson.value).toContain('夜間');
+    });
+
+    it('handles empty response', async () => {
+      const adapter: LLMApiAdapter = { call: jest.fn().mockResolvedValue('  ') };
+      const client = new LLMClient(adapter);
+      const result = await client.generateDeathLesson({
+        position: { x: 0, y: 0, z: 0 }, cause: 'test',
+        recentActions: [], survivalMinutes: 0,
+      });
+      expect(result.ok).toBe(false);
+    });
+
+    it('handles API failure', async () => {
+      const adapter: LLMApiAdapter = { call: jest.fn().mockRejectedValue(new Error('down')) };
+      const client = new LLMClient(adapter);
+      const result = await client.generateDeathLesson({
+        position: { x: 0, y: 0, z: 0 }, cause: 'test',
+        recentActions: [], survivalMinutes: 0,
+      });
+      expect(result.ok).toBe(false);
+      if (!result.ok) expect(result.error).toContain('down');
+    });
+  });
+});
+
+describe('callWithTimeout', () => {
+  it('resolves when function completes within timeout', async () => {
+    const result = await callWithTimeout(
+      () => Promise.resolve('ok'),
+      1000,
+    );
+    expect(result).toBe('ok');
+  });
+
+  it('rejects when function exceeds timeout', async () => {
+    await expect(
+      callWithTimeout(
+        () => new Promise((resolve) => setTimeout(resolve, 500)),
+        50,
+      ),
+    ).rejects.toThrow('タイムアウト');
+  });
+
+  it('rejects with original error if function fails before timeout', async () => {
+    await expect(
+      callWithTimeout(
+        () => Promise.reject(new Error('original error')),
+        1000,
+      ),
+    ).rejects.toThrow('original error');
   });
 });

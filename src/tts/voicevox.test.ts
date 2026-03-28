@@ -3,7 +3,7 @@ import { VoicevoxClient, type HttpAdapter } from './voicevox';
 function createMockHttp(overrides: Partial<HttpAdapter> = {}): HttpAdapter {
   return {
     postJson: jest.fn().mockResolvedValue({ accent_phrases: [], speedScale: 1.0 }),
-    postJsonGetBuffer: jest.fn().mockResolvedValue(Buffer.from('fake-wav-data')),
+    postJsonGetBuffer: jest.fn().mockResolvedValue(Buffer.alloc(44100, 128)),
     get: jest.fn().mockResolvedValue({ status: 200 }),
     ...overrides,
   };
@@ -41,7 +41,7 @@ describe('VoicevoxClient', () => {
       }),
       postJsonGetBuffer: jest.fn().mockImplementation(async () => {
         callOrder.push('synthesis');
-        return Buffer.from('wav');
+        return Buffer.alloc(44100, 128);
       }),
     });
     const client = new VoicevoxClient('http://localhost:50021', 3, http);
@@ -92,6 +92,26 @@ describe('VoicevoxClient', () => {
     const client = new VoicevoxClient('http://localhost:50021', 3, http);
     const healthy = await client.isHealthy();
     expect(healthy).toBe(false);
+  });
+
+  it('returns error when synthesis returns empty buffer', async () => {
+    const http = createMockHttp({
+      postJsonGetBuffer: jest.fn().mockResolvedValue(Buffer.alloc(0)),
+    });
+    const client = new VoicevoxClient('http://localhost:50021', 3, http);
+    const result = await client.synthesize('テスト');
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error).toContain('異常な音声データ');
+  });
+
+  it('returns error when synthesis returns tiny buffer', async () => {
+    const http = createMockHttp({
+      postJsonGetBuffer: jest.fn().mockResolvedValue(Buffer.alloc(44)),
+    });
+    const client = new VoicevoxClient('http://localhost:50021', 3, http);
+    const result = await client.synthesize('テスト');
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error).toContain('44 bytes');
   });
 
   it('uses specified speaker ID', async () => {

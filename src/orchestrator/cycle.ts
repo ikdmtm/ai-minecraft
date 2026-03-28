@@ -35,14 +35,35 @@ export interface CycleDeps {
 export class CycleRunner {
   private previousPlan: PreviousPlan | null = null;
   private currentGoal = '';
+  private running = false;
 
   constructor(private deps: CycleDeps) {}
+
+  isRunning(): boolean {
+    return this.running;
+  }
 
   /**
    * 1 サイクルを実行する。
    * [1] ゲーム状態取得 → [2,3] LLM 呼び出し → [4] パース → [5a,b,c] 並列実行
+   *
+   * - speakCommentary の失敗は executeSteps に影響しない（allSettled）
+   * - 同時に 2 サイクルが走ることを防ぐガード付き
    */
   async runOneCycle(): Promise<Result<LLMOutput>> {
+    if (this.running) {
+      return err('前のサイクルが実行中です');
+    }
+
+    this.running = true;
+    try {
+      return await this.executeOneCycle();
+    } finally {
+      this.running = false;
+    }
+  }
+
+  private async executeOneCycle(): Promise<Result<LLMOutput>> {
     const gameState = this.deps.getGameState();
 
     const llmResult = await this.deps.callLLM(gameState);
@@ -83,12 +104,23 @@ export class CycleRunner {
       commentary: output.commentary,
     });
 
-    const executePromise = this.deps.executeSteps(output.action.steps);
-    const speakPromise = output.commentary
-      ? this.deps.speakCommentary(output.commentary)
-      : Promise.resolve();
+    // speakCommentary の失敗は executeSteps に影響させない
+    const results = await Promise.allSettled([
+      this.deps.executeSteps(output.action.steps),
+      output.commentary
+        ? this.deps.speakCommentary(output.commentary)
+        : Promise.resolve(),
+    ]);
 
-    await Promise.all([executePromise, speakPromise]);
+    for (const r of results) {
+      if (r.status === 'rejected') {
+        this.deps.logAction({
+          timestamp: new Date().toISOString(),
+          type: 'error',
+          content: `サイクル内エラー: ${r.reason instanceof Error ? r.reason.message : String(r.reason)}`,
+        });
+      }
+    }
 
     return ok(output);
   }

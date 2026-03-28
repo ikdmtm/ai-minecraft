@@ -34,6 +34,12 @@ export class VoicevoxClient {
       const synthesisUrl = `${this.host}/synthesis?speaker=${this.speakerId}`;
       const wavBuffer = await this.http.postJsonGetBuffer(synthesisUrl, audioQuery as object);
 
+      // WAV ヘッダー (44 bytes) 以下は異常。VOICEVOX が空音声を返す場合のガード
+      const MIN_WAV_SIZE = 100;
+      if (!wavBuffer || wavBuffer.length < MIN_WAV_SIZE) {
+        return err(`異常な音声データ (${wavBuffer?.length ?? 0} bytes)`);
+      }
+
       return ok(wavBuffer);
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
