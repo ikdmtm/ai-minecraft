@@ -10,7 +10,7 @@ const responseSchema = z.object({
     steps: z.array(z.string()).min(1),
   }),
   commentary: z.string().min(1),
-  current_goal_update: z.string().nullable(),
+  current_goal_update: z.string().nullable().optional().default(null),
   threat_level: z.enum(['low', 'medium', 'high', 'critical']),
 });
 

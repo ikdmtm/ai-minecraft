@@ -122,4 +122,158 @@ describe('parseResponse - invalid', () => {
     const result = parseResponse('');
     expect(result.ok).toBe(false);
   });
+
+  it('returns error for broken JSON (truncated by max_tokens)', () => {
+    const truncated = '{"action":{"goal":"拠点に戻る","reason":"夜だ","steps":["帰';
+    const result = parseResponse(truncated);
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error).toContain('パース');
+  });
+
+  it('returns error for empty commentary', () => {
+    const raw = JSON.stringify({
+      action: { goal: 'g', reason: 'r', steps: ['s'] },
+      commentary: '',
+      current_goal_update: null,
+      threat_level: 'low',
+    });
+    const result = parseResponse(raw);
+    expect(result.ok).toBe(false);
+  });
+
+  it('returns error for empty goal', () => {
+    const raw = JSON.stringify({
+      action: { goal: '', reason: 'r', steps: ['s'] },
+      commentary: 'c',
+      current_goal_update: null,
+      threat_level: 'low',
+    });
+    const result = parseResponse(raw);
+    expect(result.ok).toBe(false);
+  });
+
+  it('returns error for whitespace-only input', () => {
+    const result = parseResponse('   \n\t  ');
+    expect(result.ok).toBe(false);
+  });
+});
+
+describe('parseResponse - LLM edge cases', () => {
+  it('handles JSON with text before it', () => {
+    const raw = 'はい、以下がレスポンスです：\n\n' + JSON.stringify({
+      action: { goal: 'g', reason: 'r', steps: ['s'] },
+      commentary: 'c',
+      current_goal_update: null,
+      threat_level: 'low',
+    });
+    const result = parseResponse(raw);
+    expect(result.ok).toBe(false);
+  });
+
+  it('handles JSON inside code block with surrounding text', () => {
+    const json = JSON.stringify({
+      action: { goal: '木を伐る', reason: '資材不足', steps: ['木を探す', '伐採する'] },
+      commentary: 'まずは木だ。',
+      current_goal_update: null,
+      threat_level: 'low',
+    });
+    const raw = `分析しました。以下がレスポンスです：\n\n\`\`\`json\n${json}\n\`\`\`\n\nこれで良いでしょうか？`;
+    const result = parseResponse(raw);
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.value.action.goal).toBe('木を伐る');
+  });
+
+  it('handles missing current_goal_update field (LLM omits it)', () => {
+    const raw = JSON.stringify({
+      action: { goal: 'g', reason: 'r', steps: ['s'] },
+      commentary: 'c',
+      threat_level: 'low',
+    });
+    const result = parseResponse(raw);
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.value.currentGoalUpdate).toBeNull();
+  });
+
+  it('handles extra fields from LLM (should be ignored)', () => {
+    const raw = JSON.stringify({
+      action: { goal: 'g', reason: 'r', steps: ['s'] },
+      commentary: 'c',
+      current_goal_update: null,
+      threat_level: 'low',
+      confidence: 0.95,
+      internal_reasoning: 'extra field',
+    });
+    const result = parseResponse(raw);
+    expect(result.ok).toBe(true);
+  });
+
+  it('handles steps with numbers in them', () => {
+    const raw = JSON.stringify({
+      action: { goal: 'g', reason: 'r', steps: ['1. 木を伐る', '2. 拠点に戻る'] },
+      commentary: 'c',
+      current_goal_update: null,
+      threat_level: 'low',
+    });
+    const result = parseResponse(raw);
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.value.action.steps[0]).toBe('1. 木を伐る');
+  });
+
+  it('handles Japanese in all threat levels', () => {
+    for (const level of ['low', 'medium', 'high', 'critical'] as const) {
+      const raw = JSON.stringify({
+        action: { goal: 'g', reason: 'r', steps: ['s'] },
+        commentary: 'c',
+        current_goal_update: null,
+        threat_level: level,
+      });
+      const result = parseResponse(raw);
+      expect(result.ok).toBe(true);
+    }
+  });
+
+  it('rejects threat_level with wrong case', () => {
+    const raw = JSON.stringify({
+      action: { goal: 'g', reason: 'r', steps: ['s'] },
+      commentary: 'c',
+      current_goal_update: null,
+      threat_level: 'LOW',
+    });
+    const result = parseResponse(raw);
+    expect(result.ok).toBe(false);
+  });
+
+  it('handles very long commentary from LLM', () => {
+    const raw = JSON.stringify({
+      action: { goal: 'g', reason: 'r', steps: ['s'] },
+      commentary: 'あ'.repeat(5000),
+      current_goal_update: null,
+      threat_level: 'low',
+    });
+    const result = parseResponse(raw);
+    expect(result.ok).toBe(true);
+  });
+
+  it('handles many steps from LLM', () => {
+    const raw = JSON.stringify({
+      action: { goal: 'g', reason: 'r', steps: Array.from({ length: 20 }, (_, i) => `ステップ${i + 1}`) },
+      commentary: 'c',
+      current_goal_update: null,
+      threat_level: 'low',
+    });
+    const result = parseResponse(raw);
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.value.action.steps).toHaveLength(20);
+  });
+
+  it('handles emoji in commentary', () => {
+    const raw = JSON.stringify({
+      action: { goal: 'g', reason: 'r', steps: ['s'] },
+      commentary: '危ない！🔥クリーパーだ！💀',
+      current_goal_update: null,
+      threat_level: 'critical',
+    });
+    const result = parseResponse(raw);
+    expect(result.ok).toBe(true);
+  });
 });
