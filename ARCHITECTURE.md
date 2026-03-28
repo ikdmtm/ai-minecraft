@@ -668,11 +668,27 @@ describe('parseResponse', () => {
 });
 ```
 
-## 7. 実装順序（垂直スライス）
+## 7. 動作確認ルール
+
+各スライスの完了時に、ユニットテスト（`npx jest`）に加えて**デモスクリプト**で実際の動作を確認する。
+
+```bash
+# テスト実行
+npx jest
+
+# デモスクリプト実行（各スライスごとに用意）
+npx tsx src/demo-slice0.ts   # DB・設定の読み書き確認
+npx tsx src/demo-slice2.ts   # LLM プロンプト構築・レスポンスパース確認
+# （以降のスライスも同様）
+```
+
+デモスクリプトは本番と同じコードパスを通る。モックは使わない。
+
+## 8. 実装順序（垂直スライス）
 
 各スライスは独立してテスト・動作確認できる単位。前のスライスが完了してから次に進む。
 
-### Slice 0: プロジェクト基盤 [準備]
+### Slice 0: プロジェクト基盤 [準備] ✅
 - package.json, tsconfig.json, jest.config.ts のセットアップ
 - 依存パッケージのインストール
 - `src/types/` の全型定義
@@ -680,7 +696,7 @@ describe('parseResponse', () => {
 - `src/config/` (設定スキーマ + ローダー)
 - **テスト**: repository の CRUD、設定の読み書き
 
-### Slice 1: Bot 接続 + リアクティブ層 [コアゲーム]
+### Slice 1: Bot 接続 + リアクティブ層 [コアゲーム] ✅
 - `src/bot/client.ts` (Mineflayer 接続)
 - `src/bot/reactive.ts` (リアクティブ層ルール)
 - `src/bot/gameStateCollector.ts` (ゲーム状態収集)
