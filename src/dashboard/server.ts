@@ -13,7 +13,7 @@ export function startDashboard(port: number, deps: DashboardDeps): { close: () =
   app.use(createRoutes(deps));
 
   app.get('/', (_req, res) => {
-    res.sendFile(path.join(import.meta.dirname ?? __dirname, 'index.html'));
+    res.sendFile(path.join(__dirname, 'index.html'));
   });
 
   const server = app.listen(port);

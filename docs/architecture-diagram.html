@@ -1,0 +1,355 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AI Minecraft - インフラ構成 & 処理フロー</title>
+<link href="https://fonts.googleapis.com/css2?family=Zen+Kaku+Gothic+New:wght@400;700;900&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+<style>
+:root {
+  --bg: #0a0e17;
+  --surface: #131a2b;
+  --surface2: #1a2340;
+  --border: #2a3a5c;
+  --accent: #00d4aa;
+  --accent2: #7c5cfc;
+  --accent3: #ff6b6b;
+  --accent4: #ffd43b;
+  --text: #e8eaf0;
+  --text-dim: #8892a8;
+  --aws: #ff9900;
+}
+* { margin:0; padding:0; box-sizing:border-box; }
+body {
+  font-family: 'Zen Kaku Gothic New', sans-serif;
+  background: var(--bg);
+  color: var(--text);
+}
+.container { max-width: 1100px; margin: 0 auto; padding: 40px 24px; }
+h1 {
+  font-size: 2rem; font-weight: 900;
+  background: linear-gradient(135deg, var(--accent), var(--accent2));
+  -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+  margin-bottom: 8px;
+}
+.subtitle { color: var(--text-dim); font-size: 0.95rem; margin-bottom: 40px; }
+
+/* Tabs */
+.tabs { display: flex; gap: 4px; margin-bottom: 32px; border-bottom: 2px solid var(--border); }
+.tab {
+  padding: 12px 28px; background: transparent; border: none;
+  color: var(--text-dim); font-family: inherit; font-size: 1rem; font-weight: 700;
+  cursor: pointer; border-bottom: 3px solid transparent; margin-bottom: -2px; transition: all 0.2s;
+}
+.tab:hover { color: var(--text); }
+.tab.active { color: var(--accent); border-bottom-color: var(--accent); }
+.panel { display: none; }
+.panel.active { display: block; animation: fadeIn 0.3s; }
+@keyframes fadeIn { from { opacity:0; transform:translateY(8px); } to { opacity:1; transform:translateY(0); } }
+
+/* SVG common */
+svg { width: 100%; height: auto; }
+.label { font-family: 'Zen Kaku Gothic New', sans-serif; font-weight: 700; fill: var(--text); font-size: 13px; text-anchor: middle; dominant-baseline: central; }
+.label-sm { font-family: 'JetBrains Mono', monospace; fill: var(--text-dim); font-size: 10px; text-anchor: middle; dominant-baseline: central; }
+.group-label { font-family: 'Zen Kaku Gothic New', sans-serif; font-weight: 900; font-size: 12px; letter-spacing: 1px; }
+
+/* Flow */
+.flow-step { display: flex; align-items: flex-start; gap: 20px; }
+.flow-line { display: flex; flex-direction: column; align-items: center; width: 48px; flex-shrink: 0; }
+.flow-dot { width: 36px; height: 36px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-weight: 900; font-size: 14px; color: var(--bg); z-index: 2; }
+.flow-connector { width: 3px; height: 32px; background: var(--border); }
+.flow-card { flex: 1; background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 16px 20px; margin-bottom: 8px; transition: border-color 0.2s; }
+.flow-card:hover { border-color: var(--accent); }
+.flow-card h3 { font-size: 1rem; font-weight: 700; margin-bottom: 6px; }
+.flow-card p { font-size: 0.85rem; color: var(--text-dim); line-height: 1.7; }
+.flow-card code { font-family: 'JetBrains Mono', monospace; font-size: 0.8rem; background: var(--surface2); padding: 1px 6px; border-radius: 4px; }
+.tag { display: inline-block; font-family: 'JetBrains Mono', monospace; font-size: 0.72rem; padding: 2px 8px; border-radius: 4px; margin-right: 4px; margin-top: 6px; }
+.tag-auto { background: rgba(0,212,170,0.15); color: var(--accent); }
+.tag-manual { background: rgba(255,212,59,0.15); color: var(--accent4); }
+.tag-svc { background: rgba(124,92,252,0.15); color: var(--accent2); }
+
+/* Legend */
+.legend { display: flex; gap: 24px; flex-wrap: wrap; margin-top: 16px; padding: 12px 16px; background: var(--surface); border-radius: 10px; border: 1px solid var(--border); }
+.legend-item { display: flex; align-items: center; gap: 8px; font-size: 0.8rem; color: var(--text-dim); }
+.legend-line { width: 28px; height: 3px; border-radius: 2px; }
+
+/* Cost */
+.cost-table { width: 100%; border-collapse: collapse; margin-top: 20px; }
+.cost-table th, .cost-table td { padding: 10px 16px; text-align: left; border-bottom: 1px solid var(--border); font-size: 0.9rem; }
+.cost-table th { color: var(--text-dim); font-size: 0.8rem; text-transform: uppercase; letter-spacing: 1px; }
+.cost-table .total td { font-weight: 900; color: var(--accent); border-top: 2px solid var(--accent); }
+.info-box { margin-top:24px; padding:16px; background:var(--surface); border-left:3px solid var(--accent); border-radius:0 10px 10px 0; }
+.info-box p { font-size:0.9rem; line-height:1.7; }
+</style>
+</head>
+<body>
+<div class="container">
+  <h1>AI Minecraft — 星守レイ</h1>
+  <p class="subtitle">インフラ構成図 & 処理フロー — AWS g4dn.xlarge + Terraform IaC</p>
+
+  <div class="tabs">
+    <button class="tab active" data-tab="infra">インフラ構成</button>
+    <button class="tab" data-tab="flow">デプロイフロー</button>
+    <button class="tab" data-tab="inside">EC2 内部構成</button>
+    <button class="tab" data-tab="cost">コスト</button>
+  </div>
+
+  <!-- ===== 1. INFRA ===== -->
+  <div id="infra" class="panel active">
+    <svg viewBox="0 0 920 540">
+      <defs>
+        <marker id="a1" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><polygon points="0 0,8 3,0 6" fill="var(--accent)"/></marker>
+        <marker id="a2" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><polygon points="0 0,8 3,0 6" fill="var(--accent2)"/></marker>
+      </defs>
+
+      <!-- YOUR PC -->
+      <rect x="20" y="20" width="200" height="160" rx="16" fill="#0f1520" stroke="var(--border)" stroke-width="1.5"/>
+      <text x="36" y="44" class="group-label" fill="var(--text-dim)">YOUR PC (WSL)</text>
+      <rect x="40" y="60" width="160" height="36" rx="8" fill="var(--surface2)" stroke="var(--border)" stroke-width="1.5"/>
+      <text x="120" y="78" class="label" style="font-size:12px">Terraform CLI</text>
+      <rect x="40" y="106" width="160" height="36" rx="8" fill="var(--surface2)" stroke="var(--border)" stroke-width="1.5"/>
+      <text x="120" y="124" class="label" style="font-size:12px">SSH / Dashboard</text>
+      <rect x="40" y="152" width="160" height="22" rx="6" fill="transparent" stroke="var(--accent4)" stroke-width="1" stroke-dasharray="4 2"/>
+      <text x="120" y="163" class="label-sm" style="fill:var(--accent4)">YouTube OAuth</text>
+
+      <!-- AWS Cloud -->
+      <rect x="260" y="10" width="640" height="520" rx="18" fill="var(--surface)" stroke="var(--aws)" stroke-width="2"/>
+      <text x="280" y="38" class="group-label" fill="var(--aws)">AWS CLOUD — ap-northeast-1 (Tokyo)</text>
+
+      <!-- Network row -->
+      <rect x="290" y="60" width="160" height="54" rx="10" fill="var(--surface2)" stroke="var(--accent2)" stroke-width="2"/>
+      <text x="370" y="82" class="label" style="font-size:12px">Security Group</text>
+      <text x="370" y="100" class="label-sm">SSH: 自IPのみ</text>
+      <rect x="470" y="60" width="160" height="54" rx="10" fill="var(--surface2)" stroke="var(--accent2)" stroke-width="2"/>
+      <text x="550" y="82" class="label" style="font-size:12px">Elastic IP</text>
+      <text x="550" y="100" class="label-sm">固定IPアドレス</text>
+      <rect x="650" y="60" width="120" height="54" rx="10" fill="var(--surface2)" stroke="var(--accent2)" stroke-width="2"/>
+      <text x="710" y="82" class="label" style="font-size:12px">Key Pair</text>
+      <text x="710" y="100" class="label-sm">ed25519</text>
+
+      <!-- EC2 -->
+      <rect x="290" y="135" width="440" height="100" rx="14" fill="var(--surface2)" stroke="var(--accent)" stroke-width="3"/>
+      <text x="510" y="168" class="label" style="font-size:18px;fill:var(--accent)">EC2 g4dn.xlarge</text>
+      <text x="510" y="192" class="label-sm">4 vCPU · 16GB RAM · NVIDIA T4 GPU · Ubuntu 22.04</text>
+      <text x="510" y="210" class="label-sm">100GB gp3 EBS (暗号化) · 125GB NVMe ストア</text>
+
+      <!-- IAM -->
+      <rect x="750" y="135" width="135" height="100" rx="12" fill="var(--surface2)" stroke="var(--accent2)" stroke-width="1.5"/>
+      <text x="818" y="162" class="group-label" fill="var(--accent2)" text-anchor="middle" style="font-size:11px">IAM</text>
+      <text x="818" y="182" class="label" style="font-size:11px">Instance Profile</text>
+      <text x="818" y="200" class="label-sm">Role: EC2→S3</text>
+      <text x="818" y="216" class="label-sm">Put/Get/Delete</text>
+
+      <!-- S3 -->
+      <rect x="750" y="260" width="135" height="80" rx="12" fill="var(--surface2)" stroke="var(--accent4)" stroke-width="2"/>
+      <text x="818" y="287" class="label" style="font-size:13px;fill:var(--accent4)">S3 Bucket</text>
+      <text x="818" y="305" class="label-sm">録画保存</text>
+      <text x="818" y="320" class="label-sm">30日自動削除</text>
+
+      <!-- cloud-init area -->
+      <rect x="290" y="260" width="440" height="250" rx="14" fill="rgba(0,212,170,0.03)" stroke="var(--accent)" stroke-width="1.5" stroke-dasharray="8 4"/>
+      <text x="310" y="286" class="group-label" fill="var(--accent)">CLOUD-INIT 自動プロビジョニング</text>
+
+      <!-- Row 1: graphics/media -->
+      <rect x="310" y="300" width="100" height="42" rx="7" fill="#12201a" stroke="#2d6b4f" stroke-width="1.5"/>
+      <text x="360" y="316" class="label" style="font-size:11px;fill:#4ade80">NVIDIA</text>
+      <text x="360" y="332" class="label-sm">535+NVENC</text>
+      <rect x="420" y="300" width="100" height="42" rx="7" fill="#12201a" stroke="#2d6b4f" stroke-width="1.5"/>
+      <text x="470" y="316" class="label" style="font-size:11px;fill:#4ade80">Xvfb</text>
+      <text x="470" y="332" class="label-sm">:99 1280x720</text>
+      <rect x="530" y="300" width="100" height="42" rx="7" fill="#12201a" stroke="#2d6b4f" stroke-width="1.5"/>
+      <text x="580" y="316" class="label" style="font-size:11px;fill:#4ade80">FFmpeg</text>
+      <text x="580" y="332" class="label-sm">H.264配信</text>
+      <rect x="640" y="300" width="80" height="42" rx="7" fill="#12201a" stroke="#2d6b4f" stroke-width="1.5"/>
+      <text x="680" y="316" class="label" style="font-size:11px;fill:#4ade80">Pulse</text>
+      <text x="680" y="332" class="label-sm">Audio</text>
+
+      <!-- Row 2: apps -->
+      <rect x="310" y="352" width="100" height="42" rx="7" fill="#1a1218" stroke="#6b2d4f" stroke-width="1.5"/>
+      <text x="360" y="368" class="label" style="font-size:11px;fill:#f472b6">Docker</text>
+      <text x="360" y="384" class="label-sm">VOICEVOX</text>
+      <rect x="420" y="352" width="100" height="42" rx="7" fill="#1a1218" stroke="#6b2d4f" stroke-width="1.5"/>
+      <text x="470" y="368" class="label" style="font-size:11px;fill:#f472b6">Java 21</text>
+      <text x="470" y="384" class="label-sm">MC Server</text>
+      <rect x="530" y="352" width="100" height="42" rx="7" fill="#1a1218" stroke="#6b2d4f" stroke-width="1.5"/>
+      <text x="580" y="368" class="label" style="font-size:11px;fill:#f472b6">Node 20</text>
+      <text x="580" y="384" class="label-sm">Orchestrator</text>
+      <rect x="640" y="352" width="80" height="42" rx="7" fill="#1a1218" stroke="#6b2d4f" stroke-width="1.5"/>
+      <text x="680" y="368" class="label" style="font-size:11px;fill:#f472b6">systemd</text>
+      <text x="680" y="384" class="label-sm">自動復旧</text>
+
+      <!-- Row 3: build -->
+      <rect x="310" y="406" width="410" height="36" rx="7" fill="var(--surface2)" stroke="var(--accent2)" stroke-width="1.5"/>
+      <text x="515" y="428" class="label" style="font-size:11px;fill:var(--accent2)">git clone → npm install → npm run build → .env 自動生成</text>
+      <!-- Row 4 -->
+      <rect x="310" y="454" width="410" height="36" rx="7" fill="var(--surface2)" stroke="var(--text-dim)" stroke-width="1"/>
+      <text x="515" y="476" class="label-sm">systemd enable: xvfb / minecraft-server / voicevox / orchestrator</text>
+
+      <!-- Arrows -->
+      <line x1="220" y1="78" x2="285" y2="85" stroke="var(--accent2)" stroke-width="2" stroke-dasharray="6 3" marker-end="url(#a2)"/>
+      <text x="245" y="72" class="label-sm" style="fill:var(--accent2)">apply</text>
+      <line x1="220" y1="124" x2="285" y2="175" stroke="var(--accent2)" stroke-width="2" stroke-dasharray="6 3" marker-end="url(#a2)"/>
+      <text x="240" y="148" class="label-sm" style="fill:var(--accent2)">SSH</text>
+      <line x1="730" y1="200" x2="745" y2="290" stroke="var(--accent)" stroke-width="2" marker-end="url(#a1)"/>
+      <text x="748" y="248" class="label-sm" style="fill:var(--accent);text-anchor:start">録画</text>
+    </svg>
+    <div class="legend">
+      <div class="legend-item"><div class="legend-line" style="background:var(--accent)"></div>データ</div>
+      <div class="legend-item"><div class="legend-line" style="background:var(--accent2)"></div>制御/管理</div>
+      <div class="legend-item"><div class="legend-line" style="background:#4ade80"></div>グラフィクス系</div>
+      <div class="legend-item"><div class="legend-line" style="background:#f472b6"></div>アプリケーション系</div>
+    </div>
+  </div>
+
+  <!-- ===== 2. DEPLOY FLOW ===== -->
+  <div id="flow" class="panel">
+    <div class="flow-step"><div class="flow-line"><div class="flow-dot" style="background:var(--accent2)">1</div><div class="flow-connector"></div></div>
+      <div class="flow-card"><h3>terraform apply</h3><p>ローカル PC から実行。AWS 上に EC2 / SG / S3 / IAM を一括作成。<br>EC2 起動と同時に <code>user-data.sh</code> が自動実行される。</p><span class="tag tag-auto">自動</span><span class="tag tag-svc">Terraform</span></div></div>
+
+    <div class="flow-step"><div class="flow-line"><div class="flow-dot" style="background:var(--accent2)">2</div><div class="flow-connector"></div></div>
+      <div class="flow-card"><h3>cloud-init Phase 1: NVIDIA ドライバ</h3><p>基盤パッケージ + NVIDIA Driver 535 インストール → <strong>自動リブート</strong><br>GPU をOSが認識するための再起動。</p><span class="tag tag-auto">自動</span><span class="tag tag-svc">cloud-init</span></div></div>
+
+    <div class="flow-step"><div class="flow-line"><div class="flow-dot" style="background:var(--accent2)">3</div><div class="flow-connector"></div></div>
+      <div class="flow-card"><h3>cloud-init Phase 2: 全ソフトウェア (~15分)</h3><p>Xvfb / FFmpeg / Docker+VOICEVOX / Java 21 / Node.js 20 / PulseAudio<br>Minecraft Server ダウンロード + 設定<br><code>git clone</code> → <code>npm install</code> → <code>npm run build</code> → systemd 配置</p><span class="tag tag-auto">自動</span><span class="tag tag-svc">~15分</span></div></div>
+
+    <div class="flow-step"><div class="flow-line"><div class="flow-dot" style="background:var(--accent4)">4</div><div class="flow-connector"></div></div>
+      <div class="flow-card"><h3>SSH で .env 設定</h3><p>YouTube の認証情報 (Client ID / Secret / Refresh Token / Channel ID) を <code>.env</code> に記入。<br>Anthropic API Key と S3 は Terraform が自動設定済み。</p><span class="tag tag-manual">手動</span></div></div>
+
+    <div class="flow-step"><div class="flow-line"><div class="flow-dot" style="background:var(--accent4)">5</div><div class="flow-connector"></div></div>
+      <div class="flow-card"><h3>YouTube OAuth トークン取得</h3><p>ローカル PC で <code>npx tsx scripts/get-youtube-token.ts</code> 実行。<br>ブラウザで Google 認証 → refresh_token 取得 → <code>.env</code> に追記。</p><span class="tag tag-manual">手動</span><span class="tag tag-svc">ローカルPC</span></div></div>
+
+    <div class="flow-step"><div class="flow-line"><div class="flow-dot" style="background:var(--accent)">6</div><div class="flow-connector"></div></div>
+      <div class="flow-card"><h3>MANUAL モード: 配信テスト</h3><p><code>systemctl start orchestrator</code> → ダッシュボード (SSHトンネル :8080) から「配信開始」。<br>死亡したら配信終了 → 停止（次は始めない）。</p><span class="tag tag-manual">手動開始</span><span class="tag tag-auto">死亡で停止</span></div></div>
+
+    <div class="flow-step"><div class="flow-line"><div class="flow-dot" style="background:var(--accent)">7</div></div>
+      <div class="flow-card"><h3>AUTO モード: 24時間自動配信</h3><p><code>OPERATION_MODE=AUTO</code> に切替 → orchestrator 再起動。<br>死亡 → 教訓生成 → 60秒クールダウン → 新配信自動開始。<br>1日最大20回。上限で翌日まで休止。</p><span class="tag tag-auto">全自動</span><span class="tag tag-svc">24/7</span></div></div>
+  </div>
+
+  <!-- ===== 3. INSIDE EC2 ===== -->
+  <div id="inside" class="panel">
+    <svg viewBox="0 0 920 520">
+      <defs>
+        <marker id="b1" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><polygon points="0 0,8 3,0 6" fill="var(--accent)"/></marker>
+        <marker id="b2" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><polygon points="0 0,8 3,0 6" fill="var(--accent2)"/></marker>
+        <marker id="b3" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><polygon points="0 0,8 3,0 6" fill="var(--accent3)"/></marker>
+        <marker id="b4" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><polygon points="0 0,8 3,0 6" fill="var(--accent4)"/></marker>
+        <marker id="b5" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><polygon points="0 0,8 3,0 6" fill="#4ade80"/></marker>
+        <marker id="b6" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><polygon points="0 0,8 3,0 6" fill="#38bdf8"/></marker>
+      </defs>
+
+      <text x="460" y="28" class="label" style="font-size:16px;fill:var(--accent)">EC2 内部 — プロセス構成と通信</text>
+
+      <!-- Orchestrator -->
+      <rect x="310" y="55" width="300" height="72" rx="14" fill="var(--surface2)" stroke="var(--accent)" stroke-width="3"/>
+      <text x="460" y="82" class="label" style="font-size:17px;fill:var(--accent)">Orchestrator</text>
+      <text x="460" y="106" class="label-sm">Node.js · ステートマシン · AI思考ループ</text>
+
+      <!-- Claude -->
+      <rect x="700" y="45" width="190" height="56" rx="10" fill="#1a1530" stroke="var(--accent2)" stroke-width="2"/>
+      <text x="795" y="68" class="label" style="font-size:13px;fill:var(--accent2)">Claude Sonnet API</text>
+      <text x="795" y="86" class="label-sm">思考・行動決定・教訓</text>
+      <line x1="610" y1="82" x2="695" y2="76" stroke="var(--accent2)" stroke-width="2" marker-end="url(#b2)"/>
+      <text x="648" y="70" class="label-sm" style="fill:var(--accent2)">JSON</text>
+
+      <!-- Mineflayer -->
+      <rect x="40" y="180" width="200" height="60" rx="10" fill="var(--surface2)" stroke="#4ade80" stroke-width="2"/>
+      <text x="140" y="205" class="label" style="font-size:13px;fill:#4ade80">Mineflayer Bot</text>
+      <text x="140" y="225" class="label-sm">ゲーム操作 · 状態収集</text>
+      <line x1="350" y1="127" x2="200" y2="175" stroke="#4ade80" stroke-width="2" marker-end="url(#b5)"/>
+      <text x="255" y="142" class="label-sm" style="fill:#4ade80">操作指示</text>
+
+      <!-- MC Server -->
+      <rect x="40" y="285" width="200" height="60" rx="10" fill="var(--surface2)" stroke="var(--accent3)" stroke-width="2"/>
+      <text x="140" y="310" class="label" style="font-size:13px;fill:var(--accent3)">Minecraft Server</text>
+      <text x="140" y="330" class="label-sm">Java · Hardcore · :25565</text>
+      <line x1="140" y1="240" x2="140" y2="280" stroke="#4ade80" stroke-width="2" marker-end="url(#b5)"/>
+      <text x="162" y="264" class="label-sm" style="fill:#4ade80">TCP</text>
+
+      <!-- VOICEVOX -->
+      <rect x="310" y="180" width="195" height="60" rx="10" fill="var(--surface2)" stroke="var(--accent4)" stroke-width="2"/>
+      <text x="408" y="205" class="label" style="font-size:13px;fill:var(--accent4)">VOICEVOX TTS</text>
+      <text x="408" y="225" class="label-sm">Docker · CPU · :50021</text>
+      <line x1="420" y1="127" x2="410" y2="175" stroke="var(--accent4)" stroke-width="2" marker-end="url(#b4)"/>
+      <text x="435" y="152" class="label-sm" style="fill:var(--accent4)">テキスト</text>
+
+      <!-- PulseAudio -->
+      <rect x="310" y="285" width="195" height="65" rx="10" fill="var(--surface2)" stroke="#a78bfa" stroke-width="2"/>
+      <text x="408" y="308" class="label" style="font-size:13px;fill:#a78bfa">PulseAudio</text>
+      <text x="408" y="326" class="label-sm">voicevox_sink</text>
+      <text x="408" y="340" class="label-sm">game_sink → combined_sink</text>
+      <line x1="408" y1="240" x2="408" y2="280" stroke="var(--accent4)" stroke-width="2" marker-end="url(#b4)"/>
+      <text x="428" y="264" class="label-sm" style="fill:var(--accent4)">WAV</text>
+      <line x1="240" y1="315" x2="305" y2="315" stroke="var(--accent3)" stroke-width="2" marker-end="url(#b3)"/>
+      <text x="270" y="306" class="label-sm" style="fill:var(--accent3)">ゲーム音</text>
+
+      <!-- Xvfb -->
+      <rect x="570" y="180" width="180" height="60" rx="10" fill="var(--surface2)" stroke="#38bdf8" stroke-width="2"/>
+      <text x="660" y="205" class="label" style="font-size:13px;fill:#38bdf8">Xvfb :99</text>
+      <text x="660" y="225" class="label-sm">仮想ディスプレイ 1280x720</text>
+
+      <!-- FFmpeg -->
+      <rect x="550" y="285" width="230" height="76" rx="12" fill="var(--surface2)" stroke="var(--accent)" stroke-width="2.5"/>
+      <text x="665" y="310" class="label" style="font-size:15px;fill:var(--accent)">FFmpeg</text>
+      <text x="665" y="328" class="label-sm">x11grab + NVENC H.264</text>
+      <text x="665" y="348" class="label-sm">アバター + 字幕オーバーレイ</text>
+      <line x1="660" y1="240" x2="660" y2="280" stroke="#38bdf8" stroke-width="2" marker-end="url(#b6)"/>
+      <text x="682" y="264" class="label-sm" style="fill:#38bdf8">映像</text>
+      <line x1="505" y1="318" x2="545" y2="318" stroke="#a78bfa" stroke-width="2" marker-end="url(#b1)"/>
+      <text x="520" y="308" class="label-sm" style="fill:#a78bfa">音声</text>
+
+      <!-- YouTube -->
+      <rect x="580" y="420" width="210" height="58" rx="12" fill="#1a1018" stroke="var(--accent3)" stroke-width="2.5"/>
+      <text x="685" y="444" class="label" style="font-size:16px;fill:var(--accent3)">YouTube Live</text>
+      <text x="685" y="464" class="label-sm">RTMP ストリーミング</text>
+      <line x1="665" y1="361" x2="665" y2="415" stroke="var(--accent3)" stroke-width="2.5" marker-end="url(#b3)"/>
+      <text x="688" y="392" class="label-sm" style="fill:var(--accent3)">RTMP</text>
+
+      <!-- Dashboard -->
+      <rect x="40" y="420" width="200" height="58" rx="10" fill="var(--surface2)" stroke="var(--accent2)" stroke-width="2"/>
+      <text x="140" y="444" class="label" style="font-size:13px;fill:var(--accent2)">Dashboard :8080</text>
+      <text x="140" y="464" class="label-sm">Express.js · 監視・制御</text>
+      <line x1="345" y1="127" x2="180" y2="415" stroke="var(--accent2)" stroke-width="1.5" stroke-dasharray="6 3" marker-end="url(#b2)"/>
+
+      <!-- SQLite -->
+      <rect x="310" y="420" width="200" height="58" rx="10" fill="var(--surface2)" stroke="var(--text-dim)" stroke-width="1.5"/>
+      <text x="410" y="444" class="label" style="font-size:13px">SQLite DB</text>
+      <text x="410" y="464" class="label-sm">状態 · 死亡履歴 · 設定</text>
+      <line x1="460" y1="127" x2="420" y2="415" stroke="var(--text-dim)" stroke-width="1.5" stroke-dasharray="4 3" marker-end="url(#b1)"/>
+    </svg>
+  </div>
+
+  <!-- ===== 4. COST ===== -->
+  <div id="cost" class="panel">
+    <h2 style="font-size:1.2rem;margin-bottom:8px">月額コスト見積もり</h2>
+    <p style="color:var(--text-dim);font-size:0.9rem;margin-bottom:16px">東京リージョン (ap-northeast-1) · オンデマンド料金</p>
+    <table class="cost-table">
+      <tr><th>リソース</th><th>単価</th><th>24h/日</th><th>12h/日</th></tr>
+      <tr><td>EC2 g4dn.xlarge</td><td>~$0.71/h</td><td>$511</td><td>$256</td></tr>
+      <tr><td>EBS 100GB gp3</td><td>$0.08/GB/月</td><td>$8</td><td>$8</td></tr>
+      <tr><td>Elastic IP</td><td>$0.005/h</td><td>$3.6</td><td>$3.6</td></tr>
+      <tr><td>S3 (~50GB)</td><td>$0.025/GB/月</td><td>~$1.3</td><td>~$0.6</td></tr>
+      <tr><td>データ転送</td><td>~$0.114/GB</td><td>~$15</td><td>~$8</td></tr>
+      <tr class="total"><td>合計</td><td></td><td>~$539</td><td>~$276</td></tr>
+    </table>
+    <div class="info-box">
+      <p><strong style="color:var(--accent)">コスト削減のポイント:</strong><br>
+        • 最初は <strong>MANUAL モード</strong> でテスト（数時間分の料金のみ）<br>
+        • テスト後はインスタンスを <strong>停止</strong> (destroy 不要)<br>
+        • 本番運用は時間帯限定から開始 → 収益が出たら 24h 拡大<br>
+        • Reserved Instance (1年) で最大 40% 割引</p>
+    </div>
+  </div>
+</div>
+
+<script>
+document.querySelectorAll('.tab').forEach(tab => {
+  tab.addEventListener('click', () => {
+    document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+    document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
+    tab.classList.add('active');
+    document.getElementById(tab.dataset.tab).classList.add('active');
+  });
+});
+</script>
+</body>
+</html>

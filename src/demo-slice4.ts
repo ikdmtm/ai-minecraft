@@ -81,13 +81,17 @@ sep('FFmpeg コマンド引数生成');
 
 const ffmpegConfig: FFmpegConfig = {
   display: ':99',
-  resolution: '1920x1080',
-  fps: 30,
-  videoBitrate: '4500k',
+  resolution: '1280x720',
+  fps: 24,
+  videoBitrate: '3000k',
   audioBitrate: '128k',
   rtmpUrl: 'rtmp://a.rtmp.youtube.com/live2/xxxx-xxxx-xxxx',
   pulseAudioSource: 'combined_sink.monitor',
   avatarBasePath: 'assets/avatar',
+  avatarPipePath: '/tmp/ai-minecraft-avatar.pipe',
+  avatarWidth: 300,
+  avatarHeight: 400,
+  avatarFps: 5,
 };
 
 const args = buildFFmpegArgs(ffmpegConfig);
@@ -127,7 +131,7 @@ manager.start();
 console.log(`  running: ${manager.isRunning()} | pid: ${manager.getPid()}`);
 
 manager.updateOverlayText('ゾンビの気配がする');
-manager.updateAvatarImage('assets/avatar/anxious_open.png');
+manager.updateAvatarImage('assets/avatar/sad_open.png');
 console.log(`  overlay: ${manager.getCurrentOverlay()}`);
 console.log(`  avatar:  ${manager.getCurrentAvatar()}`);
 

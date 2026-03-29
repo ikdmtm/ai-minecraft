@@ -106,6 +106,8 @@ const deps: CycleDeps = {
   executeSteps: async (steps) => console.log('   [実行]', steps.join(' → ')),
   speakCommentary: async (text) => console.log('   [発話]', text),
   updateOverlay: (update) => console.log('   [UI更新]', JSON.stringify(update)),
+  updateAvatar: (threat, speaking) => console.log(`   [アバター] 脅威=${threat} 発話=${speaking}`),
+  triggerAvatarSpecial: (expr) => console.log(`   [アバター特殊] ${expr}`),
   logAction: (entry) => console.log('   [ログ]', entry.type, entry.content.substring(0, 80)),
 };
 

@@ -22,14 +22,14 @@ describe('AvatarState', () => {
       expect(avatar.getExpression()).toBe('serious');
     });
 
-    it('returns anxious for high threat', () => {
+    it('returns sad for high threat', () => {
       avatar.update({ threatLevel: 'high', isSpeaking: false });
-      expect(avatar.getExpression()).toBe('anxious');
+      expect(avatar.getExpression()).toBe('sad');
     });
 
-    it('returns scared for critical threat', () => {
+    it('returns surprised for critical threat', () => {
       avatar.update({ threatLevel: 'critical', isSpeaking: false });
-      expect(avatar.getExpression()).toBe('scared');
+      expect(avatar.getExpression()).toBe('surprised');
     });
   });
 
@@ -97,10 +97,10 @@ describe('AvatarState', () => {
       expect(avatar.getImagePath('assets/avatar')).toBe('assets/avatar/normal_closed.png');
     });
 
-    it('returns correct path for scared + mouth open', () => {
+    it('returns correct path for surprised + mouth open', () => {
       avatar.update({ threatLevel: 'critical', isSpeaking: true });
       avatar.tick();
-      expect(avatar.getImagePath('assets/avatar')).toBe('assets/avatar/scared_open.png');
+      expect(avatar.getImagePath('assets/avatar')).toBe('assets/avatar/surprised_open.png');
     });
 
     it('returns correct path for happy + mouth closed', () => {

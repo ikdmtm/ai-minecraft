@@ -1,0 +1,15 @@
+[Unit]
+Description=Avatar Frame Writer (PNG to RGBA pipe)
+Before=ffmpeg-stream.service
+
+[Service]
+Type=simple
+User=ubuntu
+ExecStart=/home/ubuntu/ai-minecraft/scripts/avatar-writer.sh
+Restart=always
+RestartSec=3
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

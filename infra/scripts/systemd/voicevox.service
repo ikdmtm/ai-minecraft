@@ -1,0 +1,17 @@
+[Unit]
+Description=VOICEVOX Engine (Docker)
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=simple
+ExecStartPre=-/usr/bin/docker stop voicevox
+ExecStartPre=-/usr/bin/docker rm voicevox
+ExecStart=/usr/bin/docker run --rm --name voicevox -p 50021:50021 voicevox/voicevox_engine:cpu-latest
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

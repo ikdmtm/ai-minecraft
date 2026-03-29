@@ -1,0 +1,12 @@
+# コピーして terraform.tfvars を作成:
+#   cp terraform.tfvars.example terraform.tfvars
+# terraform.tfvars は .gitignore 対象
+
+region              = "ap-northeast-1"
+instance_type       = "c5.xlarge"             # CPU 描画構成。GPU 承認後は g4dn.xlarge に変更可
+ssh_public_key_path = "~/.ssh/id_ed25519.pub"
+my_ip               = "xxx.xxx.xxx.xxx/32"   # curl -s ifconfig.me で取得
+github_repo         = "https://github.com/ikdmtm/ai-minecraft.git"
+anthropic_api_key   = "sk-ant-api03-xxxxx"
+minecraft_version   = "1.21.4"
+root_volume_size    = 30

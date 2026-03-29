@@ -3,8 +3,8 @@ import type { ThreatLevel } from '../types/llm.js';
 export type AvatarExpression =
   | 'normal'
   | 'serious'
-  | 'anxious'
-  | 'scared'
+  | 'sad'
+  | 'surprised'
   | 'happy'
   | 'thinking';
 
@@ -16,8 +16,8 @@ interface AvatarInput {
 const THREAT_TO_EXPRESSION: Record<ThreatLevel, AvatarExpression> = {
   low: 'normal',
   medium: 'serious',
-  high: 'anxious',
-  critical: 'scared',
+  high: 'sad',
+  critical: 'surprised',
 };
 
 /**

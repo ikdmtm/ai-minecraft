@@ -40,6 +40,8 @@ function createMockDeps(overrides: Partial<CycleDeps> = {}): CycleDeps {
     executeSteps: jest.fn().mockResolvedValue(undefined),
     speakCommentary: jest.fn().mockResolvedValue(undefined),
     updateOverlay: jest.fn(),
+    updateAvatar: jest.fn(),
+    triggerAvatarSpecial: jest.fn(),
     logAction: jest.fn(),
     ...overrides,
   };
@@ -119,6 +121,36 @@ describe('CycleRunner', () => {
     expect(deps.updateOverlay).toHaveBeenCalledWith(expect.objectContaining({
       currentGoal: '鉄装備を完成させる',
     }));
+  });
+
+  it('updates avatar with threat level and speaking state', async () => {
+    const deps = createMockDeps();
+    const runner = new CycleRunner(deps);
+    await runner.runOneCycle();
+
+    expect(deps.updateAvatar).toHaveBeenCalledWith('low', true);
+  });
+
+  it('triggers thinking expression before LLM call', async () => {
+    const deps = createMockDeps();
+    const runner = new CycleRunner(deps);
+    await runner.runOneCycle();
+
+    expect(deps.triggerAvatarSpecial).toHaveBeenCalledWith('thinking');
+    const thinkingCallOrder = (deps.triggerAvatarSpecial as jest.Mock).mock.invocationCallOrder[0];
+    const llmCallOrder = (deps.callLLM as jest.Mock).mock.invocationCallOrder[0];
+    expect(thinkingCallOrder).toBeLessThan(llmCallOrder);
+  });
+
+  it('passes isSpeaking=false when commentary is empty', async () => {
+    const emptyComm = { ...sampleLLMOutput(), commentary: '' };
+    const deps = createMockDeps({
+      callLLM: jest.fn().mockResolvedValue({ ok: true, value: emptyComm }),
+    });
+    const runner = new CycleRunner(deps);
+    await runner.runOneCycle();
+
+    expect(deps.updateAvatar).toHaveBeenCalledWith('low', false);
   });
 
   // ── 新規: speakCommentary 障害耐性 ──

@@ -9,6 +9,10 @@ export interface FFmpegConfig {
   rtmpUrl: string;
   pulseAudioSource: string;
   avatarBasePath: string;
+  avatarPipePath: string;
+  avatarWidth: number;
+  avatarHeight: number;
+  avatarFps: number;
 }
 
 export interface FFmpegProcess {
@@ -30,40 +34,46 @@ interface FFmpegManagerOptions {
  * FFmpeg のコマンドライン引数を構築する。
  * x11grab → Minecraft 画面キャプチャ
  * pulse → PulseAudio combined_sink
- * h264_nvenc → NVIDIA GPU エンコード
+ * libx264 ultrafast → CPU エンコード（負荷最小）
  * overlay → アバター合成用の filter_complex
  */
 export function buildFFmpegArgs(config: FFmpegConfig): string[] {
-  const [width, height] = config.resolution.split('x');
-
   return [
-    // Video input (X11 screen capture)
+    // Input 0: Video (X11 screen capture)
     '-f', 'x11grab',
     '-framerate', String(config.fps),
     '-video_size', config.resolution,
     '-i', config.display,
 
-    // Audio input (PulseAudio combined sink)
+    // Input 1: Audio (PulseAudio combined sink)
     '-f', 'pulse',
     '-i', config.pulseAudioSource,
 
-    // Avatar overlay input (will be updated dynamically via named pipe)
-    '-i', `${config.avatarBasePath}/normal_closed.png`,
+    // Input 2: Avatar (raw RGBA from named pipe, written by avatar-writer.sh)
+    '-f', 'rawvideo',
+    '-pixel_format', 'rgba',
+    '-video_size', `${config.avatarWidth}x${config.avatarHeight}`,
+    '-framerate', String(config.avatarFps),
+    '-i', config.avatarPipePath,
 
-    // Filter: overlay avatar at bottom-right
+    // Filter: overlay avatar at bottom-right with transparency
     '-filter_complex',
-    `[0:v][2:v]overlay=W-w-20:H-h-20[out]`,
+    '[0:v][2:v]overlay=W-w-20:H-h-20:format=auto[out]',
 
     '-map', '[out]',
     '-map', '1:a',
 
-    // Video encoding (NVIDIA GPU)
-    '-c:v', 'h264_nvenc',
-    '-preset', 'llhq',
+    // Video encoding (CPU: libx264, ultrafast for minimal CPU usage)
+    '-c:v', 'libx264',
+    '-preset', 'ultrafast',
+    '-tune', 'zerolatency',
     '-b:v', config.videoBitrate,
     '-maxrate', config.videoBitrate,
     '-bufsize', `${parseInt(config.videoBitrate) * 2}k`,
     '-g', String(config.fps * 2),
+
+    // Output frame rate cap
+    '-r', String(config.fps),
 
     // Audio encoding
     '-c:a', 'aac',

@@ -25,6 +25,8 @@ export interface CycleDeps {
   executeSteps: (steps: string[]) => Promise<void>;
   speakCommentary: (text: string) => Promise<void>;
   updateOverlay: (update: OverlayUpdate) => void;
+  updateAvatar: (threatLevel: ThreatLevel, isSpeaking: boolean) => void;
+  triggerAvatarSpecial: (expression: string, durationMs?: number) => void;
   logAction: (entry: ActionLogEntry) => void;
 }
 
@@ -66,6 +68,8 @@ export class CycleRunner {
   private async executeOneCycle(): Promise<Result<LLMOutput>> {
     const gameState = this.deps.getGameState();
 
+    this.deps.triggerAvatarSpecial('thinking');
+
     const llmResult = await this.deps.callLLM(gameState);
     if (!llmResult.ok) {
       this.deps.logAction({
@@ -104,7 +108,8 @@ export class CycleRunner {
       commentary: output.commentary,
     });
 
-    // speakCommentary の失敗は executeSteps に影響させない
+    this.deps.updateAvatar(output.threatLevel, !!output.commentary);
+
     const results = await Promise.allSettled([
       this.deps.executeSteps(output.action.steps),
       output.commentary

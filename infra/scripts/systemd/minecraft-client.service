@@ -1,0 +1,24 @@
+[Unit]
+Description=Minecraft Client (Headless, Mesa LLVMpipe Software Rendering)
+After=xvfb.service minecraft-server.service
+Requires=xvfb.service
+
+[Service]
+Type=simple
+User=ubuntu
+Environment=DISPLAY=:99
+Environment=LIBGL_ALWAYS_SOFTWARE=1
+Environment=GALLIUM_DRIVER=llvmpipe
+Environment=LP_NUM_THREADS=2
+Environment=MESA_GL_VERSION_OVERRIDE=4.5
+Environment=MESA_GLSL_VERSION_OVERRIDE=450
+WorkingDirectory=/home/ubuntu/minecraft-client
+ExecStart=/home/ubuntu/minecraft-client/launch.sh
+Restart=on-failure
+RestartSec=10
+CPUAffinity=0 1
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

@@ -15,6 +15,10 @@ const BASE_CONFIG: FFmpegConfig = {
   rtmpUrl: 'rtmp://a.rtmp.youtube.com/live2/test-key',
   pulseAudioSource: 'combined_sink.monitor',
   avatarBasePath: 'assets/avatar',
+  avatarPipePath: '/tmp/ai-minecraft-avatar.pipe',
+  avatarWidth: 300,
+  avatarHeight: 400,
+  avatarFps: 5,
 };
 
 describe('buildFFmpegArgs', () => {
@@ -49,7 +53,16 @@ describe('buildFFmpegArgs', () => {
   it('includes video codec settings', () => {
     const args = buildFFmpegArgs(BASE_CONFIG);
     expect(args).toContain('-c:v');
-    expect(args).toContain('h264_nvenc');
+    expect(args).toContain('libx264');
+    expect(args).toContain('ultrafast');
+    expect(args).toContain('zerolatency');
+  });
+
+  it('includes output frame rate cap', () => {
+    const args = buildFFmpegArgs(BASE_CONFIG);
+    const rIdx = args.indexOf('-r');
+    expect(rIdx).toBeGreaterThan(0);
+    expect(args[rIdx + 1]).toBe('30');
   });
 
   it('includes audio codec settings', () => {
@@ -64,6 +77,16 @@ describe('buildFFmpegArgs', () => {
     expect(filterIdx).toBeGreaterThan(0);
     const filterStr = args[filterIdx + 1];
     expect(filterStr).toContain('overlay');
+  });
+
+  it('includes rawvideo avatar input from named pipe', () => {
+    const args = buildFFmpegArgs(BASE_CONFIG);
+    const rawIdx = args.indexOf('rawvideo');
+    expect(rawIdx).toBeGreaterThan(0);
+    expect(args[rawIdx - 1]).toBe('-f');
+    expect(args).toContain('rgba');
+    expect(args).toContain('300x400');
+    expect(args).toContain('/tmp/ai-minecraft-avatar.pipe');
   });
 });
 

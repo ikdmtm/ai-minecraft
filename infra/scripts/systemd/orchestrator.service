@@ -1,0 +1,19 @@
+[Unit]
+Description=AI Minecraft Orchestrator
+After=minecraft-server.service voicevox.service
+Wants=minecraft-server.service voicevox.service
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/ai-minecraft
+ExecStart=/usr/bin/node dist/orchestrator/orchestrator.js
+Restart=always
+RestartSec=15
+Environment=NODE_ENV=production
+CPUAffinity=3
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

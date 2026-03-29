@@ -818,22 +818,18 @@ export type Result<T, E = string> =
   "dependencies": {
     "mineflayer": "^4",
     "mineflayer-pathfinder": "^2",
-    "mineflayer-pvp": "^1",
-    "prismarine-viewer": "^1",
-    "@anthropic-ai/sdk": "^0",
-    "openai": "^4",
-    "better-sqlite3": "^11",
-    "express": "^4",
-    "canvas": "^2",
-    "zod": "^3",
-    "pino": "^9"
+    "better-sqlite3": "^12",
+    "express": "^5",
+    "zod": "^4",
+    "pino": "^10",
+    "dotenv": "^17"
   },
   "devDependencies": {
     "typescript": "^5",
-    "jest": "^29",
+    "jest": "^30",
     "ts-jest": "^29",
-    "@types/node": "^22",
-    "@types/express": "^4",
+    "@types/node": "^25",
+    "@types/express": "^5",
     "@types/better-sqlite3": "^7",
     "tsx": "^4"
   }
