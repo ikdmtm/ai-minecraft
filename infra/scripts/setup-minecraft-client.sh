@@ -280,6 +280,8 @@ overrideWidth:1280
 overrideHeight:720
 joinedFirstServer:true
 skipMultiplayerWarning:true
+onboardAccessibility:false
+skipRealmsNotifications:true
 tutorialStep:none
 EOF
 
