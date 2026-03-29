@@ -26,8 +26,8 @@ apt-get install -y \
   build-essential git curl wget unzip awscli jq \
   software-properties-common apt-transport-https ca-certificates gnupg
 
-# Xvfb + Mesa (ソフトウェア OpenGL)
-apt-get install -y xvfb mesa-utils libegl-mesa0 libgl1-mesa-dri libglx-mesa0
+# Xvfb + Mesa (ソフトウェア OpenGL) + xdotool (GUI 自動操作)
+apt-get install -y xvfb mesa-utils libegl-mesa0 libgl1-mesa-dri libglx-mesa0 xdotool
 
 # FFmpeg (CPU エンコード: libx264)
 apt-get install -y ffmpeg

@@ -11,3 +11,5 @@ infra/*.tfstate
 infra/*.tfstate.backup
 infra/terraform.tfvars
 infra/.terraform.lock.hcl
+docs/mc-screenshot*.png
+infra/plan.out
