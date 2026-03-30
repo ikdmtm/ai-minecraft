@@ -2,7 +2,10 @@
  * AI Minecraft 配信システム - メインエントリーポイント
  *
  * 起動するとダッシュボード（HTTP）のみ立ち上がり IDLE 状態で待機。
- * ダッシュボードから「配信開始」すると Bot+LLM+TTS+FFmpeg の世代ループが始まる。
+ * ダッシュボードから「配信開始」すると:
+ *  1. ワールドリセット（新規ハードコア世界を生成）
+ *  2. Bot+LLM+TTS+FFmpeg の配信ループ開始
+ *  3. AI_Rei をスペクテイターモードにし Bot 視点を配信
  *
  * MANUAL モード: 死亡で配信停止（IDLE に戻る）
  * AUTO   モード: 死亡→ワールドリセット→自動的に次世代開始
@@ -10,8 +13,9 @@
 import { config } from 'dotenv';
 config();
 
-import { spawn, execSync, type ChildProcess } from 'child_process';
-import { writeFileSync } from 'fs';
+import { spawn, execSync, execFileSync, type ChildProcess } from 'child_process';
+import { writeFileSync, readFileSync, existsSync, createWriteStream } from 'fs';
+import type { WriteStream } from 'fs';
 import { BotClient } from './bot/client.js';
 import { LLMClient, type LLMApiAdapter } from './llm/client.js';
 import { VoicevoxClient, createFetchAdapter } from './tts/voicevox.js';
@@ -19,6 +23,7 @@ import { AudioQueue, type AudioPlayer } from './tts/audioQueue.js';
 import { CycleRunner, type CycleDeps } from './orchestrator/cycle.js';
 import { AvatarState } from './stream/avatar.js';
 import { AvatarRenderer } from './stream/avatarRenderer.js';
+import { EXPRESSION_FILE } from './stream/avatarRenderer.js';
 import { mapSteps } from './bot/actionMapper.js';
 import { startDashboard } from './dashboard/server.js';
 import type { DashboardDeps } from './dashboard/routes.js';
@@ -30,6 +35,10 @@ const COOLDOWN_MS = 15_000;
 const MC_SERVER_DIR = '/home/ubuntu/minecraft-server';
 const AVATAR_PIPE = '/tmp/ai-minecraft-avatar.pipe';
 const AVATAR_BASE_PATH = process.env.AVATAR_BASE_PATH || '/home/ubuntu/ai-minecraft/assets/avatar';
+const AVATAR_WIDTH = 300;
+const AVATAR_HEIGHT = 400;
+const AVATAR_FRAME_BYTES = AVATAR_WIDTH * AVATAR_HEIGHT * 4;
+const CLIENT_PLAYER = 'AI_Rei';
 
 // --- Shared mutable state ---
 let generation = 1;
@@ -104,26 +113,68 @@ function createPaplayAudioPlayer(): AudioPlayer {
   };
 }
 
-function startAvatarWriter(): ChildProcess {
-  log('[Avatar] Starting avatar-writer.sh...');
-  const proc = spawn('bash', ['/home/ubuntu/ai-minecraft/scripts/avatar-writer.sh'], {
-    stdio: ['ignore', 'ignore', 'pipe'],
-  });
-  proc.stderr?.on('data', (chunk: Buffer) => {
-    const line = chunk.toString().trim();
-    if (line) console.error(`[Avatar] ${line}`);
-  });
-  proc.on('exit', (code) => log(`[Avatar] avatar-writer exited: ${code}`));
-  return proc;
+// --- Avatar frame writer (Node.js-based, replaces avatar-writer.sh) ---
+
+class AvatarFrameWriter {
+  private timer: ReturnType<typeof setInterval> | null = null;
+  private pipeStream: WriteStream | null = null;
+  private lastImagePath = '';
+  private cachedFrame: Buffer = Buffer.alloc(AVATAR_FRAME_BYTES);
+
+  start(): void {
+    execSync(`rm -f ${AVATAR_PIPE}`, { timeout: 2000 });
+    execSync(`mkfifo ${AVATAR_PIPE}`, { timeout: 2000 });
+    log('[AvatarWriter] Named pipe created, waiting for FFmpeg...');
+  }
+
+  connectPipe(): void {
+    this.pipeStream = createWriteStream(AVATAR_PIPE, { highWaterMark: AVATAR_FRAME_BYTES * 2 });
+    this.pipeStream.on('error', (e) => console.error(`[AvatarWriter] pipe error: ${e.message}`));
+
+    this.timer = setInterval(() => this.writeFrame(), 200);
+    log('[AvatarWriter] Frame writing started');
+  }
+
+  stop(): void {
+    if (this.timer) { clearInterval(this.timer); this.timer = null; }
+    if (this.pipeStream) { this.pipeStream.destroy(); this.pipeStream = null; }
+    try { execSync(`rm -f ${AVATAR_PIPE}`, { timeout: 2000 }); } catch { /* ignore */ }
+  }
+
+  private writeFrame(): void {
+    if (!this.pipeStream || this.pipeStream.destroyed) return;
+
+    try {
+      const imgPath = existsSync(EXPRESSION_FILE) ? readFileSync(EXPRESSION_FILE, 'utf-8').trim() : '';
+
+      if (imgPath && existsSync(imgPath) && imgPath !== this.lastImagePath) {
+        const raw = execFileSync('convert', [
+          imgPath, '-resize', `${AVATAR_WIDTH}x${AVATAR_HEIGHT}!`, '-depth', '8', 'RGBA:-',
+        ], { maxBuffer: AVATAR_FRAME_BYTES + 1024, timeout: 3000 });
+
+        if (raw.length === AVATAR_FRAME_BYTES) {
+          this.cachedFrame = raw;
+          this.lastImagePath = imgPath;
+        }
+      }
+
+      this.pipeStream.write(this.cachedFrame);
+    } catch {
+      try { this.pipeStream?.write(Buffer.alloc(AVATAR_FRAME_BYTES)); } catch { /* pipe broken */ }
+    }
+  }
 }
+
+// --- FFmpeg ---
 
 function startFFmpeg(): ChildProcess {
   const rtmpUrl = `rtmp://a.rtmp.youtube.com/live2/${process.env.YOUTUBE_STREAM_KEY}`;
   const args = [
     '-f', 'x11grab', '-framerate', '30', '-video_size', '1280x720', '-i', ':99',
     '-f', 'pulse', '-i', 'combined_sink.monitor',
+    '-thread_queue_size', '512',
     '-f', 'rawvideo', '-pixel_format', 'rgba',
-    '-video_size', '300x400', '-framerate', '5',
+    '-video_size', `${AVATAR_WIDTH}x${AVATAR_HEIGHT}`, '-framerate', '5',
     '-i', AVATAR_PIPE,
     '-filter_complex', '[0:v][2:v]overlay=W-w-20:H-h-20:format=auto[out]',
     '-map', '[out]', '-map', '1:a',
@@ -144,14 +195,16 @@ function startFFmpeg(): ChildProcess {
   return proc;
 }
 
+// --- World management ---
+
 function resetWorld(): void {
   log('[Reset] MC サーバー停止 + ワールド削除...');
   try {
-    execSync('sudo systemctl stop minecraft-client', { timeout: 10_000 });
-    execSync('sudo systemctl stop minecraft-server', { timeout: 10_000 });
+    execSync('sudo systemctl stop minecraft-client', { timeout: 15_000 });
+    execSync('sudo systemctl stop minecraft-server', { timeout: 15_000 });
     execSync(`rm -rf ${MC_SERVER_DIR}/world`, { timeout: 5_000 });
     log('[Reset] ワールド削除完了。MC サーバー再起動...');
-    execSync('sudo systemctl start minecraft-server', { timeout: 10_000 });
+    execSync('sudo systemctl start minecraft-server', { timeout: 15_000 });
   } catch (e) {
     log(`[Reset] エラー: ${e instanceof Error ? e.message : e}`);
   }
@@ -163,12 +216,12 @@ function waitForServer(timeoutMs: number): Promise<void> {
     const check = () => {
       try {
         const out = execSync(
-          'sudo journalctl -u minecraft-server --no-pager -n 5 --since "30 sec ago"',
-          { encoding: 'utf-8' },
+          'sudo journalctl -u minecraft-server --no-pager -n 10 --since "60 sec ago"',
+          { encoding: 'utf-8', timeout: 5000 },
         );
         if (out.includes('Done')) { resolve(); return; }
       } catch { /* retry */ }
-      if (Date.now() - start > timeoutMs) { resolve(); return; }
+      if (Date.now() - start > timeoutMs) { log('[Reset] サーバー起動タイムアウト'); resolve(); return; }
       setTimeout(check, 3000);
     };
     check();
@@ -178,13 +231,13 @@ function waitForServer(timeoutMs: number): Promise<void> {
 function restartClient(): void {
   log('[Reset] MC クライアント再起動...');
   try {
-    execSync('sudo systemctl restart minecraft-client', { timeout: 10_000 });
+    execSync('sudo systemctl restart minecraft-client', { timeout: 15_000 });
   } catch (e) {
     log(`[Reset] クライアント再起動エラー: ${e instanceof Error ? e.message : e}`);
   }
 }
 
-// --- Run one generation (Bot connect → cycle loop → death/stop) ---
+// --- Run one generation ---
 
 async function runOneGeneration(deps: {
   mcHost: string;
@@ -227,6 +280,8 @@ async function runOneGeneration(deps: {
     return 'disconnected';
   }
   log('[Bot] 接続成功');
+
+  bot.setupSpectator(CLIENT_PLAYER);
 
   const getFullGameState = (): GameState => {
     const partial = bot.getPartialGameState();
@@ -345,15 +400,18 @@ async function main() {
   const audioQueue = new AudioQueue(audioPlayer);
   const avatarState = new AvatarState();
   const avatarRenderer = new AvatarRenderer(avatarState, AVATAR_BASE_PATH);
+  const avatarWriter = new AvatarFrameWriter();
 
   let ffmpegProc: ChildProcess | null = null;
-  let avatarWriterProc: ChildProcess | null = null;
 
   const startStreaming = async () => {
     avatarRenderer.start();
-    avatarWriterProc = startAvatarWriter();
-    await new Promise((r) => setTimeout(r, 2000));
+    avatarWriter.start();
+
     ffmpegProc = startFFmpeg();
+    await new Promise((r) => setTimeout(r, 1000));
+
+    avatarWriter.connectPipe();
     audioQueue.onPlaybackStart(() => avatarState.update({ threatLevel: 'low', isSpeaking: true }));
     audioQueue.onPlaybackEnd(() => avatarState.update({ threatLevel: 'low', isSpeaking: false }));
     await new Promise((r) => setTimeout(r, 3000));
@@ -363,8 +421,8 @@ async function main() {
   const stopStreaming = () => {
     audioPlayer.stop();
     avatarRenderer.stop();
+    avatarWriter.stop();
     avatarState.destroy();
-    if (avatarWriterProc) { avatarWriterProc.kill('SIGTERM'); avatarWriterProc = null; }
     if (ffmpegProc) { ffmpegProc.kill('SIGTERM'); ffmpegProc = null; }
     log('[Stream] 配信パイプライン停止');
   };
@@ -412,7 +470,7 @@ async function main() {
   log(`[Mode] 現在のモード: ${operationMode}`);
   log('[System] IDLE — ダッシュボードから「配信開始」を押してください\n');
 
-  // --- Graceful shutdown (process kill) ---
+  // --- Graceful shutdown ---
   const shutdown = () => {
     log('\n[Shutdown] プロセス終了...');
     stopRequested = true;
@@ -423,7 +481,7 @@ async function main() {
   process.on('SIGINT', shutdown);
   process.on('SIGTERM', shutdown);
 
-  // --- Main event loop: wait for start trigger, run generations ---
+  // --- Main event loop ---
   while (true) {
     currentState = 'IDLE';
     startRequested = false;
@@ -434,8 +492,16 @@ async function main() {
       await new Promise((r) => setTimeout(r, 1000));
     }
 
+    // --- New stream: reset world + start ---
     currentState = 'STARTING';
-    log('[Starting] 配信パイプライン起動中...');
+    log('[Starting] ワールドリセット + 配信パイプライン起動中...');
+
+    resetWorld();
+    await waitForServer(60_000);
+    restartClient();
+    log('[Starting] MC クライアントのロード待機 (30s)...');
+    await new Promise((r) => setTimeout(r, 30_000));
+
     await startStreaming();
 
     let continueLoop = true;
@@ -452,9 +518,9 @@ async function main() {
         if (stopRequested) { continueLoop = false; break; }
 
         resetWorld();
-        await waitForServer(30_000);
+        await waitForServer(60_000);
         restartClient();
-        log('[Reset] MC クライアントのロード待機...');
+        log('[Reset] MC クライアントのロード待機 (30s)...');
         await new Promise((r) => setTimeout(r, 30_000));
         generation++;
       } else {

@@ -21,6 +21,17 @@ export interface BotEvents {
   onReactiveAction: (event: RecentEvent) => void;
 }
 
+const ACTION_TIMEOUT_MS = 15_000;
+
+function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+  return Promise.race([
+    promise,
+    new Promise<T>((_, reject) =>
+      setTimeout(() => reject(new Error(`[Timeout] ${label}: ${ms}ms`)), ms),
+    ),
+  ]);
+}
+
 /**
  * Mineflayer Bot のラッパー。
  * 接続・切断・ゲーム状態取得・行動実行を提供する。
@@ -31,6 +42,7 @@ export class BotClient {
   private events: BotEvents | null = null;
   private lastActionTimestamp = 0;
   private reactiveCheckInterval: ReturnType<typeof setInterval> | null = null;
+  private spectatorPlayer: string | null = null;
 
   async connect(options: BotClientOptions, events: BotEvents): Promise<void> {
     this.events = events;
@@ -58,6 +70,23 @@ export class BotClient {
     });
   }
 
+  /**
+   * Minecraft クライアントプレイヤーをスペクテイターモードにし、ボットを追従させる。
+   * ボットが OP 権限を持っている必要がある。
+   */
+  setupSpectator(clientPlayerName: string): void {
+    const bot = this.requireBot();
+    this.spectatorPlayer = clientPlayerName;
+    setTimeout(() => {
+      console.log(`[Bot] ${clientPlayerName} をスペクテイターモードに設定...`);
+      bot.chat(`/gamemode spectator ${clientPlayerName}`);
+    }, 2000);
+    setTimeout(() => {
+      console.log(`[Bot] ${clientPlayerName} → MineflayerBot を追従`);
+      bot.chat(`/spectate ${bot.username} ${clientPlayerName}`);
+    }, 4000);
+  }
+
   disconnect(): void {
     if (this.reactiveCheckInterval) {
       clearInterval(this.reactiveCheckInterval);
@@ -75,10 +104,6 @@ export class BotClient {
     return this.lastActionTimestamp;
   }
 
-  /**
-   * 現在のゲーム状態から BotSensors を構築する。
-   * リアクティブ層の入力用。
-   */
   getSensors(): BotSensors {
     const bot = this.requireBot();
     const entities = this.getNearbyEntities();
@@ -101,11 +126,6 @@ export class BotClient {
     };
   }
 
-  /**
-   * LLM 入力用の GameState を構築する。
-   * pacing, previousPlan, memory は orchestrator 側で付与するため、
-   * ここでは player, world, base の部分のみ返す。
-   */
   getPartialGameState(): Pick<GameState, 'player' | 'world' | 'base'> {
     const bot = this.requireBot();
     const entities = this.getNearbyEntities();
@@ -163,43 +183,56 @@ export class BotClient {
     const bot = this.requireBot();
     this.lastActionTimestamp = Date.now();
 
-    switch (action.type) {
-      case 'mine_block':
-        await this.doMineBlock(bot, action.params.blockType as string);
-        break;
-      case 'explore':
-        await this.doExplore(bot, action.params.variant as string | undefined);
-        break;
-      case 'eat_food':
-        await this.doEatFood(bot);
-        break;
-      case 'craft_item':
-        await this.doCraftBasic(bot);
-        break;
-      case 'move_to_position':
-        await this.doExplore(bot, 'surface');
-        break;
-      case 'idle':
-        await new Promise((r) => setTimeout(r, 3000));
-        break;
-      case 'sleep': {
-        const bed = bot.findBlock({ matching: (b) => b.name.includes('bed'), maxDistance: 32 });
-        if (bed) {
-          await bot.pathfinder.goto(new goals.GoalNear(bed.position.x, bed.position.y, bed.position.z, 2));
-          try { await bot.sleep(bed); } catch { /* bed might be occupied or not night */ }
+    try {
+      switch (action.type) {
+        case 'mine_block':
+          await withTimeout(this.doMineBlock(bot, action.params.blockType as string), ACTION_TIMEOUT_MS, 'mine_block');
+          break;
+        case 'explore':
+          await withTimeout(this.doExplore(bot), ACTION_TIMEOUT_MS, 'explore');
+          break;
+        case 'eat_food':
+          await withTimeout(this.doEatFood(bot), 5000, 'eat_food');
+          break;
+        case 'craft_item':
+          await withTimeout(this.doCraftBasic(bot), 5000, 'craft_item');
+          break;
+        case 'move_to_position':
+          await withTimeout(this.doExplore(bot), ACTION_TIMEOUT_MS, 'move_to');
+          break;
+        case 'idle':
+          await new Promise((r) => setTimeout(r, 3000));
+          break;
+        case 'sleep': {
+          const bed = bot.findBlock({ matching: (b) => b.name.includes('bed'), maxDistance: 32 });
+          if (bed) {
+            await withTimeout(
+              bot.pathfinder.goto(new goals.GoalNear(bed.position.x, bed.position.y, bed.position.z, 2)),
+              ACTION_TIMEOUT_MS, 'sleep_pathfind',
+            );
+            try { await bot.sleep(bed); } catch { /* not night or occupied */ }
+          } else {
+            console.log('    → ベッドが見つかりません');
+          }
+          break;
         }
-        break;
-      }
-      case 'attack_entity': {
-        const target = bot.nearestEntity((e) => e.type === 'hostile' || e.type === 'mob');
-        if (target) {
-          await bot.pathfinder.goto(new goals.GoalNear(target.position.x, target.position.y, target.position.z, 2));
-          bot.attack(target);
+        case 'attack_entity': {
+          const target = bot.nearestEntity((e) => e.type === 'hostile' || e.type === 'mob');
+          if (target) {
+            await withTimeout(
+              bot.pathfinder.goto(new goals.GoalNear(target.position.x, target.position.y, target.position.z, 2)),
+              ACTION_TIMEOUT_MS, 'attack_pathfind',
+            );
+            bot.attack(target);
+          }
+          break;
         }
-        break;
+        default:
+          break;
       }
-      default:
-        break;
+    } catch (e) {
+      bot.pathfinder.stop();
+      throw e;
     }
   }
 
@@ -209,59 +242,91 @@ export class BotClient {
 
     const block = bot.findBlock({
       matching: (b) => targets.includes(b.name),
-      maxDistance: 32,
+      maxDistance: 64,
     });
-    if (!block) return;
+    if (!block) {
+      console.log(`    → ${blockType} が近くに見つかりません`);
+      return;
+    }
 
+    console.log(`    → ${block.name} (${Math.round(block.position.x)}, ${Math.round(block.position.y)}, ${Math.round(block.position.z)}) に移動`);
     const movements = new Movements(bot);
+    movements.allowSprinting = true;
     bot.pathfinder.setMovements(movements);
     await bot.pathfinder.goto(new goals.GoalNear(block.position.x, block.position.y, block.position.z, 2));
 
-    if (bot.canDigBlock(block)) {
-      await bot.dig(block);
+    const freshBlock = bot.blockAt(block.position);
+    if (freshBlock && bot.canDigBlock(freshBlock)) {
+      console.log(`    → ${freshBlock.name} を採掘中...`);
+      await bot.dig(freshBlock);
+      console.log(`    → 採掘完了`);
+      await new Promise((r) => setTimeout(r, 300));
+      await bot.pathfinder.goto(new goals.GoalBlock(block.position.x, block.position.y, block.position.z));
     }
-    await bot.pathfinder.goto(new goals.GoalBlock(block.position.x, block.position.y, block.position.z));
   }
 
-  private async doExplore(bot: mineflayer.Bot, _variant?: string): Promise<void> {
+  private async doExplore(bot: mineflayer.Bot): Promise<void> {
     const angle = Math.random() * Math.PI * 2;
-    const dist = 15 + Math.random() * 25;
-    const target = {
-      x: bot.entity.position.x + Math.cos(angle) * dist,
-      y: bot.entity.position.y,
-      z: bot.entity.position.z + Math.sin(angle) * dist,
-    };
+    const dist = 10 + Math.random() * 20;
+    const tx = bot.entity.position.x + Math.cos(angle) * dist;
+    const tz = bot.entity.position.z + Math.sin(angle) * dist;
+    console.log(`    → (${Math.round(tx)}, ${Math.round(tz)}) 方向に探索`);
+
     const movements = new Movements(bot);
+    movements.allowSprinting = true;
     bot.pathfinder.setMovements(movements);
     try {
-      await bot.pathfinder.goto(new goals.GoalNear(target.x, target.y, target.z, 3));
+      await bot.pathfinder.goto(new goals.GoalXZ(tx, tz));
     } catch {
-      // pathfinding failure is expected for unreachable positions
+      console.log('    → 探索パス失敗、別方向を試行');
+      const angle2 = angle + Math.PI;
+      const tx2 = bot.entity.position.x + Math.cos(angle2) * 10;
+      const tz2 = bot.entity.position.z + Math.sin(angle2) * 10;
+      try {
+        await bot.pathfinder.goto(new goals.GoalXZ(tx2, tz2));
+      } catch { /* give up */ }
     }
   }
 
   private async doEatFood(bot: mineflayer.Bot): Promise<void> {
     const foodName = this.getBestFood();
-    if (!foodName) return;
+    if (!foodName) {
+      console.log('    → 食料なし');
+      return;
+    }
     const item = bot.inventory.items().find((i) => i.name === foodName);
     if (!item) return;
     try {
+      console.log(`    → ${foodName} を食べる`);
       await bot.equip(item, 'hand');
       await bot.consume();
     } catch {
-      // eat may fail if not hungry enough
+      console.log('    → 食事失敗（満腹かもしれません）');
     }
   }
 
   private async doCraftBasic(bot: mineflayer.Bot): Promise<void> {
-    const logs = bot.inventory.items().filter((i) => i.name.includes('log'));
-    if (logs.length === 0) return;
+    const logItem = bot.inventory.items().find((i) => i.name.includes('_log'));
+    if (!logItem) {
+      console.log('    → 原木なし（クラフト不可）');
+      return;
+    }
 
-    const planksRecipe = bot.recipesFor(bot.registry.itemsByName['oak_planks']?.id ?? -1, null, 1, null);
-    if (planksRecipe.length > 0) {
-      try {
-        await bot.craft(planksRecipe[0], 1, undefined as any);
-      } catch { /* recipe may not be available */ }
+    const logPrefix = logItem.name.replace('_log', '');
+    const planksName = `${logPrefix}_planks`;
+    const planksId = bot.registry.itemsByName[planksName]?.id;
+    if (!planksId) {
+      console.log(`    → ${planksName} のレシピが見つかりません`);
+      return;
+    }
+
+    const recipes = bot.recipesFor(planksId, null, 1, null);
+    if (recipes.length > 0) {
+      console.log(`    → ${planksName} をクラフト`);
+      await bot.craft(recipes[0], 1, undefined as any);
+      console.log(`    → クラフト完了`);
+    } else {
+      console.log(`    → ${planksName} のレシピなし`);
     }
   }
 
