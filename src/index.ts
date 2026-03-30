@@ -38,7 +38,8 @@ const AVATAR_BASE_PATH = process.env.AVATAR_BASE_PATH || '/home/ubuntu/ai-minecr
 const AVATAR_WIDTH = 300;
 const AVATAR_HEIGHT = 400;
 const AVATAR_FRAME_BYTES = AVATAR_WIDTH * AVATAR_HEIGHT * 4;
-const CLIENT_PLAYER = 'AI_Rei';
+const BOT_USERNAME = 'AI_Rei';
+const CAMERA_PLAYER = 'StreamCamera';
 
 // --- Shared mutable state ---
 let generation = 1;
@@ -262,7 +263,7 @@ async function runOneGeneration(deps: {
   const bot = new BotClient();
   try {
     await bot.connect(
-      { host: mcHost, port: mcPort, username: 'MineflayerBot' },
+      { host: mcHost, port: mcPort, username: BOT_USERNAME },
       {
         onDeath: (cause) => {
           log(`[Bot] 死亡検知: ${cause}`);
@@ -281,7 +282,7 @@ async function runOneGeneration(deps: {
   }
   log('[Bot] 接続成功');
 
-  bot.setupSpectator(CLIENT_PLAYER);
+  bot.setupSpectator(CAMERA_PLAYER);
 
   const getFullGameState = (): GameState => {
     const partial = bot.getPartialGameState();
