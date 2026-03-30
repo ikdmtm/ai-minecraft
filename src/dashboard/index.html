@@ -34,6 +34,11 @@
   .config-form .btn { margin-top: 12px; background: #6366f1; color: #fff; }
   .history-table { width: 100%; font-size: 0.85rem; border-collapse: collapse; }
   .history-table td { padding: 6px 8px; border-bottom: 1px solid #27272a; }
+  .mode-switch { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; }
+  .mode-label { font-size: 0.9rem; color: #a1a1aa; }
+  .mode-btn { padding: 8px 20px; background: #27272a; color: #a1a1aa; border: 1px solid #3f3f46; }
+  .mode-btn.active { background: #6366f1; color: #fff; border-color: #6366f1; }
+  .mode-desc { font-size: 0.8rem; color: #71717a; margin-top: 4px; }
 </style>
 </head>
 <body>
@@ -69,14 +74,12 @@
 
   <div class="card">
     <h2>設定</h2>
-    <form class="config-form" id="config-form" onsubmit="saveConfig(event)">
-      <label>配信タイトルテンプレート<input id="cfg-title" type="text"></label>
-      <label>運用モード
-        <select id="cfg-mode"><option value="MANUAL">MANUAL</option><option value="AUTO">AUTO</option></select>
-      </label>
-      <label>クールタイム (分)<input id="cfg-cooldown" type="number" min="1"></label>
-      <button class="btn" type="submit">保存</button>
-    </form>
+    <div class="mode-switch">
+      <span class="mode-label">運用モード:</span>
+      <button class="btn mode-btn" id="btn-manual" onclick="setMode('MANUAL')">MANUAL</button>
+      <button class="btn mode-btn" id="btn-auto" onclick="setMode('AUTO')">AUTO</button>
+    </div>
+    <p class="mode-desc" id="mode-desc"></p>
   </div>
 
   <div class="card">
@@ -112,9 +115,12 @@ async function refresh() {
     ).join('');
 
     const cfg = await (await fetch('/api/config')).json();
-    document.getElementById('cfg-title').value = cfg.streamTitleTemplate || '';
-    document.getElementById('cfg-mode').value = cfg.operationMode || 'MANUAL';
-    document.getElementById('cfg-cooldown').value = cfg.cooldownMinutes || 10;
+    const curMode = cfg.operationMode || 'MANUAL';
+    document.getElementById('btn-manual').className = 'btn mode-btn' + (curMode==='MANUAL' ? ' active' : '');
+    document.getElementById('btn-auto').className = 'btn mode-btn' + (curMode==='AUTO' ? ' active' : '');
+    document.getElementById('mode-desc').textContent = curMode === 'MANUAL'
+      ? '死亡で配信停止。手動で再開してください。'
+      : '死亡→ワールドリセット→自動的に次世代を開始します。';
 
     const hist = await (await fetch('/api/history')).json();
     document.getElementById('history-table').querySelector('tbody').innerHTML = hist.map(d =>
@@ -125,15 +131,10 @@ async function refresh() {
 
 async function doStart() { await fetch('/api/start', {method:'POST'}); refresh(); }
 async function doStop() { await fetch('/api/stop', {method:'POST'}); refresh(); }
-async function saveConfig(e) {
-  e.preventDefault();
+async function setMode(mode) {
   await fetch('/api/config', {
     method: 'PUT', headers: {'Content-Type':'application/json'},
-    body: JSON.stringify({
-      streamTitleTemplate: document.getElementById('cfg-title').value,
-      operationMode: document.getElementById('cfg-mode').value,
-      cooldownMinutes: parseInt(document.getElementById('cfg-cooldown').value),
-    })
+    body: JSON.stringify({ operationMode: mode })
   });
   refresh();
 }

@@ -159,6 +159,138 @@ export class BotClient {
     this.lastActionTimestamp = Date.now();
   }
 
+  async executeAction(action: MappedAction): Promise<void> {
+    const bot = this.requireBot();
+    this.lastActionTimestamp = Date.now();
+
+    switch (action.type) {
+      case 'mine_block':
+        await this.doMineBlock(bot, action.params.blockType as string);
+        break;
+      case 'explore':
+        await this.doExplore(bot, action.params.variant as string | undefined);
+        break;
+      case 'eat_food':
+        await this.doEatFood(bot);
+        break;
+      case 'craft_item':
+        await this.doCraftBasic(bot);
+        break;
+      case 'move_to_position':
+        await this.doExplore(bot, 'surface');
+        break;
+      case 'idle':
+        await new Promise((r) => setTimeout(r, 3000));
+        break;
+      case 'sleep': {
+        const bed = bot.findBlock({ matching: (b) => b.name.includes('bed'), maxDistance: 32 });
+        if (bed) {
+          await bot.pathfinder.goto(new goals.GoalNear(bed.position.x, bed.position.y, bed.position.z, 2));
+          try { await bot.sleep(bed); } catch { /* bed might be occupied or not night */ }
+        }
+        break;
+      }
+      case 'attack_entity': {
+        const target = bot.nearestEntity((e) => e.type === 'hostile' || e.type === 'mob');
+        if (target) {
+          await bot.pathfinder.goto(new goals.GoalNear(target.position.x, target.position.y, target.position.z, 2));
+          bot.attack(target);
+        }
+        break;
+      }
+      default:
+        break;
+    }
+  }
+
+  private async doMineBlock(bot: mineflayer.Bot, blockType: string): Promise<void> {
+    const LOG_TYPES = ['oak_log', 'birch_log', 'spruce_log', 'jungle_log', 'acacia_log', 'dark_oak_log', 'cherry_log', 'mangrove_log', 'pale_oak_log'];
+    const targets = blockType === 'oak_log' ? LOG_TYPES : [blockType];
+
+    const block = bot.findBlock({
+      matching: (b) => targets.includes(b.name),
+      maxDistance: 32,
+    });
+    if (!block) return;
+
+    const movements = new Movements(bot);
+    bot.pathfinder.setMovements(movements);
+    await bot.pathfinder.goto(new goals.GoalNear(block.position.x, block.position.y, block.position.z, 2));
+
+    if (bot.canDigBlock(block)) {
+      await bot.dig(block);
+    }
+    await bot.pathfinder.goto(new goals.GoalBlock(block.position.x, block.position.y, block.position.z));
+  }
+
+  private async doExplore(bot: mineflayer.Bot, _variant?: string): Promise<void> {
+    const angle = Math.random() * Math.PI * 2;
+    const dist = 15 + Math.random() * 25;
+    const target = {
+      x: bot.entity.position.x + Math.cos(angle) * dist,
+      y: bot.entity.position.y,
+      z: bot.entity.position.z + Math.sin(angle) * dist,
+    };
+    const movements = new Movements(bot);
+    bot.pathfinder.setMovements(movements);
+    try {
+      await bot.pathfinder.goto(new goals.GoalNear(target.x, target.y, target.z, 3));
+    } catch {
+      // pathfinding failure is expected for unreachable positions
+    }
+  }
+
+  private async doEatFood(bot: mineflayer.Bot): Promise<void> {
+    const foodName = this.getBestFood();
+    if (!foodName) return;
+    const item = bot.inventory.items().find((i) => i.name === foodName);
+    if (!item) return;
+    try {
+      await bot.equip(item, 'hand');
+      await bot.consume();
+    } catch {
+      // eat may fail if not hungry enough
+    }
+  }
+
+  private async doCraftBasic(bot: mineflayer.Bot): Promise<void> {
+    const logs = bot.inventory.items().filter((i) => i.name.includes('log'));
+    if (logs.length === 0) return;
+
+    const planksRecipe = bot.recipesFor(bot.registry.itemsByName['oak_planks']?.id ?? -1, null, 1, null);
+    if (planksRecipe.length > 0) {
+      try {
+        await bot.craft(planksRecipe[0], 1, undefined as any);
+      } catch { /* recipe may not be available */ }
+    }
+  }
+
+  async executeReactiveBot(action: ReactiveAction): Promise<void> {
+    const bot = this.requireBot();
+    switch (action.type) {
+      case 'flee':
+      case 'flee_from_attack':
+      case 'stop_and_retreat': {
+        const dx = -Math.cos(bot.entity.yaw) * 15;
+        const dz = -Math.sin(bot.entity.yaw) * 15;
+        const movements = new Movements(bot);
+        bot.pathfinder.setMovements(movements);
+        try {
+          await bot.pathfinder.goto(new goals.GoalNear(
+            bot.entity.position.x + dx, bot.entity.position.y, bot.entity.position.z + dz, 3,
+          ));
+        } catch { /* best effort escape */ }
+        break;
+      }
+      case 'eat': {
+        await this.doEatFood(bot);
+        break;
+      }
+      default:
+        break;
+    }
+  }
+
   private setupReactiveLoop(): void {
     this.reactiveCheckInterval = setInterval(() => {
       if (!this.bot) return;
@@ -182,6 +314,7 @@ export class BotClient {
       detail: action.reason,
     };
     this.events?.onReactiveAction(event);
+    this.executeReactiveBot(action).catch(() => {});
   }
 
   private getNearbyEntities(): SensedEntity[] {
