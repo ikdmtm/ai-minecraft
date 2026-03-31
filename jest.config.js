@@ -2,6 +2,10 @@
 module.exports = {
   preset: 'ts-jest',
   testEnvironment: 'node',
+  // WSL 等でメモリが限られると複数ワーカーが SIGKILL されるため既定を抑える
+  maxWorkers: process.env.JEST_MAX_WORKERS
+    ? parseInt(process.env.JEST_MAX_WORKERS, 10)
+    : 1,
   roots: ['<rootDir>/src'],
   testMatch: ['**/*.test.ts'],
   transform: {

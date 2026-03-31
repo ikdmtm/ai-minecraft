@@ -1,47 +1,58 @@
 /**
  * AI Minecraft 配信システム - メインエントリーポイント
  *
+ * 多層認知アーキテクチャ版:
+ *   - System 1 (反射層): 4Hz ティックレートでルールベースの即時行動
+ *   - System 2a (戦術層): 3-5秒周期で高速LLMによる状況評価・実況
+ *   - System 2b (戦略層): 30-60秒周期で高性能LLMによる長期計画
+ *
  * 起動するとダッシュボード（HTTP）のみ立ち上がり IDLE 状態で待機。
  * ダッシュボードから「配信開始」すると:
  *  1. ワールドリセット（新規ハードコア世界を生成）
- *  2. Bot+LLM+TTS+FFmpeg の配信ループ開始
- *  3. AI_Rei をスペクテイターモードにし Bot 視点を配信
- *
- * MANUAL モード: 死亡で配信停止（IDLE に戻る）
- * AUTO   モード: 死亡→ワールドリセット→自動的に次世代開始
+ *  2. 認知アーキテクチャ+TTS+FFmpeg の配信ループ開始
+ *  3. カメラプレイヤーをスペクテイターモードにしボット視点を配信
+ *  4. カスタムHUDオーバーレイ（体力/空腹/目標/実況テキスト）を描画
  */
 import { config } from 'dotenv';
 config();
 
-import { spawn, execSync, execFileSync, type ChildProcess } from 'child_process';
-import { writeFileSync, readFileSync, existsSync, createWriteStream } from 'fs';
-import type { WriteStream } from 'fs';
-import { BotClient } from './bot/client.js';
-import { LLMClient, type LLMApiAdapter } from './llm/client.js';
+import { spawn, execSync, type ChildProcess } from 'child_process';
+import { writeFileSync, mkdirSync } from 'fs';
+import { CognitiveOrchestrator, type CognitiveOrchestratorConfig } from './cognitive/orchestrator.js';
 import { VoicevoxClient, createFetchAdapter } from './tts/voicevox.js';
 import { AudioQueue, type AudioPlayer } from './tts/audioQueue.js';
-import { CycleRunner, type CycleDeps } from './orchestrator/cycle.js';
 import { AvatarState } from './stream/avatar.js';
-import { AvatarRenderer } from './stream/avatarRenderer.js';
-import { EXPRESSION_FILE } from './stream/avatarRenderer.js';
-import { mapSteps } from './bot/actionMapper.js';
+import { AvatarRenderer, EXPRESSION_FILE } from './stream/avatarRenderer.js';
+import { AvatarFrameWriter } from './stream/avatarFrameWriter.js';
+import { HudWriter } from './stream/hudWriter.js';
+import { buildFFmpegArgs, type FFmpegConfig } from './stream/ffmpeg.js';
 import { startDashboard } from './dashboard/server.js';
 import type { DashboardDeps } from './dashboard/routes.js';
-import type { GameState, DeathRecord } from './types/gameState.js';
+import type { DeathRecord } from './types/gameState.js';
 import { ok, err } from './types/result.js';
+import { YouTubeClient } from './youtube/api.js';
+import { tryCreateGoogleYouTubeAdapter } from './youtube/googleApiAdapter.js';
+import {
+  buildStreamTitle,
+  buildStreamTitleLive,
+  buildStreamDescription,
+  buildTags,
+  DEFAULT_STREAM_TITLE_TEMPLATE,
+  DEFAULT_STREAM_DESCRIPTION_TEMPLATE,
+} from './youtube/metadata.js';
 
-const CYCLE_INTERVAL_MS = 20_000;
 const COOLDOWN_MS = 15_000;
 const MC_SERVER_DIR = '/home/ubuntu/minecraft-server';
 const AVATAR_PIPE = '/tmp/ai-minecraft-avatar.pipe';
 const AVATAR_BASE_PATH = process.env.AVATAR_BASE_PATH || '/home/ubuntu/ai-minecraft/assets/avatar';
 const AVATAR_WIDTH = 300;
 const AVATAR_HEIGHT = 400;
-const AVATAR_FRAME_BYTES = AVATAR_WIDTH * AVATAR_HEIGHT * 4;
 const BOT_USERNAME = 'AI_Rei';
 const CAMERA_PLAYER = 'StreamCamera';
+const DB_PATH = process.env.DB_PATH || '/home/ubuntu/ai-minecraft/data/ai-minecraft.db';
+const HUD_DIR = '/tmp/ai-mc-hud';
+const HUD_FONT = process.env.HUD_FONT_PATH || '/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc';
 
-// --- Shared mutable state ---
 let generation = 1;
 let bestRecordMinutes = 0;
 let survivalStart = Date.now();
@@ -59,35 +70,7 @@ function log(msg: string) {
   console.log(msg);
 }
 
-// --- Factory functions ---
-
-function createAnthropicAdapter(): LLMApiAdapter {
-  const apiKey = process.env.ANTHROPIC_API_KEY!;
-  return {
-    async call(systemPrompt: string, userMessage: string): Promise<string> {
-      const res = await fetch('https://api.anthropic.com/v1/messages', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-api-key': apiKey,
-          'anthropic-version': '2023-06-01',
-        },
-        body: JSON.stringify({
-          model: 'claude-sonnet-4-20250514',
-          max_tokens: 1024,
-          system: systemPrompt,
-          messages: [{ role: 'user', content: userMessage }],
-        }),
-      });
-      if (!res.ok) {
-        const body = await res.text();
-        throw new Error(`Anthropic API ${res.status}: ${body}`);
-      }
-      const data = (await res.json()) as any;
-      return data.content[0].text;
-    },
-  };
-}
+// --- Audio ---
 
 function createPaplayAudioPlayer(): AudioPlayer {
   let currentProc: ChildProcess | null = null;
@@ -96,7 +79,7 @@ function createPaplayAudioPlayer(): AudioPlayer {
       const tmpPath = '/tmp/ai-mc-tts-current.wav';
       writeFileSync(tmpPath, buffer);
       return new Promise<void>((resolve, reject) => {
-        currentProc = spawn('paplay', ['--device=combined_sink', tmpPath]);
+        currentProc = spawn('paplay', ['--device=voicevox_sink', tmpPath]);
         currentProc.on('close', (code) => {
           currentProc = null;
           code === 0 ? resolve() : reject(new Error(`paplay exit ${code}`));
@@ -114,78 +97,33 @@ function createPaplayAudioPlayer(): AudioPlayer {
   };
 }
 
-// --- Avatar frame writer (Node.js-based, replaces avatar-writer.sh) ---
-
-class AvatarFrameWriter {
-  private timer: ReturnType<typeof setInterval> | null = null;
-  private pipeStream: WriteStream | null = null;
-  private lastImagePath = '';
-  private cachedFrame: Buffer = Buffer.alloc(AVATAR_FRAME_BYTES);
-
-  start(): void {
-    execSync(`rm -f ${AVATAR_PIPE}`, { timeout: 2000 });
-    execSync(`mkfifo ${AVATAR_PIPE}`, { timeout: 2000 });
-    log('[AvatarWriter] Named pipe created, waiting for FFmpeg...');
-  }
-
-  connectPipe(): void {
-    this.pipeStream = createWriteStream(AVATAR_PIPE, { highWaterMark: AVATAR_FRAME_BYTES * 2 });
-    this.pipeStream.on('error', (e) => console.error(`[AvatarWriter] pipe error: ${e.message}`));
-
-    this.timer = setInterval(() => this.writeFrame(), 200);
-    log('[AvatarWriter] Frame writing started');
-  }
-
-  stop(): void {
-    if (this.timer) { clearInterval(this.timer); this.timer = null; }
-    if (this.pipeStream) { this.pipeStream.destroy(); this.pipeStream = null; }
-    try { execSync(`rm -f ${AVATAR_PIPE}`, { timeout: 2000 }); } catch { /* ignore */ }
-  }
-
-  private writeFrame(): void {
-    if (!this.pipeStream || this.pipeStream.destroyed) return;
-
-    try {
-      const imgPath = existsSync(EXPRESSION_FILE) ? readFileSync(EXPRESSION_FILE, 'utf-8').trim() : '';
-
-      if (imgPath && existsSync(imgPath) && imgPath !== this.lastImagePath) {
-        const raw = execFileSync('convert', [
-          imgPath, '-resize', `${AVATAR_WIDTH}x${AVATAR_HEIGHT}!`, '-depth', '8', 'RGBA:-',
-        ], { maxBuffer: AVATAR_FRAME_BYTES + 1024, timeout: 3000 });
-
-        if (raw.length === AVATAR_FRAME_BYTES) {
-          this.cachedFrame = raw;
-          this.lastImagePath = imgPath;
-        }
-      }
-
-      this.pipeStream.write(this.cachedFrame);
-    } catch {
-      try { this.pipeStream?.write(Buffer.alloc(AVATAR_FRAME_BYTES)); } catch { /* pipe broken */ }
-    }
-  }
-}
-
 // --- FFmpeg ---
 
-function startFFmpeg(): ChildProcess {
-  const rtmpUrl = `rtmp://a.rtmp.youtube.com/live2/${process.env.YOUTUBE_STREAM_KEY}`;
-  const args = [
-    '-f', 'x11grab', '-framerate', '30', '-video_size', '1280x720', '-i', ':99',
-    '-f', 'pulse', '-i', 'combined_sink.monitor',
-    '-thread_queue_size', '512',
-    '-f', 'rawvideo', '-pixel_format', 'rgba',
-    '-video_size', `${AVATAR_WIDTH}x${AVATAR_HEIGHT}`, '-framerate', '5',
-    '-i', AVATAR_PIPE,
-    '-filter_complex', '[0:v][2:v]overlay=W-w-20:H-h-20:format=auto[out]',
-    '-map', '[out]', '-map', '1:a',
-    '-c:v', 'libx264', '-preset', 'ultrafast', '-tune', 'zerolatency',
-    '-b:v', '2500k', '-maxrate', '2500k', '-bufsize', '5000k', '-g', '60',
-    '-r', '30', '-pix_fmt', 'yuv420p',
-    '-c:a', 'aac', '-b:a', '128k', '-ar', '44100',
-    '-f', 'flv', rtmpUrl,
-  ];
-  log('[FFmpeg] Starting stream with avatar overlay...');
+function startFFmpegWithHud(hudWriter: HudWriter, rtmpUrl: string): ChildProcess {
+  const hudPaths = hudWriter.getFilePaths();
+
+  const ffmpegConfig: FFmpegConfig = {
+    display: ':99',
+    resolution: '1280x720',
+    fps: 30,
+    videoBitrate: '2500k',
+    audioBitrate: '128k',
+    rtmpUrl,
+    pulseAudioSource: 'combined_sink.monitor',
+    avatarBasePath: AVATAR_BASE_PATH,
+    avatarPipePath: AVATAR_PIPE,
+    avatarWidth: AVATAR_WIDTH,
+    avatarHeight: AVATAR_HEIGHT,
+    avatarFps: 5,
+    hud: {
+      enabled: true,
+      fontPath: HUD_FONT,
+      filePaths: hudPaths,
+    },
+  };
+
+  const args = buildFFmpegArgs(ffmpegConfig);
+  log('[FFmpeg] Starting stream with avatar overlay + HUD drawtext (RTMP 送信開始)...');
   const proc = spawn('ffmpeg', args, { stdio: ['ignore', 'pipe', 'pipe'] });
   proc.stderr?.on('data', (chunk: Buffer) => {
     const line = chunk.toString().trim();
@@ -238,132 +176,143 @@ function restartClient(): void {
   }
 }
 
-// --- Run one generation ---
+// --- YouTube Live (配信枠自動管理) ---
 
-async function runOneGeneration(deps: {
-  mcHost: string;
-  mcPort: number;
-  llmClient: LLMClient;
-  tts: VoicevoxClient;
-  audioQueue: AudioQueue;
-  audioPlayer: AudioPlayer;
-  avatarState: AvatarState;
-}): Promise<'died' | 'stopped' | 'disconnected'> {
-  const { mcHost, mcPort, llmClient, tts, audioQueue, avatarState } = deps;
+type YoutubeSessionCtx = {
+  client: YouTubeClient | null;
+  broadcastId: string | null;
+  streamId: string | null;
+};
 
+async function finalizeYoutubeSession(ctx: YoutubeSessionCtx): Promise<void> {
+  if (!ctx.client || !ctx.broadcastId) return;
+  const r = await ctx.client.endBroadcast(ctx.broadcastId);
+  if (!r.ok) log(`[YouTube] 配信終了 API: ${r.error}`);
+  else log('[YouTube] 配信枠を Complete に遷移しました');
+  ctx.broadcastId = null;
+  ctx.streamId = null;
+}
+
+async function waitForYoutubeIngestReady(
+  client: YouTubeClient,
+  streamId: string,
+  timeoutMs: number,
+): Promise<void> {
+  const started = Date.now();
+  while (Date.now() - started < timeoutMs) {
+    const res = await client.getStreamStatus(streamId);
+    if (res.ok && (res.value === 'active' || res.value === 'ready')) {
+      log(`[YouTube] インジェスト準備 OK (${res.value})`);
+      return;
+    }
+    await new Promise((r) => setTimeout(r, 3000));
+  }
+  log('[YouTube] インジェスト ready/active 待ちタイムアウト — goLive を試行します');
+}
+
+// --- Run one generation with cognitive architecture ---
+
+async function runOneGeneration(
+  cogOrch: CognitiveOrchestrator,
+  tts: VoicevoxClient,
+  audioQueue: AudioQueue,
+  avatarState: AvatarState,
+  hudWriter: HudWriter,
+  ytCtx: YoutubeSessionCtx,
+  streamTitleTemplate: string,
+): Promise<'died' | 'stopped' | 'disconnected'> {
   currentState = 'LIVE_RUNNING';
   survivalStart = Date.now();
   stopRequested = false;
   let died = false;
   let deathCause = 'unknown';
-  const recentEvents: Array<{ time: string; event: string; detail: string }> = [];
 
-  log(`\n========== 第${generation}世代 開始 ==========\n`);
+  log(`\n========== 第${generation}世代 開始 (多層認知アーキテクチャ) ==========\n`);
+  log(`  System 1: 反射層 (4Hz ルールベース行動)`);
+  log(`  System 2a: 戦術層 (Haiku 3-5秒 非同期)`);
+  log(`  System 2b: 戦略層 (Sonnet 30-60秒 非同期)`);
 
-  const bot = new BotClient();
   try {
-    await bot.connect(
-      { host: mcHost, port: mcPort, username: BOT_USERNAME },
-      {
-        onDeath: (cause) => {
-          log(`[Bot] 死亡検知: ${cause}`);
-          died = true;
-          deathCause = cause;
-        },
-        onReactiveAction: (event) => {
-          recentEvents.push(event);
-          if (recentEvents.length > 10) recentEvents.shift();
-        },
+    await cogOrch.start({
+      onCommentary: async (text) => {
+        log(`  [TTS] "${text}"`);
+        hudWriter.update({ commentary: text });
+        const result = await tts.synthesize(text);
+        if (result.ok) {
+          audioQueue.enqueue(result.value);
+        }
       },
-    );
+      onDeath: (cause) => {
+        log(`[Bot] 死亡検知: ${cause}`);
+        died = true;
+        deathCause = cause;
+      },
+      onGoalChanged: (goal) => {
+        log(`  [Goal] ${goal}`);
+        hudWriter.update({ currentGoal: goal });
+      },
+      onReactiveAction: (event) => {
+        log(`  [Reflex] ${event.event}: ${event.detail}`);
+      },
+    });
   } catch (e) {
     log(`[Bot] 接続失敗: ${e instanceof Error ? e.message : e}`);
+    await finalizeYoutubeSession(ytCtx);
     return 'disconnected';
   }
-  log('[Bot] 接続成功');
 
-  bot.setupSpectator(CAMERA_PLAYER);
+  log('[Cognitive] 全層起動完了 — 反射層が常時稼働中');
 
-  const getFullGameState = (): GameState => {
-    const partial = bot.getPartialGameState();
-    const survivalMinutes = Math.floor((Date.now() - survivalStart) / 60_000);
-    return {
-      ...partial,
-      pacing: {
-        currentActionCategory: 'exploring',
-        categoryDurationMinutes: 0,
-        survivalTimeMinutes: survivalMinutes,
-        progressPhase: survivalMinutes < 10 ? 'early' : survivalMinutes < 30 ? 'stable' : 'advanced',
-        bestRecordMinutes,
-      },
-      previousPlan: null,
-      recentEvents: [...recentEvents],
-      stagnationWarning: false,
-      memory: { totalDeaths: deathHistory.length, bestRecordMinutes, recentDeaths: deathHistory.slice(-5) },
-    };
-  };
+  let lastYoutubeTitleSurvivalMinute = -1;
 
-  const cycleDeps: CycleDeps = {
-    getGameState: getFullGameState,
-    callLLM: (state) => llmClient.call(state),
-    executeSteps: async (steps) => {
-      const mapped = mapSteps(steps);
-      for (const action of mapped) {
-        if (died || stopRequested) break;
-        log(`  [Action] ${action.originalStep} → ${action.type}`);
-        try {
-          await bot.executeAction(action);
-        } catch (e) {
-          console.error(`  [Action] 実行失敗: ${e instanceof Error ? e.message : e}`);
-        }
-      }
-    },
-    speakCommentary: async (text) => {
-      log(`  [TTS] "${text}"`);
-      const result = await tts.synthesize(text);
-      if (result.ok) {
-        audioQueue.enqueue(result.value);
-      }
-    },
-    updateOverlay: () => {},
-    updateAvatar: (threatLevel, isSpeaking) => {
-      avatarState.update({ threatLevel, isSpeaking });
-    },
-    triggerAvatarSpecial: (expression) => {
-      avatarState.triggerSpecial(expression as any);
-    },
-    logAction: (entry) => {
-      actionLogs.push(entry);
-      if (actionLogs.length > 500) actionLogs.shift();
-    },
-  };
-
-  const cycleRunner = new CycleRunner(cycleDeps);
-  let cycleCount = 0;
-
-  while (!died && !stopRequested && bot.isConnected()) {
-    cycleCount++;
+  while (!died && !stopRequested) {
+    const shared = cogOrch.getShared().get();
     const survMin = Math.floor((Date.now() - survivalStart) / 60_000);
-    log(`\n--- サイクル #${cycleCount} (Gen ${generation}, 生存: ${survMin}分) ---`);
 
-    const result = await cycleRunner.runOneCycle();
-    if (result.ok) {
-      log(`  → 目標: ${result.value.action.goal}`);
-      log(`  → 脅威: ${result.value.threatLevel}`);
-    } else {
-      console.error(`  → サイクル失敗: ${result.error}`);
+    hudWriter.update({
+      generation,
+      survivalStartTime: survivalStart,
+      bestRecordMinutes,
+      currentGoal: shared.currentGoal || '探索中',
+      threatLevel: shared.threatLevel,
+      reflexState: shared.reflexState,
+      emotionLabel: cogOrch.getShared().getEmotionLabel(),
+    });
+
+    if (
+      ytCtx.client &&
+      ytCtx.broadcastId &&
+      survMin > 0 &&
+      survMin % 5 === 0 &&
+      survMin !== lastYoutubeTitleSurvivalMinute
+    ) {
+      lastYoutubeTitleSurvivalMinute = survMin;
+      const liveTitle = buildStreamTitleLive({
+        generation,
+        survivalMinutes: survMin,
+        baseTemplate: streamTitleTemplate,
+      });
+      const ur = await ytCtx.client.updateTitle(ytCtx.broadcastId, liveTitle);
+      if (!ur.ok) log(`[YouTube] タイトル更新失敗: ${ur.error}`);
     }
 
-    await new Promise((r) => setTimeout(r, CYCLE_INTERVAL_MS));
+    if (survMin % 5 === 0 && survMin > 0) {
+      log(`  [Status] Gen${generation} 生存${survMin}分 目標:${shared.currentGoal || '探索中'} 状態:${shared.reflexState} 脅威:${shared.threatLevel} 感情:${cogOrch.getShared().getEmotionLabel()}`);
+    }
+
+    await new Promise(r => setTimeout(r, 2000));
   }
 
-  const survivalMinutes = Math.floor((Date.now() - survivalStart) / 60_000);
-  bot.disconnect();
+  const survivalMinutes = Math.round((Date.now() - survivalStart) / 60_000);
+  cogOrch.stop();
   audioQueue.clear();
 
   if (died) {
     currentState = 'DEATH_DETECTED';
     if (survivalMinutes > bestRecordMinutes) bestRecordMinutes = survivalMinutes;
+
+    cogOrch.saveEpisode(deathCause);
+
     deathHistory.push({
       generation,
       survivalMinutes,
@@ -371,59 +320,238 @@ async function runOneGeneration(deps: {
       lesson: `第${generation}世代: ${deathCause}で${survivalMinutes}分生存`,
     });
     log(`\n[Death] 第${generation}世代 終了 — ${survivalMinutes}分生存、死因: ${deathCause}`);
-    log(`[Death] 最高記録: ${bestRecordMinutes}分\n`);
+    log(`[Death] 最高記録: ${bestRecordMinutes}分`);
+
+    const lessons = cogOrch.getShared().get().lessonsThisLife;
+    if (lessons.length > 0) {
+      log(`[Death] この世代の教訓: ${lessons.join(', ')}`);
+    }
+
+    // Death scene: generate farewell via LLM, speak via TTS, then end stream
+    hudWriter.update({ commentary: `死亡... ${deathCause}` });
+    hudWriter.flush();
+
+    try {
+      const farewell = await generateDeathFarewell(
+        deathCause, survivalMinutes, generation, lessons,
+        process.env.ANTHROPIC_API_KEY!,
+        cogOrch.getShared().getEmotionLabel(),
+      );
+      log(`  [Death TTS] "${farewell}"`);
+      hudWriter.update({ commentary: farewell });
+      hudWriter.flush();
+      const ttsResult = await tts.synthesize(farewell);
+      if (ttsResult.ok) {
+        audioQueue.enqueue(ttsResult.value);
+        // Wait for TTS playback to finish
+        await new Promise(r => setTimeout(r, Math.max(5000, farewell.length * 150)));
+      }
+    } catch (e) {
+      log(`[Death] 配信終了あいさつ生成失敗: ${e instanceof Error ? e.message : e}`);
+    }
+
+    await finalizeYoutubeSession(ytCtx);
     return 'died';
   }
 
   if (stopRequested) {
     log(`[Stop] ダッシュボードから停止要求`);
+    await finalizeYoutubeSession(ytCtx);
     return 'stopped';
   }
 
   return 'disconnected';
 }
 
+// --- Death farewell ---
+
+async function generateDeathFarewell(
+  deathCause: string,
+  survivalMinutes: number,
+  gen: number,
+  lessons: string[],
+  apiKey: string,
+  emotionLabel: string,
+): Promise<string> {
+  const systemPrompt = `あなたは「星守レイ」です。Minecraft ハードコアモードをプレイする AI VTuber です。
+たった今、死んでしまいました。視聴者に向けて感想・反省・配信終了のあいさつを話してください。
+
+【ルール】
+- 3〜5文程度の短いスピーチ
+- 死因に触れ、簡単な反省を述べる
+- 次回への意気込みを少し入れる
+- 視聴者への感謝で締める
+- キャラクターとして自然な口調で（落ち着いた、でも少し悔しそうな感じ）`;
+
+  const userMessage = JSON.stringify({
+    death_cause: deathCause,
+    survival_minutes: survivalMinutes,
+    generation: gen,
+    lessons_learned: lessons,
+    current_emotion: emotionLabel,
+  });
+
+  const res = await fetch('https://api.anthropic.com/v1/messages', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'x-api-key': apiKey,
+      'anthropic-version': '2023-06-01',
+    },
+    body: JSON.stringify({
+      model: 'claude-haiku-4-20250414',
+      max_tokens: 300,
+      system: systemPrompt,
+      messages: [{ role: 'user', content: userMessage }],
+    }),
+  });
+
+  if (!res.ok) {
+    return `あぁ...${deathCause}でやられちゃった。${survivalMinutes}分の冒険でした。みなさん、見てくれてありがとう。次こそは頑張るよ。`;
+  }
+
+  const data = (await res.json()) as any;
+  return data.content[0].text;
+}
+
 // --- Main ---
 
 async function main() {
-  log('=== AI Minecraft 配信システム起動 ===\n');
+  log('=== AI Minecraft 配信システム (多層認知アーキテクチャ版) 起動 ===\n');
 
   const mcHost = process.env.MINECRAFT_HOST || 'localhost';
   const mcPort = parseInt(process.env.MINECRAFT_PORT || '25565');
   const voicevoxHost = process.env.VOICEVOX_HOST || 'http://localhost:50021';
 
-  if (!process.env.YOUTUBE_STREAM_KEY) { console.error('YOUTUBE_STREAM_KEY が未設定'); process.exit(1); }
+  const youtubeAdapter = tryCreateGoogleYouTubeAdapter();
+  const youtubeClient = youtubeAdapter ? new YouTubeClient(youtubeAdapter) : null;
+  const streamKeyFallback = process.env.YOUTUBE_STREAM_KEY?.trim();
+  if (!youtubeClient && !streamKeyFallback) {
+    console.error(
+      'YOUTUBE_STREAM_KEY または YouTube OAuth (YOUTUBE_CLIENT_ID / YOUTUBE_CLIENT_SECRET / YOUTUBE_REFRESH_TOKEN) のいずれかが必要です',
+    );
+    process.exit(1);
+  }
   if (!process.env.ANTHROPIC_API_KEY) { console.error('ANTHROPIC_API_KEY が未設定'); process.exit(1); }
 
-  const llmClient = new LLMClient(createAnthropicAdapter());
-  const tts = new VoicevoxClient(voicevoxHost, 14, createFetchAdapter());
+  const cogConfig: CognitiveOrchestratorConfig = {
+    anthropicApiKey: process.env.ANTHROPIC_API_KEY!,
+    tacticalModel: process.env.TACTICAL_MODEL || 'claude-haiku-4-20250414',
+    strategicModel: process.env.STRATEGIC_MODEL || 'claude-sonnet-4-20250514',
+    mcHost,
+    mcPort,
+    botUsername: BOT_USERNAME,
+    cameraPlayer: CAMERA_PLAYER,
+    voicevoxHost,
+    voicevoxSpeakerId: parseInt(process.env.VOICEVOX_SPEAKER_ID || '23'),
+    dbPath: DB_PATH,
+  };
+
+  const cogOrch = new CognitiveOrchestrator(cogConfig);
+  const tts = new VoicevoxClient(voicevoxHost, cogConfig.voicevoxSpeakerId, createFetchAdapter());
   const audioPlayer = createPaplayAudioPlayer();
   const audioQueue = new AudioQueue(audioPlayer);
   const avatarState = new AvatarState();
   const avatarRenderer = new AvatarRenderer(avatarState, AVATAR_BASE_PATH);
-  const avatarWriter = new AvatarFrameWriter();
+
+  const avatarWriter = new AvatarFrameWriter({
+    pipePath: AVATAR_PIPE,
+    expressionFile: EXPRESSION_FILE,
+    width: AVATAR_WIDTH,
+    height: AVATAR_HEIGHT,
+    fps: 5,
+  });
+
+  mkdirSync(HUD_DIR, { recursive: true });
+  const hudWriter = new HudWriter(HUD_DIR);
+  hudWriter.update({ generation, survivalStartTime: Date.now(), bestRecordMinutes: 0 });
+  hudWriter.flush();
+
+  const ytCtx: YoutubeSessionCtx = {
+    client: youtubeClient,
+    broadcastId: null,
+    streamId: null,
+  };
+
+  const streamTitleTemplate =
+    process.env.YOUTUBE_TITLE_TEMPLATE?.trim() || DEFAULT_STREAM_TITLE_TEMPLATE;
+  const streamDescriptionTemplate =
+    process.env.YOUTUBE_DESCRIPTION_TEMPLATE?.trim() || DEFAULT_STREAM_DESCRIPTION_TEMPLATE;
+
+  if (youtubeClient) {
+    log('[YouTube] 配信枠自動管理モード（OAuth + Live API）');
+  } else {
+    log('[YouTube] 固定ストリームキーモード (YOUTUBE_STREAM_KEY)');
+  }
 
   let ffmpegProc: ChildProcess | null = null;
 
+  cogOrch.getShared().onStateChange((field) => {
+    if (field === 'emotionalState' || field === 'threatLevel') {
+      const threatLevel = cogOrch.getShared().get().threatLevel;
+      const isSpeaking = audioQueue.isPlaying?.() ?? false;
+      avatarState.update({
+        threatLevel: threatLevel === 'critical' ? 'critical' : threatLevel === 'danger' ? 'high' : threatLevel === 'caution' ? 'medium' : 'low',
+        isSpeaking,
+      });
+    }
+  });
+
   const startStreaming = async () => {
     avatarRenderer.start();
-    avatarWriter.start();
+    avatarWriter.createPipe();
+    hudWriter.start();
 
-    ffmpegProc = startFFmpeg();
-    await new Promise((r) => setTimeout(r, 1000));
+    let rtmpUrl: string;
+    if (ytCtx.client) {
+      const title = buildStreamTitle({ generation, template: streamTitleTemplate });
+      const description = buildStreamDescription({
+        generation,
+        bestRecordMinutes,
+        totalDeaths: deathHistory.length,
+        descriptionTemplate: streamDescriptionTemplate,
+      });
+      const created = await ytCtx.client.createLiveBroadcast({
+        title,
+        description,
+        tags: buildTags(),
+        categoryId: process.env.YOUTUBE_CATEGORY_ID?.trim() || '20',
+      });
+      if (!created.ok) {
+        throw new Error(created.error);
+      }
+      ytCtx.broadcastId = created.value.broadcastId;
+      ytCtx.streamId = created.value.streamId;
+      rtmpUrl = created.value.rtmpUrl;
+      log(`[YouTube] 配信枠作成 broadcastId=${ytCtx.broadcastId}`);
+    } else {
+      ytCtx.broadcastId = null;
+      ytCtx.streamId = null;
+      rtmpUrl = `rtmp://a.rtmp.youtube.com/live2/${streamKeyFallback}`;
+    }
 
+    ffmpegProc = startFFmpegWithHud(hudWriter, rtmpUrl);
+    await new Promise(r => setTimeout(r, 1000));
     avatarWriter.connectPipe();
     audioQueue.onPlaybackStart(() => avatarState.update({ threatLevel: 'low', isSpeaking: true }));
     audioQueue.onPlaybackEnd(() => avatarState.update({ threatLevel: 'low', isSpeaking: false }));
-    await new Promise((r) => setTimeout(r, 3000));
-    log('[Stream] 配信パイプライン起動完了');
+    await new Promise(r => setTimeout(r, 3000));
+
+    if (ytCtx.client && ytCtx.broadcastId && ytCtx.streamId) {
+      await waitForYoutubeIngestReady(ytCtx.client, ytCtx.streamId, 120_000);
+      const go = await ytCtx.client.goLive(ytCtx.broadcastId);
+      if (!go.ok) log(`[YouTube] goLive 失敗: ${go.error}`);
+      else log('[YouTube] 配信を Live 状態にしました');
+    }
+
+    log('[Stream] 配信パイプライン起動完了 (アバター + HUD drawtext)');
   };
 
   const stopStreaming = () => {
     audioPlayer.stop();
     avatarRenderer.stop();
     avatarWriter.stop();
-    avatarState.destroy();
+    hudWriter.stop();
     if (ffmpegProc) { ffmpegProc.kill('SIGTERM'); ffmpegProc = null; }
     log('[Stream] 配信パイプライン停止');
   };
@@ -452,7 +580,12 @@ async function main() {
       return ok(undefined);
     },
     getLogs: () => actionLogs.slice(-50) as any,
-    getConfig: () => ({ operationMode, cooldownSeconds: COOLDOWN_MS / 1000 }),
+    getConfig: () => ({
+      operationMode,
+      cooldownSeconds: COOLDOWN_MS / 1000,
+      tacticalModel: cogConfig.tacticalModel,
+      strategicModel: cogConfig.strategicModel,
+    }),
     updateConfig: (partial) => {
       if (partial.operationMode === 'MANUAL' || partial.operationMode === 'AUTO') {
         operationMode = partial.operationMode;
@@ -475,9 +608,14 @@ async function main() {
   const shutdown = () => {
     log('\n[Shutdown] プロセス終了...');
     stopRequested = true;
-    stopStreaming();
-    dashboard.close();
-    process.exit(0);
+    void (async () => {
+      await finalizeYoutubeSession(ytCtx);
+      cogOrch.destroy();
+      stopStreaming();
+      avatarState.destroy();
+      dashboard.close();
+      process.exit(0);
+    })();
   };
   process.on('SIGINT', shutdown);
   process.on('SIGTERM', shutdown);
@@ -490,10 +628,9 @@ async function main() {
 
     log('[IDLE] 配信開始待機中...');
     while (!startRequested) {
-      await new Promise((r) => setTimeout(r, 1000));
+      await new Promise(r => setTimeout(r, 1000));
     }
 
-    // --- New stream: reset world + start ---
     currentState = 'STARTING';
     log('[Starting] ワールドリセット + 配信パイプライン起動中...');
 
@@ -501,32 +638,41 @@ async function main() {
     await waitForServer(60_000);
     restartClient();
     log('[Starting] MC クライアントのロード待機 (30s)...');
-    await new Promise((r) => setTimeout(r, 30_000));
+    await new Promise(r => setTimeout(r, 30_000));
 
     await startStreaming();
 
     let continueLoop = true;
     while (continueLoop) {
-      const result = await runOneGeneration({
-        mcHost, mcPort, llmClient, tts, audioQueue, audioPlayer, avatarState,
-      });
+      const result = await runOneGeneration(
+        cogOrch, tts, audioQueue, avatarState, hudWriter, ytCtx, streamTitleTemplate,
+      );
 
       if (result === 'died' && operationMode === 'AUTO' && !stopRequested) {
         currentState = 'RESETTING';
         log(`[Auto] ${COOLDOWN_MS / 1000}秒クールダウン後にワールドリセット...`);
-        await new Promise((r) => setTimeout(r, COOLDOWN_MS));
+        await new Promise(r => setTimeout(r, COOLDOWN_MS));
 
         if (stopRequested) { continueLoop = false; break; }
+
+        if (ytCtx.client) {
+          stopStreaming();
+        }
 
         resetWorld();
         await waitForServer(60_000);
         restartClient();
         log('[Reset] MC クライアントのロード待機 (30s)...');
-        await new Promise((r) => setTimeout(r, 30_000));
+        await new Promise(r => setTimeout(r, 30_000));
         generation++;
-      } else {
-        continueLoop = false;
+        cogOrch.nextGeneration();
+
+        if (ytCtx.client) {
+          await startStreaming();
+        }
+        continue;
       }
+      continueLoop = false;
     }
 
     stopStreaming();

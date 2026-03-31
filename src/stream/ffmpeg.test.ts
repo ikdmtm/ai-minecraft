@@ -1,7 +1,9 @@
 import {
   FFmpegManager,
   buildFFmpegArgs,
+  buildHudFilters,
   type FFmpegConfig,
+  type HudOverlayConfig,
   type ProcessSpawner,
   type FFmpegProcess,
 } from './ffmpeg';
@@ -19,6 +21,17 @@ const BASE_CONFIG: FFmpegConfig = {
   avatarWidth: 300,
   avatarHeight: 400,
   avatarFps: 5,
+};
+
+const HUD_CONFIG: HudOverlayConfig = {
+  enabled: true,
+  fontPath: '/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc',
+  filePaths: {
+    stats: '/tmp/hud/ai-mc-hud-stats.txt',
+    info: '/tmp/hud/ai-mc-hud-info.txt',
+    goal: '/tmp/hud/ai-mc-hud-goal.txt',
+    commentary: '/tmp/hud/ai-mc-hud-commentary.txt',
+  },
 };
 
 describe('buildFFmpegArgs', () => {
@@ -87,6 +100,70 @@ describe('buildFFmpegArgs', () => {
     expect(args).toContain('rgba');
     expect(args).toContain('300x400');
     expect(args).toContain('/tmp/ai-minecraft-avatar.pipe');
+  });
+
+  it('includes drawtext filters when HUD is enabled', () => {
+    const args = buildFFmpegArgs({ ...BASE_CONFIG, hud: HUD_CONFIG });
+    const filterIdx = args.indexOf('-filter_complex');
+    const filterStr = args[filterIdx + 1];
+    expect(filterStr).toContain('drawtext=');
+    expect(filterStr).toContain('reload=1');
+    expect(filterStr).toContain('ai-mc-hud-stats.txt');
+    expect(filterStr).toContain('ai-mc-hud-commentary.txt');
+  });
+
+  it('does not include drawtext when HUD is disabled', () => {
+    const args = buildFFmpegArgs({
+      ...BASE_CONFIG,
+      hud: { ...HUD_CONFIG, enabled: false },
+    });
+    const filterIdx = args.indexOf('-filter_complex');
+    const filterStr = args[filterIdx + 1];
+    expect(filterStr).not.toContain('drawtext');
+  });
+
+  it('does not include drawtext when hud is undefined', () => {
+    const args = buildFFmpegArgs(BASE_CONFIG);
+    const filterIdx = args.indexOf('-filter_complex');
+    const filterStr = args[filterIdx + 1];
+    expect(filterStr).not.toContain('drawtext');
+  });
+});
+
+describe('buildHudFilters', () => {
+  it('generates four drawtext filters', () => {
+    const result = buildHudFilters(HUD_CONFIG);
+    const count = (result.match(/drawtext=/g) || []).length;
+    expect(count).toBe(4);
+  });
+
+  it('includes font path', () => {
+    const result = buildHudFilters(HUD_CONFIG);
+    expect(result).toContain('NotoSansCJK-Regular.ttc');
+  });
+
+  it('includes all four file paths', () => {
+    const result = buildHudFilters(HUD_CONFIG);
+    expect(result).toContain('ai-mc-hud-stats.txt');
+    expect(result).toContain('ai-mc-hud-info.txt');
+    expect(result).toContain('ai-mc-hud-goal.txt');
+    expect(result).toContain('ai-mc-hud-commentary.txt');
+  });
+
+  it('uses reload=1 for dynamic updates', () => {
+    const result = buildHudFilters(HUD_CONFIG);
+    const reloadCount = (result.match(/reload=1/g) || []).length;
+    expect(reloadCount).toBe(4);
+  });
+
+  it('positions stats at bottom-left', () => {
+    const result = buildHudFilters(HUD_CONFIG);
+    expect(result).toContain('x=10:y=H-40');
+  });
+
+  it('positions commentary centered at bottom', () => {
+    const result = buildHudFilters(HUD_CONFIG);
+    expect(result).toContain('x=(W-text_w)/2:y=H-80');
   });
 });
 

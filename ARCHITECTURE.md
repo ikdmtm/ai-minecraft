@@ -9,25 +9,45 @@
 ai-minecraft/
 ├── package.json
 ├── tsconfig.json
-├── jest.config.ts
+├── jest.config.js
 ├── .env.example
 ├── docs/
 │   └── spec.md                        # 仕様書（既存）
 ├── assets/
-│   ├── avatar/                        # 星守レイ アバター PNG (12枚)
+│   ├── avatar/                        # 星守レイ アバター PNG (12枚、プレースホルダーは scripts で生成可)
 │   └── thumbnail/                     # サムネイルテンプレート素材
+├── infra/
+│   └── scripts/
+│       ├── systemd/                   # EC2: cp して systemctl enable
+│       │   ├── xvfb.service
+│       │   ├── minecraft-server.service
+│       │   ├── minecraft-client.service  # PULSE_SINK=game_sink
+│       │   ├── voicevox.service
+│       │   └── orchestrator.service    # node dist/index.js + .env + Pulse 音量 Pre
+│       ├── setup-pulseaudio.sh
+│       ├── setup-minecraft.sh
+│       ├── setup-minecraft-client.sh
+│       └── user-data.sh
 ├── src/
-│   ├── index.ts                       # エントリーポイント
+│   ├── index.ts                       # 本番エントリ（配信・認知・FFmpeg 子プロセス）
 │   ├── types/                         # 共有型定義
 │   │   ├── gameState.ts
 │   │   ├── llm.ts
 │   │   ├── state.ts
 │   │   ├── config.ts
 │   │   └── events.ts
-│   ├── orchestrator/                  # 中央制御・状態機械
+│   ├── cognitive/                     # 多層認知（反射・戦術・戦略 + オーケストレータ）
+│   │   ├── sharedState.ts
+│   │   ├── reflexLayer.ts
+│   │   ├── tacticalLayer.ts
+│   │   ├── strategicLayer.ts
+│   │   ├── orchestrator.ts
+│   │   ├── skillLibrary.ts, memory.ts
+│   │   └── *.test.ts
+│   ├── orchestrator/                  # レガシー状態機械・サイクル（スライス用）
 │   │   ├── stateMachine.ts
 │   │   ├── stateMachine.test.ts
-│   │   ├── cycle.ts                   # 1サイクル（§23）の制御
+│   │   ├── cycle.ts
 │   │   └── cycle.test.ts
 │   ├── bot/                           # Mineflayer ラッパー + リアクティブ層
 │   │   ├── client.ts                  # Mineflayer 接続・基本操作
@@ -50,14 +70,23 @@ ai-minecraft/
 │   │   ├── audioQueue.ts              # 音声再生キュー管理
 │   │   └── audioQueue.test.ts
 │   ├── stream/                        # FFmpeg 映像・音声配信
-│   │   ├── ffmpeg.ts                  # FFmpeg プロセス管理
-│   │   ├── overlay.ts                 # オーバーレイ PNG 生成（node-canvas）
+│   │   ├── ffmpeg.ts                  # FFmpeg プロセス管理 + HUD drawtext フィルタ
+│   │   ├── ffmpeg.test.ts
+│   │   ├── overlay.ts                 # オーバーレイデータ整形
 │   │   ├── overlay.test.ts
 │   │   ├── avatar.ts                  # アバター表情状態管理
-│   │   └── avatar.test.ts
-│   ├── youtube/                       # YouTube API
-│   │   ├── api.ts                     # 配信枠 CRUD・サムネイルアップロード
-│   │   ├── metadata.ts                # タイトル・概要欄・タグ生成
+│   │   ├── avatar.test.ts
+│   │   ├── avatarRenderer.ts          # 表情ファイル書き出し
+│   │   ├── avatarRenderer.test.ts
+│   │   ├── avatarFrameWriter.ts       # RGBA rawvideo → named pipe（バックプレッシャー対応）
+│   │   ├── avatarFrameWriter.test.ts
+│   │   ├── hudWriter.ts              # HUD テキストファイル書き出し（drawtext 用）
+│   │   └── hudWriter.test.ts
+│   ├── youtube/                       # YouTube Live API
+│   │   ├── api.ts                     # YouTubeClient + アダプタ IF
+│   │   ├── googleApiAdapter.ts        # googleapis 本番実装（OAuth refresh）
+│   │   ├── googleApiAdapter.test.ts
+│   │   ├── metadata.ts                # タイトル・概要・サムネコマンド・生存中表示タイトル
 │   │   └── metadata.test.ts
 │   ├── db/                            # SQLite データ層
 │   │   ├── database.ts                # 接続管理（WAL モード）
@@ -77,16 +106,21 @@ ai-minecraft/
 │   └── config/                        # 設定管理
 │       ├── schema.ts                  # 設定スキーマ（Zod）
 │       └── loader.ts                  # 環境変数 + SQLite からの設定読み込み
-├── scripts/
-│   ├── setup-instance.sh              # EC2 初期セットアップ
-│   └── generate-thumbnail.sh          # ImageMagick サムネイル生成
-└── systemd/
-    ├── minecraft-server.service
-    ├── minecraft-client.service
-    ├── voicevox.service
-    ├── orchestrator.service
-    └── ffmpeg-stream.service
+└── scripts/
+    ├── deploy.sh                      # git pull + npm ci + build + systemctl restart orchestrator
+    ├── generate-avatar-placeholders.sh
+    ├── get-youtube-token.ts
+    └── avatar-writer.sh               # シェル版パイプ書き込み（参考・systemd からは未使用）
 ```
+
+### 1.1 本番プロセス構成（EC2）
+
+| コンポーネント | 役割 |
+|---|---|
+| **orchestrator.service** | `WorkingDirectory=~/ai-minecraft` で `node dist/index.js`。`.env` 読込。ダッシュボード待機 → 配信開始でワールドリセット・ボット・**FFmpeg を同一 Node プロセスが spawn**（x11grab + Pulse `combined_sink.monitor` + アバター rawvideo パイプ + HUD `drawtext`）→ RTMP。 |
+| **FFmpeg / アバター** | 独立した `ffmpeg-stream.service` / `avatar-writer.service` は**廃止**（二重起動防止）。 |
+| **YouTube** | `YOUTUBE_CLIENT_ID` / `YOUTUBE_CLIENT_SECRET` / `YOUTUBE_REFRESH_TOKEN` が揃うと **Live API で配信枠・ストリームを世代ごとに作成**し `goLive`。欠ける場合は `YOUTUBE_STREAM_KEY` のみで固定 RTMP。配信中は約5分ごとにタイトルへ生存分数を反映。 |
+| **PulseAudio** | `voicevox_sink`（TTS）と `game_sink`（MC クライアント）を `combined_sink` にループバック。orchestrator の `ExecStartPre` で `~/.config/pulse/set-volumes.sh` を実行。 |
 
 ## 2. モジュール責務と境界
 
@@ -377,35 +411,40 @@ export interface IAudioQueue {
 
 ### stream/
 
+映像配信は FFmpeg の filter_complex で実現。3層構成:
+
+1. **x11grab**: Xvfb 上の Minecraft クライアント映像（スペクテイターモードでボット視点）
+2. **rawvideo overlay**: アバター表情を named pipe 経由で右下に合成（AvatarFrameWriter）
+3. **drawtext HUD**: 体力/空腹/目標/実況テキストを動的テキストファイルから読み込み描画（HudWriter）
+
+スペクテイターモードではサバイバルUIが表示されないため、
+HudWriter が SharedStateBus のデータからテキストファイルを 4Hz で更新し、
+FFmpeg drawtext の `reload=1` オプションで毎フレーム再読み込みする。
+
 ```typescript
-export interface IStreamManager {
-  start(config: StreamConfig): Promise<void>;
-  stop(): Promise<void>;
-  isRunning(): boolean;
-  switchScene(scene: 'live' | 'death' | 'waiting'): void;
-}
-
-export interface IOverlayRenderer {
-  update(state: OverlayState): Promise<void>;
-}
-
-export interface OverlayState {
-  survivalTime: string;
-  bestRecord: string;
+export interface HudData {
+  health: number;
+  maxHealth: number;
+  hunger: number;
+  position: { x: number; y: number; z: number };
+  generation: number;
+  survivalStartTime: number;
+  bestRecordMinutes: number;
   currentGoal: string;
-  threatLevel: ThreatLevel;
+  threatLevel: string;
+  reflexState: string;
   commentary: string;
-  avatarExpression: AvatarExpression;
-  isSpeaking: boolean;
+  emotionLabel: string;
+}
+
+export interface HudOverlayConfig {
+  enabled: boolean;
+  fontPath: string;
+  filePaths: HudFilePaths;
 }
 
 export type AvatarExpression =
-  | 'normal' | 'serious' | 'anxious' | 'scared' | 'happy' | 'thinking';
-
-export interface StreamConfig {
-  rtmpUrl: string;
-  localRecordingPath: string;
-}
+  | 'normal' | 'serious' | 'sad' | 'surprised' | 'happy' | 'thinking';
 ```
 
 ### youtube/
@@ -522,6 +561,7 @@ CREATE TABLE config (
 - **すべてのロジックモジュールはテストを先に書いてから実装する**
 - 外部依存（Mineflayer、LLM API、VOICEVOX、YouTube API、FFmpeg）はインターフェースで抽象化し、テスト時はモックに差し替える
 - テストが通る最小実装を書き、リファクタリングする（Red → Green → Refactor）
+- **ローカル / WSL**: `npm test` は既定で `jest --runInBand`（メモリ節約）。並列は `npm run test:parallel`。`jest.config.js` の `maxWorkers` は環境変数 `JEST_MAX_WORKERS` で上書き可。
 
 ### テスト分類
 
@@ -545,15 +585,19 @@ CREATE TABLE config (
 | `llm/client` | API 呼び出し・リトライ | HTTP クライアント | **Yes** |
 | `tts/voicevox` | 音声合成リクエスト | HTTP クライアント | **Yes** |
 | `tts/audioQueue` | キュー管理・再生制御 | オーディオ再生 | **Yes** |
-| `stream/overlay` | PNG 描画ロジック | node-canvas | **Yes** |
+| `stream/overlay` | オーバーレイデータ整形 | なし（純粋関数） | **Yes** |
 | `stream/avatar` | 表情状態の決定 | なし（純粋関数） | **Yes** |
-| `youtube/metadata` | タイトル・概要欄生成 | なし（純粋関数） | **Yes** |
+| `stream/hudWriter` | HUD テキストファイル出力 | fs（DI可） | **Yes** |
+| `stream/avatarFrameWriter` | RGBA rawvideo パイプ書き込み | fs/exec（DI可） | **Yes** |
+| `youtube/metadata` | タイトル・概要・生存中表示タイトル | なし（純粋関数） | **Yes** |
+| `youtube/api` | YouTubeClient の Result ラップ | アダプタをモック | **Yes** |
+| `youtube/googleApiAdapter` | Live API 呼び出し | `youtube_v3` をモック | **Yes** |
 | `db/repository` | CRUD 操作 | なし（テスト用 SQLite） | **Yes** |
 | `dashboard/routes` | API レスポンス | repository | **Yes** |
 | `health/checker` | 判定ロジック | 各プロセスの存在確認 | **Yes** |
 | `bot/client` | Mineflayer 接続 | **モックしない（E2E）** | No |
 | `stream/ffmpeg` | FFmpeg 起動 | **モックしない（E2E）** | No |
-| `youtube/api` | YouTube API 呼び出し | **モックしない（E2E）** | No |
+| `youtube/googleApiAdapter`（実 API） | 本番 OAuth + Live | **E2E のみ** | No |
 
 ### モック設計
 
@@ -689,7 +733,7 @@ npx tsx src/demo-slice2.ts   # LLM プロンプト構築・レスポンスパー
 各スライスは独立してテスト・動作確認できる単位。前のスライスが完了してから次に進む。
 
 ### Slice 0: プロジェクト基盤 [準備] ✅
-- package.json, tsconfig.json, jest.config.ts のセットアップ
+- package.json, tsconfig.json, jest.config.js のセットアップ
 - 依存パッケージのインストール
 - `src/types/` の全型定義
 - `src/db/` (SQLite スキーマ + repository)
@@ -719,15 +763,17 @@ npx tsx src/demo-slice2.ts   # LLM プロンプト構築・レスポンスパー
 - **動作確認**: LLM の commentary が音声として再生される
 
 ### Slice 4: 映像配信 [配信]
-- `src/stream/ffmpeg.ts` (FFmpeg プロセス管理)
-- `src/stream/overlay.ts` (UI オーバーレイ描画)
+- `src/stream/ffmpeg.ts` (FFmpeg プロセス管理 + HUD drawtext フィルタ)
+- `src/stream/overlay.ts` (オーバーレイデータ整形)
 - `src/stream/avatar.ts` (アバター表情管理)
-- **テスト**: オーバーレイ描画、アバター表情決定
+- `src/stream/avatarFrameWriter.ts` (RGBA rawvideo パイプ書き込み)
+- `src/stream/hudWriter.ts` (HUD テキスト書き出し)
+- **テスト**: drawtext 引数生成、HUD テキスト出力、アバター表情決定、パイプ信頼性
 - **動作確認**: ゲーム画面 + UI + アバター + 音声がローカル録画される
 
 ### Slice 5: YouTube 配信 + 死亡→再起動 [運用ループ]
-- `src/youtube/api.ts` (YouTube API)
-- `src/youtube/metadata.ts` (メタデータ生成)
+- `src/youtube/api.ts` + `googleApiAdapter.ts` (Live API / 固定キー切替は `index.ts`)
+- `src/youtube/metadata.ts` (メタデータ・生存中タイトル)
 - `src/orchestrator/stateMachine.ts` (状態機械)
 - 死亡検知 → ENDING_STREAM → IDLE の一連フロー
 - **テスト**: 状態遷移、メタデータ生成

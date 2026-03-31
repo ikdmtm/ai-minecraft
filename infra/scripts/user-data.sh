@@ -76,6 +76,9 @@ fi
 cd /home/ubuntu/ai-minecraft
 su - ubuntu -c "cd /home/ubuntu/ai-minecraft && npm install && npm run build"
 
+# アバター用プレースホルダー PNG（未コミット環境向け）
+bash /home/ubuntu/ai-minecraft/scripts/generate-avatar-placeholders.sh
+
 # -------------------------------------------------------
 # Phase 3: コンポーネントセットアップ (clone 済みのスクリプトを使用)
 # -------------------------------------------------------
@@ -102,8 +105,6 @@ systemctl enable xvfb.service
 systemctl enable minecraft-server.service
 systemctl enable minecraft-client.service
 systemctl enable voicevox.service
-systemctl enable avatar-writer.service
-systemctl enable ffmpeg-stream.service
 systemctl enable orchestrator.service
 
 systemctl start xvfb.service

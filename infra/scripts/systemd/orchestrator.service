@@ -7,10 +7,12 @@ Wants=minecraft-server.service voicevox.service
 Type=simple
 User=ubuntu
 WorkingDirectory=/home/ubuntu/ai-minecraft
-ExecStart=/usr/bin/node dist/orchestrator/orchestrator.js
+EnvironmentFile=/home/ubuntu/ai-minecraft/.env
+Environment=NODE_ENV=production
+ExecStartPre=/bin/bash /home/ubuntu/.config/pulse/set-volumes.sh
+ExecStart=/usr/bin/node dist/index.js
 Restart=always
 RestartSec=15
-Environment=NODE_ENV=production
 CPUAffinity=3
 StandardOutput=journal
 StandardError=journal

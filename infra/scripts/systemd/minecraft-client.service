@@ -12,6 +12,7 @@ Environment=GALLIUM_DRIVER=llvmpipe
 Environment=LP_NUM_THREADS=2
 Environment=MESA_GL_VERSION_OVERRIDE=4.5
 Environment=MESA_GLSL_VERSION_OVERRIDE=450
+Environment=PULSE_SINK=game_sink
 WorkingDirectory=/home/ubuntu/minecraft-client
 ExecStart=/home/ubuntu/minecraft-client/launch.sh
 Restart=on-failure

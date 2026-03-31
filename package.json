@@ -7,7 +7,9 @@
     "build": "tsc",
     "start": "tsx src/index.ts",
     "dev": "tsx watch src/index.ts",
-    "test": "jest",
+    "test": "jest --runInBand",
+    "test:parallel": "jest",
+    "test:serial": "jest --runInBand",
     "test:watch": "jest --watch",
     "test:coverage": "jest --coverage",
     "lint": "tsc --noEmit"
@@ -19,6 +21,7 @@
     "better-sqlite3": "^12.8.0",
     "dotenv": "^17.3.1",
     "express": "^5.2.1",
+    "googleapis": "^171.4.0",
     "mineflayer": "^4.35.0",
     "mineflayer-pathfinder": "^2.4.5",
     "pino": "^10.3.1",

@@ -25,6 +25,23 @@ export function buildStreamTitle(input: { generation: number; template: string }
   return input.template.replace('{世代番号}', String(input.generation));
 }
 
+/** 配信中のタイトル（生存分数を含む）。5分ごとの更新用。 */
+export function buildStreamTitleLive(input: {
+  generation: number;
+  survivalMinutes: number;
+  baseTemplate: string;
+}): string {
+  const base = buildStreamTitle({ generation: input.generation, template: input.baseTemplate });
+  return `${base} 🔴 ${input.survivalMinutes}分生存中`;
+}
+
+export const DEFAULT_STREAM_TITLE_TEMPLATE =
+  '【AI Minecraft】星守レイのハードコア生存実験 #Gen{世代番号}';
+
+export const DEFAULT_STREAM_DESCRIPTION_TEMPLATE = `星守レイのハードコア自動配信 — 第{世代番号}世代
+最高記録: {最高記録}
+累計死亡: {累計死亡}回`;
+
 export function buildStreamDescription(input: StreamMetadataInput): string {
   return input.descriptionTemplate
     .replace('{世代番号}', String(input.generation))

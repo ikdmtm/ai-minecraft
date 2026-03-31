@@ -7,7 +7,7 @@ describe('RecoveryDispatcher', () => {
   const ACTIONS: RecoveryAction[] = [
     { targetName: 'minecraft-server', command: 'systemctl restart minecraft-server' },
     { targetName: 'voicevox', command: 'docker restart voicevox' },
-    { targetName: 'ffmpeg-stream', command: 'systemctl restart ffmpeg-stream' },
+    { targetName: 'orchestrator', command: 'systemctl restart orchestrator.service' },
   ];
 
   beforeEach(() => {

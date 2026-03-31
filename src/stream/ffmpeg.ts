@@ -1,4 +1,5 @@
 import type { EventEmitter } from 'events';
+import type { HudFilePaths } from './hudWriter.js';
 
 export interface FFmpegConfig {
   display: string;
@@ -13,6 +14,13 @@ export interface FFmpegConfig {
   avatarWidth: number;
   avatarHeight: number;
   avatarFps: number;
+  hud?: HudOverlayConfig;
+}
+
+export interface HudOverlayConfig {
+  enabled: boolean;
+  fontPath: string;
+  filePaths: HudFilePaths;
 }
 
 export interface FFmpegProcess {
@@ -31,13 +39,79 @@ interface FFmpegManagerOptions {
 }
 
 /**
+ * FFmpeg drawtext フィルタ1行分を生成する。
+ * reload=1 で FFmpeg がファイルを毎フレーム再読み込みする。
+ */
+function drawtext(opts: {
+  textfile: string;
+  fontPath: string;
+  fontSize: number;
+  fontColor: string;
+  borderW: number;
+  x: string;
+  y: string;
+}): string {
+  const escaped = opts.textfile.replace(/:/g, '\\:').replace(/'/g, "\\'");
+  return [
+    `drawtext=textfile='${escaped}'`,
+    `reload=1`,
+    `fontfile='${opts.fontPath}'`,
+    `fontsize=${opts.fontSize}`,
+    `fontcolor=${opts.fontColor}`,
+    `borderw=${opts.borderW}`,
+    `bordercolor=black@0.8`,
+    `x=${opts.x}`,
+    `y=${opts.y}`,
+  ].join(':');
+}
+
+/**
+ * HUD drawtext フィルタ群を生成する。
+ * 各テキストファイルは HudWriter が定期的に更新する。
+ */
+export function buildHudFilters(hud: HudOverlayConfig): string {
+  const font = hud.fontPath;
+  const filters = [
+    drawtext({
+      textfile: hud.filePaths.stats,
+      fontPath: font, fontSize: 20, fontColor: 'white', borderW: 2,
+      x: '10', y: 'H-40',
+    }),
+    drawtext({
+      textfile: hud.filePaths.info,
+      fontPath: font, fontSize: 18, fontColor: 'white', borderW: 2,
+      x: 'W-360', y: '15',
+    }),
+    drawtext({
+      textfile: hud.filePaths.goal,
+      fontPath: font, fontSize: 18, fontColor: 'yellow', borderW: 2,
+      x: '10', y: '15',
+    }),
+    drawtext({
+      textfile: hud.filePaths.commentary,
+      fontPath: font, fontSize: 22, fontColor: 'white', borderW: 3,
+      x: '(W-text_w)/2', y: 'H-80',
+    }),
+  ];
+  return filters.join(',');
+}
+
+/**
  * FFmpeg のコマンドライン引数を構築する。
  * x11grab → Minecraft 画面キャプチャ
  * pulse → PulseAudio combined_sink
  * libx264 ultrafast → CPU エンコード（負荷最小）
- * overlay → アバター合成用の filter_complex
+ * overlay → アバター合成用、drawtext → HUD 情報表示
  */
 export function buildFFmpegArgs(config: FFmpegConfig): string[] {
+  let filterComplex = '[0:v][2:v]overlay=W-w-20:H-h-20:format=auto';
+
+  if (config.hud?.enabled) {
+    filterComplex += ',' + buildHudFilters(config.hud);
+  }
+
+  filterComplex += '[out]';
+
   return [
     // Input 0: Video (X11 screen capture)
     '-f', 'x11grab',
@@ -49,16 +123,15 @@ export function buildFFmpegArgs(config: FFmpegConfig): string[] {
     '-f', 'pulse',
     '-i', config.pulseAudioSource,
 
-    // Input 2: Avatar (raw RGBA from named pipe, written by avatar-writer.sh)
+    // Input 2: Avatar (raw RGBA from named pipe)
     '-f', 'rawvideo',
     '-pixel_format', 'rgba',
     '-video_size', `${config.avatarWidth}x${config.avatarHeight}`,
     '-framerate', String(config.avatarFps),
     '-i', config.avatarPipePath,
 
-    // Filter: overlay avatar at bottom-right with transparency
     '-filter_complex',
-    '[0:v][2:v]overlay=W-w-20:H-h-20:format=auto[out]',
+    filterComplex,
 
     '-map', '[out]',
     '-map', '1:a',

@@ -1,5 +1,6 @@
 import {
   buildStreamTitle,
+  buildStreamTitleLive,
   buildStreamDescription,
   buildThumbnailCommand,
   buildTags,
@@ -20,6 +21,17 @@ describe('buildStreamTitle', () => {
   it('handles generation number > 999', () => {
     const title = buildStreamTitle({ generation: 1234, template: '#Gen{世代番号}' });
     expect(title).toBe('#Gen1234');
+  });
+});
+
+describe('buildStreamTitleLive', () => {
+  it('appends survival minutes and emoji', () => {
+    const t = buildStreamTitleLive({
+      generation: 5,
+      survivalMinutes: 42,
+      baseTemplate: '【AI Minecraft】#Gen{世代番号}',
+    });
+    expect(t).toBe('【AI Minecraft】#Gen5 🔴 42分生存中');
   });
 });
 

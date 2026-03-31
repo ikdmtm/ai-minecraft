@@ -367,10 +367,27 @@ YOUTUBE_CLIENT_SECRET=GOCSPX-xxxxxxxxxxxx
 # Step 7 で取得した値
 YOUTUBE_REFRESH_TOKEN=1//xxxxxxxxxxxxxxxx
 
-# 自分の YouTube チャンネル ID
+# 自分の YouTube チャンネル ID（任意・他ツール連携用）
 # YouTube Studio → 設定 → チャンネル → 「チャンネル ID」 で確認
 YOUTUBE_CHANNEL_ID=UCxxxxxxxxxxxxxxxx
+
+# --- 以下は状況に応じて ---
+
+# OAuth 3 項目が未設定のときのみ必須: 固定ストリームキー（手動で作成した配信のキー）
+# YOUTUBE_STREAM_KEY=xxxx-xxxx-xxxx-xxxx
+
+# 配信枠自動管理モード時の任意項目
+# YOUTUBE_CATEGORY_ID=20
+# YOUTUBE_TITLE_TEMPLATE=【AI Minecraft】星守レイのハードコア生存実験 #Gen{世代番号}
+# YOUTUBE_DESCRIPTION_TEMPLATE=（複数行可。{世代番号}{最高記録}{累計死亡} を置換）
 ```
+
+**配信のしかた（どちらか一方）**
+
+| モード | 条件 | 挙動 |
+|---|---|---|
+| **配信枠自動管理** | `YOUTUBE_CLIENT_ID` / `SECRET` / `REFRESH_TOKEN` がすべて設定 | 配信開始ごとに Live API で枠・ストリームを作成し RTMP へ接続。AUTO 時は世代ごとに新規枠。 |
+| **固定ストリームキー** | 上記 OAuth が空で `YOUTUBE_STREAM_KEY` のみ | 従来どおり単一 RTMP キーへ送出。 |
 
 > **YouTube チャンネル ID の確認方法:**
 > 1. https://studio.youtube.com/ にアクセス
@@ -397,11 +414,11 @@ OPERATION_MODE=MANUAL
 ### 9-2. orchestrator を起動
 
 ```bash
-# systemd で起動
-sudo systemctl start orchestrator
+# systemd で起動（ユニット名は .service 付きでも可）
+sudo systemctl start orchestrator.service
 
-# ログをリアルタイムで確認
-journalctl -u orchestrator -f
+# ログをリアルタイムで確認（FFmpeg の stderr もここに出る）
+journalctl -u orchestrator.service -f
 ```
 
 ### 9-3. ダッシュボードから配信開始
@@ -435,26 +452,21 @@ ssh -L 8080:localhost:8080 -i ~/.ssh/id_ed25519 ubuntu@<public_ip>
 ### ログの確認
 
 ```bash
-# orchestrator のログ
-journalctl -u orchestrator -f
+# アプリ + FFmpeg（子プロセス）のログは orchestrator に集約
+journalctl -u orchestrator.service -f
 
 # Minecraft Server のログ
-journalctl -u minecraft-server -f
-
-# FFmpeg（配信映像）のログ
-journalctl -u ffmpeg-stream -f
+journalctl -u minecraft-server.service -f
 
 # 全てのサービスの状態
-systemctl status minecraft-server voicevox xvfb orchestrator
+systemctl status minecraft-server.service voicevox.service xvfb.service orchestrator.service
 ```
 
 ### ダッシュボードで確認できること
 
-- 現在の状態（BOOTING → PREPARING_STREAM → LIVE_RUNNING）
-- 現在の世代番号
-- 最高生存記録
-- 最近の行動ログ
-- 死亡履歴
+- 現在の状態（例: `IDLE` / `STARTING` / `LIVE_RUNNING` / `DEATH_DETECTED` / `RESETTING`）
+- 現在の世代番号・生存時間・最高記録
+- 最近の行動ログ・死亡履歴
 
 ### 配信テスト後の停止
 
@@ -462,7 +474,7 @@ systemctl status minecraft-server voicevox xvfb orchestrator
 または:
 
 ```bash
-sudo systemctl stop orchestrator
+sudo systemctl stop orchestrator.service
 ```
 
 ---
@@ -481,11 +493,12 @@ OPERATION_MODE=AUTO
 ```
 
 ```bash
-sudo systemctl restart orchestrator
+sudo systemctl restart orchestrator.service
 ```
 
-**AUTO モード** = 死亡後に自動で次の世代を開始し、新しい配信を作成する。
-クールダウン（60 秒）後に自動再開。1 日の配信上限（デフォルト 20 回）に達したら翌日まで休止。
+**AUTO モード** = 死亡後に短いクールダウン（`index.ts` の `COOLDOWN_MS`、既定 15 秒）のあと次の世代を開始。**OAuth 配信枠自動管理**を有効にしている場合は世代ごとに新しい YouTube ライブ枠を作成し、FFmpeg を再接続する。固定 `YOUTUBE_STREAM_KEY` のみの場合は同一 RTMP セッションを維持しうる。
+
+> デプロイ更新: `bash scripts/deploy.sh`（`git pull` → `npm ci` → `npm run build` → `systemctl restart orchestrator.service`）。
 
 ---
 
