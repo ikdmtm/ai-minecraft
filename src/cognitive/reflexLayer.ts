@@ -654,7 +654,12 @@ export class ReflexLayer {
   private async doMineBlock(blockTypes: string[]): Promise<void> {
     const bot = this.requireBot();
     const block = bot.findBlock({
-      matching: (b) => blockTypes.includes(b.name) && !this.miningFailureGuard.isBlocked(this.getBlockActionKey(b)),
+      matching: (b) => {
+        // mineflayer's matcher can receive null for unloaded chunk positions.
+        if (!b || typeof b.name !== 'string') return false;
+        if (!blockTypes.includes(b.name)) return false;
+        return !this.miningFailureGuard.isBlocked(this.getBlockActionKey(b));
+      },
       maxDistance: 64,
     });
     if (!block) {
@@ -1049,9 +1054,11 @@ export class ReflexLayer {
     }, 30_000);
 
     let failed = false;
+    let failureReason: string | null = null;
     this.currentAction = fn()
-      .catch(() => {
+      .catch((error: unknown) => {
         failed = true;
+        failureReason = formatActionError(error);
         try { this.bot?.pathfinder.stop(); } catch { /* ignore */ }
       })
       .finally(() => {
@@ -1061,7 +1068,9 @@ export class ReflexLayer {
         }
         const durationMs = Math.max(0, Date.now() - startedAt);
         if (failed) {
-          const detail = `${label} failed (${durationMs}ms)`;
+          const detail = failureReason
+            ? `${label} failed (${durationMs}ms): ${failureReason}`
+            : `${label} failed (${durationMs}ms)`;
           this.events?.onReactiveAction({ time: 'now', event: 'action_failed', detail });
           this.shared.pushEvent({ type: 'action_failed', detail, importance: 'medium' });
         } else {
@@ -1448,4 +1457,30 @@ function toAgeMs(timestamp: number): number | null {
 
 function formatAgeMs(ageMs: number | null): string {
   return ageMs === null ? 'n/a' : `${ageMs}ms`;
+}
+
+function formatActionError(error: unknown): string | null {
+  if (error instanceof Error) {
+    const source = error.name && error.name !== 'Error'
+      ? `${error.name}: ${error.message}`
+      : error.message;
+    return normalizeErrorText(source);
+  }
+  if (typeof error === 'string') {
+    return normalizeErrorText(error);
+  }
+  if (error && typeof error === 'object') {
+    try {
+      return normalizeErrorText(JSON.stringify(error));
+    } catch {
+      return 'unknown_error_object';
+    }
+  }
+  return null;
+}
+
+function normalizeErrorText(raw: string): string {
+  const compact = raw.replace(/\s+/g, ' ').trim();
+  if (!compact) return 'unknown_error';
+  return compact.length > 180 ? `${compact.slice(0, 177)}...` : compact;
 }
