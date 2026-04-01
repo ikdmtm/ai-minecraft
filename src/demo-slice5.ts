@@ -76,6 +76,9 @@ const mockAdapter: YouTubeApiAdapter = {
   async getStreamStatus() {
     return 'active';
   },
+  async getBroadcastStatus() {
+    return 'testing';
+  },
 };
 
 (async () => {

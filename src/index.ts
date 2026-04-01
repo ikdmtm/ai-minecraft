@@ -32,6 +32,7 @@ import type { DeathRecord } from './types/gameState.js';
 import { ok, err } from './types/result.js';
 import { YouTubeClient } from './youtube/api.js';
 import { tryCreateGoogleYouTubeAdapter } from './youtube/googleApiAdapter.js';
+import { goLiveWhenIngestActive } from './youtube/liveStartup.js';
 import {
   buildStreamTitle,
   buildStreamTitleLive,
@@ -55,8 +56,9 @@ const HUD_FONT = process.env.HUD_FONT_PATH || '/usr/share/fonts/opentype/noto/No
 const DEFAULT_TACTICAL_MODEL = 'claude-haiku-4-5-20251001';
 const DEFAULT_STRATEGIC_MODEL = 'claude-sonnet-4-6';
 const DEFAULT_FAREWELL_MODEL = DEFAULT_TACTICAL_MODEL;
-const YOUTUBE_GOLIVE_RETRY_TIMEOUT_MS = 120_000;
-const YOUTUBE_GOLIVE_RETRY_INTERVAL_MS = 3_000;
+const YOUTUBE_PRIVACY_STATUS = (
+  process.env.YOUTUBE_PRIVACY_STATUS?.trim().toLowerCase() || 'unlisted'
+) as 'private' | 'public' | 'unlisted';
 
 let generation = 1;
 let bestRecordMinutes = 0;
@@ -196,58 +198,6 @@ async function finalizeYoutubeSession(ctx: YoutubeSessionCtx): Promise<void> {
   else log('[YouTube] 配信枠を Complete に遷移しました');
   ctx.broadcastId = null;
   ctx.streamId = null;
-}
-
-async function waitForYoutubeIngestReady(
-  client: YouTubeClient,
-  streamId: string,
-  timeoutMs: number,
-): Promise<void> {
-  const started = Date.now();
-  while (Date.now() - started < timeoutMs) {
-    const res = await client.getStreamStatus(streamId);
-    if (res.ok && (res.value === 'active' || res.value === 'ready')) {
-      log(`[YouTube] インジェスト準備 OK (${res.value})`);
-      return;
-    }
-    await new Promise((r) => setTimeout(r, 3000));
-  }
-  log('[YouTube] インジェスト ready/active 待ちタイムアウト — goLive を試行します');
-}
-
-async function goLiveWithRetry(
-  client: YouTubeClient,
-  broadcastId: string,
-  streamId: string,
-  timeoutMs: number,
-): Promise<void> {
-  const deadline = Date.now() + timeoutMs;
-  let attempt = 0;
-
-  while (Date.now() < deadline) {
-    attempt++;
-    const go = await client.goLive(broadcastId);
-    if (go.ok) {
-      log('[YouTube] 配信を Live 状態にしました');
-      return;
-    }
-
-    if (!go.error.includes('Stream is inactive')) {
-      log(`[YouTube] goLive 失敗: ${go.error}`);
-      return;
-    }
-
-    const status = await client.getStreamStatus(streamId);
-    if (status.ok) {
-      log(`[YouTube] goLive 再試行 ${attempt}: stream=${status.value}`);
-    } else {
-      log(`[YouTube] goLive 再試行 ${attempt}: stream_status_error=${status.error}`);
-    }
-
-    await new Promise((r) => setTimeout(r, YOUTUBE_GOLIVE_RETRY_INTERVAL_MS));
-  }
-
-  log('[YouTube] goLive タイムアウト: Stream is inactive が継続');
 }
 
 // --- Run one generation with cognitive architecture ---
@@ -556,6 +506,7 @@ async function main() {
         description,
         tags: buildTags(),
         categoryId: process.env.YOUTUBE_CATEGORY_ID?.trim() || '20',
+        privacyStatus: YOUTUBE_PRIVACY_STATUS,
       });
       if (!created.ok) {
         throw new Error(created.error);
@@ -578,13 +529,14 @@ async function main() {
     await new Promise(r => setTimeout(r, 3000));
 
     if (ytCtx.client && ytCtx.broadcastId && ytCtx.streamId) {
-      await waitForYoutubeIngestReady(ytCtx.client, ytCtx.streamId, 120_000);
-      await goLiveWithRetry(
-        ytCtx.client,
-        ytCtx.broadcastId,
-        ytCtx.streamId,
-        YOUTUBE_GOLIVE_RETRY_TIMEOUT_MS,
-      );
+      try {
+        await goLiveWhenIngestActive(ytCtx.client, ytCtx.broadcastId, ytCtx.streamId, {
+          timeoutMs: 120_000,
+          log,
+        });
+      } catch (e) {
+        log(`[YouTube] goLive 失敗: ${e instanceof Error ? e.message : e}`);
+      }
     }
 
     log('[Stream] 配信パイプライン起動完了 (アバター + HUD drawtext)');
