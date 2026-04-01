@@ -21,17 +21,32 @@ import { writeFileSync, mkdirSync } from 'fs';
 import { CognitiveOrchestrator, type CognitiveOrchestratorConfig } from './cognitive/orchestrator.js';
 import { VoicevoxClient, createFetchAdapter } from './tts/voicevox.js';
 import { AudioQueue, type AudioPlayer } from './tts/audioQueue.js';
+import { CommentaryThrottle } from './tts/commentaryThrottle.js';
 import { AvatarState } from './stream/avatar.js';
+import { resolveAvatarBasePath } from './stream/avatarConfig.js';
 import { AvatarRenderer, EXPRESSION_FILE } from './stream/avatarRenderer.js';
 import { AvatarFrameWriter } from './stream/avatarFrameWriter.js';
 import { HudWriter } from './stream/hudWriter.js';
+import { CommentarySubtitleSync } from './stream/commentarySubtitleSync.js';
 import { buildFFmpegArgs, type FFmpegConfig } from './stream/ffmpeg.js';
+import { waitForProcessStability } from './stream/processHealth.js';
 import { startDashboard } from './dashboard/server.js';
-import type { DashboardDeps } from './dashboard/routes.js';
+import type { DashboardDeps, DashboardLogEntry } from './dashboard/routes.js';
 import type { DeathRecord } from './types/gameState.js';
 import { ok, err } from './types/result.js';
+import {
+  buildServerReadyJournalCommand,
+  waitForMinecraftServerReady,
+} from './runtime/minecraftServer.js';
+import { LiveStreamSession, type LiveStreamTarget } from './runtime/liveStreamSession.js';
+import {
+  DEFAULT_FAREWELL_MODEL,
+  DEFAULT_STRATEGIC_MODEL,
+  DEFAULT_TACTICAL_MODEL,
+} from './llm/modelDefaults.js';
 import { YouTubeClient } from './youtube/api.js';
 import { tryCreateGoogleYouTubeAdapter } from './youtube/googleApiAdapter.js';
+import { goLiveWhenIngestActive } from './youtube/liveStartup.js';
 import {
   buildStreamTitle,
   buildStreamTitleLive,
@@ -40,11 +55,12 @@ import {
   DEFAULT_STREAM_TITLE_TEMPLATE,
   DEFAULT_STREAM_DESCRIPTION_TEMPLATE,
 } from './youtube/metadata.js';
+import { REI_PERSONA_GUIDELINES, REI_SYSTEM_INTRO } from './persona/rei.js';
 
 const COOLDOWN_MS = 15_000;
 const MC_SERVER_DIR = '/home/ubuntu/minecraft-server';
 const AVATAR_PIPE = '/tmp/ai-minecraft-avatar.pipe';
-const AVATAR_BASE_PATH = process.env.AVATAR_BASE_PATH || '/home/ubuntu/ai-minecraft/assets/avatar';
+const AVATAR_BASE_PATH = resolveAvatarBasePath();
 const AVATAR_WIDTH = 300;
 const AVATAR_HEIGHT = 400;
 const BOT_USERNAME = 'AI_Rei';
@@ -52,6 +68,27 @@ const CAMERA_PLAYER = 'StreamCamera';
 const DB_PATH = process.env.DB_PATH || '/home/ubuntu/ai-minecraft/data/ai-minecraft.db';
 const HUD_DIR = '/tmp/ai-mc-hud';
 const HUD_FONT = process.env.HUD_FONT_PATH || '/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc';
+const STREAM_VIDEO_BITRATE = process.env.STREAM_VIDEO_BITRATE?.trim() || '4000k';
+const STREAM_AUDIO_BITRATE = process.env.STREAM_AUDIO_BITRATE?.trim() || '128k';
+const STREAM_FPS = Number.parseInt(process.env.STREAM_FPS?.trim() || '10', 10);
+const COMMENTARY_MIN_INTERVAL_MS = Number.parseInt(
+  process.env.COMMENTARY_MIN_INTERVAL_MS?.trim() || '18000',
+  10,
+);
+const COMMENTARY_SUBTITLE_DELAY_MS = Number.parseInt(
+  process.env.COMMENTARY_SUBTITLE_DELAY_MS?.trim() || '0',
+  10,
+);
+const COMMENTARY_PLAYBACK_START_DELAY_MS = Number.parseInt(
+  process.env.COMMENTARY_PLAYBACK_START_DELAY_MS?.trim() || '250',
+  10,
+);
+const HUD_SHOW_TOP_RIGHT_INFO = ['1', 'true', 'yes'].includes(
+  process.env.HUD_SHOW_TOP_RIGHT_INFO?.trim().toLowerCase() ?? '',
+);
+const YOUTUBE_PRIVACY_STATUS = (
+  process.env.YOUTUBE_PRIVACY_STATUS?.trim().toLowerCase() || 'unlisted'
+) as 'private' | 'public' | 'unlisted';
 
 let generation = 1;
 let bestRecordMinutes = 0;
@@ -61,7 +98,7 @@ let currentState: 'IDLE' | 'STARTING' | 'LIVE_RUNNING' | 'DEATH_DETECTED' | 'RES
 let stopRequested = false;
 let startRequested = false;
 const deathHistory: DeathRecord[] = [];
-const actionLogs: Array<{ timestamp: string; type: string; content: string }> = [];
+const actionLogs: DashboardLogEntry[] = [];
 
 function log(msg: string) {
   const entry = { timestamp: new Date().toISOString(), type: 'info', content: msg };
@@ -79,7 +116,7 @@ function createPaplayAudioPlayer(): AudioPlayer {
       const tmpPath = '/tmp/ai-mc-tts-current.wav';
       writeFileSync(tmpPath, buffer);
       return new Promise<void>((resolve, reject) => {
-        currentProc = spawn('paplay', ['--device=voicevox_sink', tmpPath]);
+        currentProc = spawn('paplay', ['--device=voicevox_sink', '--latency-msec=40', tmpPath]);
         currentProc.on('close', (code) => {
           currentProc = null;
           code === 0 ? resolve() : reject(new Error(`paplay exit ${code}`));
@@ -105,9 +142,9 @@ function startFFmpegWithHud(hudWriter: HudWriter, rtmpUrl: string): ChildProcess
   const ffmpegConfig: FFmpegConfig = {
     display: ':99',
     resolution: '1280x720',
-    fps: 30,
-    videoBitrate: '2500k',
-    audioBitrate: '128k',
+    fps: STREAM_FPS,
+    videoBitrate: STREAM_VIDEO_BITRATE,
+    audioBitrate: STREAM_AUDIO_BITRATE,
     rtmpUrl,
     pulseAudioSource: 'combined_sink.monitor',
     avatarBasePath: AVATAR_BASE_PATH,
@@ -119,6 +156,7 @@ function startFFmpegWithHud(hudWriter: HudWriter, rtmpUrl: string): ChildProcess
       enabled: true,
       fontPath: HUD_FONT,
       filePaths: hudPaths,
+      showTopRightInfo: HUD_SHOW_TOP_RIGHT_INFO,
     },
   };
 
@@ -149,22 +187,18 @@ function resetWorld(): void {
   }
 }
 
-function waitForServer(timeoutMs: number): Promise<void> {
-  return new Promise((resolve) => {
-    const start = Date.now();
-    const check = () => {
-      try {
-        const out = execSync(
-          'sudo journalctl -u minecraft-server --no-pager -n 10 --since "60 sec ago"',
-          { encoding: 'utf-8', timeout: 5000 },
-        );
-        if (out.includes('Done')) { resolve(); return; }
-      } catch { /* retry */ }
-      if (Date.now() - start > timeoutMs) { log('[Reset] サーバー起動タイムアウト'); resolve(); return; }
-      setTimeout(check, 3000);
-    };
-    check();
+async function waitForServer(timeoutMs: number): Promise<void> {
+  const ready = await waitForMinecraftServerReady({
+    timeoutMs,
+    readLogsSince: (sinceMs) => execSync(
+      buildServerReadyJournalCommand(sinceMs),
+      { encoding: 'utf-8', timeout: 5000 },
+    ),
   });
+
+  if (!ready) {
+    log('[Reset] サーバー起動タイムアウト');
+  }
 }
 
 function restartClient(): void {
@@ -193,23 +227,6 @@ async function finalizeYoutubeSession(ctx: YoutubeSessionCtx): Promise<void> {
   ctx.streamId = null;
 }
 
-async function waitForYoutubeIngestReady(
-  client: YouTubeClient,
-  streamId: string,
-  timeoutMs: number,
-): Promise<void> {
-  const started = Date.now();
-  while (Date.now() - started < timeoutMs) {
-    const res = await client.getStreamStatus(streamId);
-    if (res.ok && (res.value === 'active' || res.value === 'ready')) {
-      log(`[YouTube] インジェスト準備 OK (${res.value})`);
-      return;
-    }
-    await new Promise((r) => setTimeout(r, 3000));
-  }
-  log('[YouTube] インジェスト ready/active 待ちタイムアウト — goLive を試行します');
-}
-
 // --- Run one generation with cognitive architecture ---
 
 async function runOneGeneration(
@@ -218,13 +235,17 @@ async function runOneGeneration(
   audioQueue: AudioQueue,
   avatarState: AvatarState,
   hudWriter: HudWriter,
+  commentarySubtitleSync: CommentarySubtitleSync,
   ytCtx: YoutubeSessionCtx,
   streamTitleTemplate: string,
+  commentaryThrottle: CommentaryThrottle,
 ): Promise<'died' | 'stopped' | 'disconnected'> {
   currentState = 'LIVE_RUNNING';
   survivalStart = Date.now();
   stopRequested = false;
+  commentaryThrottle.reset();
   let died = false;
+  let disconnectedReason: string | null = null;
   let deathCause = 'unknown';
 
   log(`\n========== 第${generation}世代 開始 (多層認知アーキテクチャ) ==========\n`);
@@ -235,11 +256,23 @@ async function runOneGeneration(
   try {
     await cogOrch.start({
       onCommentary: async (text) => {
+        if (disconnectedReason || died || stopRequested) {
+          return;
+        }
+
+        const commentaryAction = commentaryThrottle.decide(audioQueue.pendingCount());
+        if (commentaryAction === 'skip') {
+          return;
+        }
+
         log(`  [TTS] "${text}"`);
-        hudWriter.update({ commentary: text });
         const result = await tts.synthesize(text);
-        if (result.ok) {
-          audioQueue.enqueue(result.value);
+        if (result.ok && !disconnectedReason && !died && !stopRequested) {
+          if (commentaryAction === 'replace') {
+            audioQueue.replacePending(result.value, text);
+          } else {
+            audioQueue.enqueue(result.value, text);
+          }
         }
       },
       onDeath: (cause) => {
@@ -247,17 +280,31 @@ async function runOneGeneration(
         died = true;
         deathCause = cause;
       },
+      onDisconnect: (reason) => {
+        if (disconnectedReason) return;
+        disconnectedReason = reason;
+        log(`[Bot] 切断: ${reason}`);
+        audioQueue.clear();
+        commentarySubtitleSync.reset();
+        hudWriter.update({ currentGoal: '接続切断' });
+        hudWriter.flush();
+      },
       onGoalChanged: (goal) => {
+        if (disconnectedReason) {
+          return;
+        }
         log(`  [Goal] ${goal}`);
         hudWriter.update({ currentGoal: goal });
       },
       onReactiveAction: (event) => {
+        if (disconnectedReason) {
+          return;
+        }
         log(`  [Reflex] ${event.event}: ${event.detail}`);
       },
     });
   } catch (e) {
     log(`[Bot] 接続失敗: ${e instanceof Error ? e.message : e}`);
-    await finalizeYoutubeSession(ytCtx);
     return 'disconnected';
   }
 
@@ -265,7 +312,7 @@ async function runOneGeneration(
 
   let lastYoutubeTitleSurvivalMinute = -1;
 
-  while (!died && !stopRequested) {
+  while (!died && !stopRequested && !disconnectedReason) {
     const shared = cogOrch.getShared().get();
     const survMin = Math.floor((Date.now() - survivalStart) / 60_000);
 
@@ -306,6 +353,7 @@ async function runOneGeneration(
   const survivalMinutes = Math.round((Date.now() - survivalStart) / 60_000);
   cogOrch.stop();
   audioQueue.clear();
+  commentarySubtitleSync.reset();
 
   if (died) {
     currentState = 'DEATH_DETECTED';
@@ -342,7 +390,7 @@ async function runOneGeneration(
       hudWriter.flush();
       const ttsResult = await tts.synthesize(farewell);
       if (ttsResult.ok) {
-        audioQueue.enqueue(ttsResult.value);
+        audioQueue.enqueue(ttsResult.value, farewell);
         // Wait for TTS playback to finish
         await new Promise(r => setTimeout(r, Math.max(5000, farewell.length * 150)));
       }
@@ -350,13 +398,11 @@ async function runOneGeneration(
       log(`[Death] 配信終了あいさつ生成失敗: ${e instanceof Error ? e.message : e}`);
     }
 
-    await finalizeYoutubeSession(ytCtx);
     return 'died';
   }
 
   if (stopRequested) {
     log(`[Stop] ダッシュボードから停止要求`);
-    await finalizeYoutubeSession(ytCtx);
     return 'stopped';
   }
 
@@ -373,15 +419,17 @@ async function generateDeathFarewell(
   apiKey: string,
   emotionLabel: string,
 ): Promise<string> {
-  const systemPrompt = `あなたは「星守レイ」です。Minecraft ハードコアモードをプレイする AI VTuber です。
+  const systemPrompt = `${REI_SYSTEM_INTRO}
 たった今、死んでしまいました。視聴者に向けて感想・反省・配信終了のあいさつを話してください。
+
+${REI_PERSONA_GUIDELINES}
 
 【ルール】
 - 3〜5文程度の短いスピーチ
 - 死因に触れ、簡単な反省を述べる
 - 次回への意気込みを少し入れる
 - 視聴者への感謝で締める
-- キャラクターとして自然な口調で（落ち着いた、でも少し悔しそうな感じ）`;
+- 落ち着いた女性 VTuber の自然な口調で、少し悔しさをにじませる`;
 
   const userMessage = JSON.stringify({
     death_cause: deathCause,
@@ -399,7 +447,7 @@ async function generateDeathFarewell(
       'anthropic-version': '2023-06-01',
     },
     body: JSON.stringify({
-      model: 'claude-haiku-4-20250414',
+      model: DEFAULT_FAREWELL_MODEL,
       max_tokens: 300,
       system: systemPrompt,
       messages: [{ role: 'user', content: userMessage }],
@@ -436,8 +484,8 @@ async function main() {
 
   const cogConfig: CognitiveOrchestratorConfig = {
     anthropicApiKey: process.env.ANTHROPIC_API_KEY!,
-    tacticalModel: process.env.TACTICAL_MODEL || 'claude-haiku-4-20250414',
-    strategicModel: process.env.STRATEGIC_MODEL || 'claude-sonnet-4-20250514',
+    tacticalModel: process.env.TACTICAL_MODEL || DEFAULT_TACTICAL_MODEL,
+    strategicModel: process.env.STRATEGIC_MODEL || DEFAULT_STRATEGIC_MODEL,
     mcHost,
     mcPort,
     botUsername: BOT_USERNAME,
@@ -450,9 +498,21 @@ async function main() {
   const cogOrch = new CognitiveOrchestrator(cogConfig);
   const tts = new VoicevoxClient(voicevoxHost, cogConfig.voicevoxSpeakerId, createFetchAdapter());
   const audioPlayer = createPaplayAudioPlayer();
-  const audioQueue = new AudioQueue(audioPlayer);
+  const audioQueue = new AudioQueue(audioPlayer, {
+    latencyCompensationMs: COMMENTARY_PLAYBACK_START_DELAY_MS,
+    playbackStartDelayMs: COMMENTARY_PLAYBACK_START_DELAY_MS,
+  });
+  const commentaryThrottle = new CommentaryThrottle({
+    minIntervalMs: COMMENTARY_MIN_INTERVAL_MS,
+  });
   const avatarState = new AvatarState();
   const avatarRenderer = new AvatarRenderer(avatarState, AVATAR_BASE_PATH);
+  const commentarySubtitleSync = new CommentarySubtitleSync((text) => {
+    hudWriter.update({ commentary: text });
+    hudWriter.flush();
+  }, {
+    displayDelayMs: COMMENTARY_SUBTITLE_DELAY_MS,
+  });
 
   const avatarWriter = new AvatarFrameWriter({
     pipePath: AVATAR_PIPE,
@@ -484,25 +544,44 @@ async function main() {
     log('[YouTube] 固定ストリームキーモード (YOUTUBE_STREAM_KEY)');
   }
 
-  let ffmpegProc: ChildProcess | null = null;
+  const syncAvatarState = (isSpeaking = audioQueue.isPlaying?.() ?? false) => {
+    const shared = cogOrch.getShared();
+    const threatLevel = shared.get().threatLevel;
+    avatarState.update({
+      threatLevel: threatLevel === 'critical'
+        ? 'critical'
+        : threatLevel === 'danger'
+          ? 'high'
+          : threatLevel === 'caution'
+            ? 'medium'
+            : 'low',
+      emotionLabel: shared.getEmotionLabel(),
+      isSpeaking,
+    });
+  };
 
   cogOrch.getShared().onStateChange((field) => {
     if (field === 'emotionalState' || field === 'threatLevel') {
-      const threatLevel = cogOrch.getShared().get().threatLevel;
-      const isSpeaking = audioQueue.isPlaying?.() ?? false;
-      avatarState.update({
-        threatLevel: threatLevel === 'critical' ? 'critical' : threatLevel === 'danger' ? 'high' : threatLevel === 'caution' ? 'medium' : 'low',
-        isSpeaking,
-      });
+      syncAvatarState();
     }
   });
 
-  const startStreaming = async () => {
-    avatarRenderer.start();
-    avatarWriter.createPipe();
-    hudWriter.start();
+  const liveStreamSession = new LiveStreamSession({
+    avatarRenderer,
+    avatarWriter,
+    hudWriter,
+    audioPlayer,
+    startFfmpeg: (rtmpUrl) => startFFmpegWithHud(hudWriter, rtmpUrl),
+    waitForProcessStability,
+    onUnexpectedExit: (code) => {
+      if (currentState === 'LIVE_RUNNING' && !stopRequested) {
+        log(`[Stream] FFmpeg が予期せず終了しました (code=${code ?? 'null'})`);
+        stopRequested = true;
+      }
+    },
+  });
 
-    let rtmpUrl: string;
+  const createLiveStreamTarget = async (): Promise<LiveStreamTarget> => {
     if (ytCtx.client) {
       const title = buildStreamTitle({ generation, template: streamTitleTemplate });
       const description = buildStreamDescription({
@@ -516,43 +595,60 @@ async function main() {
         description,
         tags: buildTags(),
         categoryId: process.env.YOUTUBE_CATEGORY_ID?.trim() || '20',
+        privacyStatus: YOUTUBE_PRIVACY_STATUS,
       });
       if (!created.ok) {
         throw new Error(created.error);
       }
+
       ytCtx.broadcastId = created.value.broadcastId;
       ytCtx.streamId = created.value.streamId;
-      rtmpUrl = created.value.rtmpUrl;
       log(`[YouTube] 配信枠作成 broadcastId=${ytCtx.broadcastId}`);
-    } else {
-      ytCtx.broadcastId = null;
-      ytCtx.streamId = null;
-      rtmpUrl = `rtmp://a.rtmp.youtube.com/live2/${streamKeyFallback}`;
+
+      return {
+        rtmpUrl: created.value.rtmpUrl,
+        goLive: async () => {
+          if (!ytCtx.client || !ytCtx.broadcastId || !ytCtx.streamId) {
+            return;
+          }
+          await goLiveWhenIngestActive(ytCtx.client, ytCtx.broadcastId, ytCtx.streamId, {
+            timeoutMs: 120_000,
+            log,
+          });
+        },
+        finalize: async () => {
+          await finalizeYoutubeSession(ytCtx);
+        },
+      };
     }
 
-    ffmpegProc = startFFmpegWithHud(hudWriter, rtmpUrl);
-    await new Promise(r => setTimeout(r, 1000));
-    avatarWriter.connectPipe();
-    audioQueue.onPlaybackStart(() => avatarState.update({ threatLevel: 'low', isSpeaking: true }));
-    audioQueue.onPlaybackEnd(() => avatarState.update({ threatLevel: 'low', isSpeaking: false }));
-    await new Promise(r => setTimeout(r, 3000));
+    return {
+      rtmpUrl: `rtmp://a.rtmp.youtube.com/live2/${streamKeyFallback}`,
+      finalize: async () => {
+        await finalizeYoutubeSession(ytCtx);
+      },
+    };
+  };
 
-    if (ytCtx.client && ytCtx.broadcastId && ytCtx.streamId) {
-      await waitForYoutubeIngestReady(ytCtx.client, ytCtx.streamId, 120_000);
-      const go = await ytCtx.client.goLive(ytCtx.broadcastId);
-      if (!go.ok) log(`[YouTube] goLive 失敗: ${go.error}`);
-      else log('[YouTube] 配信を Live 状態にしました');
-    }
-
+  const startStreaming = async () => {
+    const target = await createLiveStreamTarget();
+    await liveStreamSession.start(target);
+    syncAvatarState(false);
+    commentarySubtitleSync.reset();
+    audioQueue.onPlaybackStart((item) => {
+      syncAvatarState(true);
+      commentarySubtitleSync.onPlaybackStart(item.text);
+    });
+    audioQueue.onPlaybackEnd(() => {
+      syncAvatarState(false);
+      commentarySubtitleSync.onPlaybackEnd();
+    });
     log('[Stream] 配信パイプライン起動完了 (アバター + HUD drawtext)');
   };
 
-  const stopStreaming = () => {
-    audioPlayer.stop();
-    avatarRenderer.stop();
-    avatarWriter.stop();
-    hudWriter.stop();
-    if (ffmpegProc) { ffmpegProc.kill('SIGTERM'); ffmpegProc = null; }
+  const stopStreaming = async () => {
+    commentarySubtitleSync.reset();
+    await liveStreamSession.stop();
     log('[Stream] 配信パイプライン停止');
   };
 
@@ -579,7 +675,7 @@ async function main() {
       stopRequested = true;
       return ok(undefined);
     },
-    getLogs: () => actionLogs.slice(-50) as any,
+    getLogs: () => actionLogs.slice(-50),
     getConfig: () => ({
       operationMode,
       cooldownSeconds: COOLDOWN_MS / 1000,
@@ -609,9 +705,8 @@ async function main() {
     log('\n[Shutdown] プロセス終了...');
     stopRequested = true;
     void (async () => {
-      await finalizeYoutubeSession(ytCtx);
       cogOrch.destroy();
-      stopStreaming();
+      await stopStreaming();
       avatarState.destroy();
       dashboard.close();
       process.exit(0);
@@ -634,18 +729,25 @@ async function main() {
     currentState = 'STARTING';
     log('[Starting] ワールドリセット + 配信パイプライン起動中...');
 
-    resetWorld();
-    await waitForServer(60_000);
-    restartClient();
-    log('[Starting] MC クライアントのロード待機 (30s)...');
-    await new Promise(r => setTimeout(r, 30_000));
+    try {
+      resetWorld();
+      await waitForServer(60_000);
+      restartClient();
+      log('[Starting] MC クライアントのロード待機 (30s)...');
+      await new Promise(r => setTimeout(r, 30_000));
 
-    await startStreaming();
+      await startStreaming();
+    } catch (e) {
+      log(`[Starting] 起動失敗: ${e instanceof Error ? e.message : e}`);
+      stopRequested = true;
+      await stopStreaming();
+      continue;
+    }
 
     let continueLoop = true;
     while (continueLoop) {
       const result = await runOneGeneration(
-        cogOrch, tts, audioQueue, avatarState, hudWriter, ytCtx, streamTitleTemplate,
+        cogOrch, tts, audioQueue, avatarState, hudWriter, commentarySubtitleSync, ytCtx, streamTitleTemplate, commentaryThrottle,
       );
 
       if (result === 'died' && operationMode === 'AUTO' && !stopRequested) {
@@ -656,7 +758,7 @@ async function main() {
         if (stopRequested) { continueLoop = false; break; }
 
         if (ytCtx.client) {
-          stopStreaming();
+          await stopStreaming();
         }
 
         resetWorld();
@@ -675,7 +777,7 @@ async function main() {
       continueLoop = false;
     }
 
-    stopStreaming();
+    await stopStreaming();
     log('[System] 配信終了。IDLE に戻ります。\n');
   }
 }

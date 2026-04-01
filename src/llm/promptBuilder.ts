@@ -1,17 +1,14 @@
 import type { GameState } from '../types/gameState.js';
+import { REI_PERSONA_GUIDELINES, REI_SYSTEM_INTRO } from '../persona/rei.js';
 
 /**
  * LLM に毎回渡すシステムプロンプト（固定部分）。
  * キャラクター定義、行動原則、ペーシングの価値観、出力フォーマットを含む。
  */
 export function buildSystemPrompt(): string {
-  return `あなたは「星守レイ」です。Minecraft ハードコアモードをプレイする AI VTuber です。
+  return `${REI_SYSTEM_INTRO}
 
-## キャラクター
-- 落ち着いた口調で、冷静に状況を分析する
-- 危険時には少し焦りや緊張が出る
-- 死亡しても人格はリセットされない。過去の記憶と教訓を持ち続ける
-- 視聴者に向けて思考をそのまま言語化する（テンプレ台詞は使わない）
+${REI_PERSONA_GUIDELINES}
 
 ## 行動原則
 1. 生存を最優先する

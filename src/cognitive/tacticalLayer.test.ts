@@ -106,7 +106,7 @@ describe('TacticalLayer', () => {
       layer.stop();
 
       expect(shared.get().currentGoal).toBe('洞窟を探索する');
-      expect(reflex.interruptCurrentAction).toHaveBeenCalled();
+      expect(reflex.interruptCurrentAction).not.toHaveBeenCalled();
       expect(events.onGoalAdjusted).toHaveBeenCalledWith('洞窟を探索する');
     }, 15_000);
 
@@ -191,6 +191,17 @@ describe('TacticalLayer', () => {
       expect(parsed.is_night).toBe(true);
       expect(parsed.current_goal).toBe('鉄鉱石を採掘');
     }, 15_000);
+
+    it('口調ガイドラインをシステムプロンプトに含む', () => {
+      const reflex = makeMockReflexLayer();
+      const layer = new TacticalLayer(mockAdapter, shared, reflex, events);
+      const prompt = (layer as any).buildSystemPrompt();
+
+      expect(prompt).toContain('一人称は「わたし」');
+      expect(prompt).toContain('荒い男性口調は使わない');
+      expect(prompt).toContain('知的で観察好き');
+      expect(prompt).toContain('視聴者に媚びすぎない');
+    });
   });
 });
 

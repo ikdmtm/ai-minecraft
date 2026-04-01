@@ -1,7 +1,12 @@
 import { Router } from 'express';
 import type { HealthStatus } from '../health/checker.js';
-import type { ActionLogEntry } from '../orchestrator/cycle.js';
 import type { Result } from '../types/result.js';
+
+export interface DashboardLogEntry {
+  timestamp: string;
+  type: string;
+  content: string;
+}
 
 export interface StatusResponse {
   state: string;
@@ -17,7 +22,7 @@ export interface DashboardDeps {
   getStatus: () => StatusResponse;
   triggerStart: () => Result<void>;
   triggerStop: () => Result<void>;
-  getLogs: () => ActionLogEntry[];
+  getLogs: () => DashboardLogEntry[];
   getConfig: () => Record<string, unknown>;
   updateConfig: (partial: Record<string, unknown>) => Result<void>;
   getDeathHistory: () => unknown[];

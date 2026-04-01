@@ -48,6 +48,7 @@ describe('GoogleYouTubeApiAdapter', () => {
     description: 'Desc',
     tags: ['Minecraft'],
     categoryId: '20',
+    privacyStatus: 'unlisted' as const,
   };
 
   it('createBroadcast inserts broadcast, stream, binds, returns rtmpUrl', async () => {
@@ -80,6 +81,13 @@ describe('GoogleYouTubeApiAdapter', () => {
       id: 'b1',
       streamId: 's1',
     });
+    expect(youtube.liveBroadcasts.insert).toHaveBeenCalledWith(expect.objectContaining({
+      requestBody: expect.objectContaining({
+        status: expect.objectContaining({
+          privacyStatus: 'unlisted',
+        }),
+      }),
+    }));
   });
 
   it('createBroadcast throws when streamName missing', async () => {
@@ -154,5 +162,14 @@ describe('GoogleYouTubeApiAdapter', () => {
     });
     const adapter = new GoogleYouTubeApiAdapter(asYoutube(youtube));
     await expect(adapter.getStreamStatus('s1')).resolves.toBe('inactive');
+  });
+
+  it('getBroadcastStatus maps testing state', async () => {
+    const youtube = createMockYoutube();
+    youtube.liveBroadcasts.list.mockResolvedValue({
+      data: { items: [{ status: { lifeCycleStatus: 'testing' } }] },
+    });
+    const adapter = new GoogleYouTubeApiAdapter(asYoutube(youtube));
+    await expect(adapter.getBroadcastStatus('b1')).resolves.toBe('testing');
   });
 });

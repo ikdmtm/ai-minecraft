@@ -48,6 +48,12 @@ describe('Repository - State', () => {
     expect(state.survivalStartTime).toBe('2026-03-28T14:00:00Z');
   });
 
+  it('persists runtime states used by the new cognitive streaming loop', () => {
+    repo.saveState({ currentState: 'RESETTING' });
+    const state = repo.getState();
+    expect(state.currentState).toBe('RESETTING');
+  });
+
   it('saves null values correctly', () => {
     repo.saveState({ currentStreamId: 'abc' });
     repo.saveState({ currentStreamId: null });

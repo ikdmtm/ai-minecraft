@@ -24,8 +24,9 @@ load-module module-loopback source=voicevox_sink.monitor sink=combined_sink late
 # game_sink → combined_sink (will be set to 35% below)
 load-module module-loopback source=game_sink.monitor sink=combined_sink latency_msec=30
 
-# デフォルト出力先を combined_sink に
-set-default-sink combined_sink
+# デフォルト出力先は game_sink。
+# combined_sink は loopback 経由でゲーム音 + TTS を受ける配信用バスとして使う。
+set-default-sink game_sink
 EOF
 
 chown -R ubuntu:ubuntu "$PA_CONFIG"
@@ -44,6 +45,9 @@ pactl set-sink-volume voicevox_sink 100%
 
 # Game sink: 35% volume (game audio should be quieter than voice)
 pactl set-sink-volume game_sink 35%
+
+# Keep game audio on its own sink; combined_sink is capture-only.
+pactl set-default-sink game_sink
 
 # Combined output: 100%
 pactl set-sink-volume combined_sink 100%

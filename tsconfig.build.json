@@ -1,0 +1,11 @@
+{
+  "extends": "./tsconfig.json",
+  "exclude": [
+    "node_modules",
+    "dist",
+    "**/*.test.ts",
+    "src/demo-slice*.ts",
+    "src/test-*.ts",
+    "src/bot/client.ts"
+  ]
+}

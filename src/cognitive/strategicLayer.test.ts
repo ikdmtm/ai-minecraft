@@ -180,6 +180,10 @@ describe('StrategicLayer', () => {
       expect(prompt).toContain('星守レイ');
       expect(prompt).toContain('main_goal');
       expect(prompt).toContain('sub_goals');
+      expect(prompt).toContain('一人称は「わたし」');
+      expect(prompt).toContain('荒い男性口調は使わない');
+      expect(prompt).toContain('知的で観察好き');
+      expect(prompt).toContain('視聴者に媚びすぎない');
     });
   });
 });

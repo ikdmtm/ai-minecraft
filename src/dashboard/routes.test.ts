@@ -92,6 +92,18 @@ describe('Dashboard API routes', () => {
       expect(res.body).toHaveLength(1);
       expect(res.body[0].type).toBe('llm_response');
     });
+
+    it('allows current runtime log entry types such as info', async () => {
+      const app = createApp({
+        getLogs: jest.fn().mockReturnValue([
+          { timestamp: '2026-03-31T14:23:05Z', type: 'info', content: 'stream started' },
+        ]),
+      });
+      const res = await request(app).get('/api/logs');
+      expect(res.status).toBe(200);
+      expect(res.body[0].type).toBe('info');
+      expect(res.body[0].content).toBe('stream started');
+    });
   });
 
   describe('GET /api/config', () => {

@@ -34,8 +34,7 @@ ai-minecraft/
 │   │   ├── gameState.ts
 │   │   ├── llm.ts
 │   │   ├── state.ts
-│   │   ├── config.ts
-│   │   └── events.ts
+│   │   └── config.ts
 │   ├── cognitive/                     # 多層認知（反射・戦術・戦略 + オーケストレータ）
 │   │   ├── sharedState.ts
 │   │   ├── reflexLayer.ts
@@ -44,11 +43,6 @@ ai-minecraft/
 │   │   ├── orchestrator.ts
 │   │   ├── skillLibrary.ts, memory.ts
 │   │   └── *.test.ts
-│   ├── orchestrator/                  # レガシー状態機械・サイクル（スライス用）
-│   │   ├── stateMachine.ts
-│   │   ├── stateMachine.test.ts
-│   │   ├── cycle.ts
-│   │   └── cycle.test.ts
 │   ├── bot/                           # Mineflayer ラッパー + リアクティブ層
 │   │   ├── client.ts                  # Mineflayer 接続・基本操作
 │   │   ├── reactive.ts                # リアクティブ層ルール
@@ -145,8 +139,8 @@ ai-minecraft/
 - `types/` → 他のどのモジュールにも依存しない（最下層）
 - `bot/`, `llm/`, `tts/`, `stream/`, `youtube/`, `db/` → `types/` のみに依存
 - `health/`, `config/` → `types/` のみに依存
-- `orchestrator/` → 上記すべてに依存する（唯一の結合点）
-- `dashboard/` → `orchestrator/` と `db/` に依存（状態の読み取りと設定変更）
+- `cognitive/` と `runtime/` → 上記すべてを統合する本番の結合点
+- `dashboard/` → 実行中の本番入口と `db/` に依存（状態の読み取りと設定変更）
 - モジュール間の横の依存は禁止（例: `bot/` が `llm/` を直接呼ぶことはない）
 
 ## 3. 共有型定義（src/types/）

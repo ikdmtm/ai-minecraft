@@ -55,6 +55,7 @@ export class AvatarFrameWriter {
   private pipeStream: PipeStream | null = null;
   private lastImagePath = '';
   private cachedFrame: Buffer;
+  private readonly frameCache = new Map<string, Buffer>();
   private draining = false;
   private readonly frameBytes: number;
 
@@ -74,6 +75,13 @@ export class AvatarFrameWriter {
   connectPipe(): void {
     this.pipeStream = this.deps.openPipeStream(this.config.pipePath);
     this.pipeStream.on('drain', () => {
+      this.draining = false;
+    });
+    this.pipeStream.on('error', () => {
+      if (this.pipeStream && !this.pipeStream.destroyed) {
+        this.pipeStream.destroy();
+      }
+      this.pipeStream = null;
       this.draining = false;
     });
     const intervalMs = Math.max(50, Math.floor(1000 / this.config.fps));
@@ -105,10 +113,12 @@ export class AvatarFrameWriter {
 
       if (imgPath && this.deps.fileExists(imgPath) && imgPath !== this.lastImagePath) {
         try {
-          const raw = this.deps.convertImage(imgPath, this.config.width, this.config.height);
+          const raw = this.frameCache.get(imgPath)
+            ?? this.deps.convertImage(imgPath, this.config.width, this.config.height);
           if (raw.length === this.frameBytes) {
             this.cachedFrame = raw;
             this.lastImagePath = imgPath;
+            this.frameCache.set(imgPath, raw);
           }
         } catch {
           // convert failed - use cached frame
