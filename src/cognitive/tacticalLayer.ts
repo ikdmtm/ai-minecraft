@@ -2,9 +2,8 @@ import type { SharedStateBus, CognitiveThreatLevel } from './sharedState.js';
 import type { ReflexLayer } from './reflexLayer.js';
 import type { LLMApiAdapter } from '../llm/client.js';
 import type { ThreatLevel } from '../types/llm.js';
-import { REI_PERSONA_GUIDELINES, REI_SYSTEM_INTRO } from '../persona/rei.js';
 
-const TACTICAL_INTERVAL_MS = 5_000;
+const TACTICAL_INTERVAL_MS = 4_000;
 const TACTICAL_TIMEOUT_MS = 8_000;
 const STAGNATION_WARN_MINUTES = 40;
 
@@ -88,10 +87,8 @@ export class TacticalLayer {
 
   private buildSystemPrompt(): string {
     const emotionLabel = this.shared.getEmotionLabel();
-    return `${REI_SYSTEM_INTRO}
+    return `あなたは「星守レイ」です。Minecraft ハードコアモードをプレイする AI VTuber です。
 あなたは今「${emotionLabel}」な気分です。
-
-${REI_PERSONA_GUIDELINES}
 
 【役割】リアルタイムの状況評価と短い実況コメントの生成。
 【重要】応答は必ず以下の JSON のみを返してください。
@@ -106,9 +103,13 @@ ${REI_PERSONA_GUIDELINES}
 \`\`\`
 
 - goal_adjustment: 現在の目標を変更すべき場合のみ文字列で指定。不要なら null
-- commentary: 今この瞬間に自然に口にする言葉。テンプレートではなく状況に応じた生きた言葉。1文、できるだけ短く
+- commentary: 今この瞬間に自然に口にする言葉。テンプレートではなく状況に応じた生きた言葉
 - threat_assessment: "safe" / "caution" / "danger" / "critical"
 - emotion_shift: { "valence": 0.1, "arousal": -0.1 } のように感情変化がある場合のみ。不要なら null
+
+【キャラクター】
+- 落ち着いた口調だが、危機には焦りが出る
+- 視聴者に向けて思考をそのまま言語化
 - 同じフレーズの繰り返しを避ける`;
   }
 
@@ -134,15 +135,9 @@ ${REI_PERSONA_GUIDELINES}
         .slice(0, 3)
         .map(e => `${e.type} ${e.distance}m ${e.direction}`),
       inventory_has_food: sensors.hasFood,
-      edible_food: sensors.foodItem,
       survival_minutes: survivalMinutes,
       recent_events: eventSummary || '(なし)',
       emotion: this.shared.getEmotionLabel(),
-      tactical_notes: [
-        '目標変更は本当に必要な時だけ行う。直前の方針を数秒でひっくり返さない',
-        'crafting_table / stick / planks の失敗が見えたら、次の1手を具体化して継続する',
-        'インベントリクラフトで作れるのは plank / stick / crafting_table まで。pickaxe や furnace は作業台が必要',
-      ],
       ...(stagnationWarning ? { stagnation_warning: stagnationWarning } : {}),
     }, null, 2);
   }
@@ -197,6 +192,7 @@ ${REI_PERSONA_GUIDELINES}
     if (output.goalAdjustment) {
       this.shared.setGoal(output.goalAdjustment);
       this.events.onGoalAdjusted(output.goalAdjustment);
+      this.reflexLayer.interruptCurrentAction();
     }
 
     if (output.commentary) {

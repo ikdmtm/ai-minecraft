@@ -2,7 +2,6 @@ import mineflayer from 'mineflayer';
 import { pathfinder, Movements, goals } from 'mineflayer-pathfinder';
 import { Vec3 } from 'vec3';
 import type { SharedStateBus, ReflexState, CognitiveThreatLevel } from './sharedState.js';
-import { ActionFailureGuard } from './actionFailureGuard.js';
 import type { BotSensors, SensedEntity } from '../bot/types.js';
 import {
   classifyTimeOfDay,
@@ -22,11 +21,8 @@ const GATHER_RANGE = 5;
 const IDLE_LOOK_INTERVAL_MS = 3000;
 const NIGHT_RETREAT_TIME = 12500;
 const DAWN_TIME = 23500;
-const BLOCKED_TARGET_COOLDOWN_MS = 90_000;
-const ACTION_STALL_THRESHOLD_MS = 10_000;
 
 const FOOD_ITEMS = new Set([
-  'beef', 'porkchop', 'chicken', 'mutton', 'rabbit', 'salmon', 'cod',
   'bread', 'cooked_beef', 'cooked_porkchop', 'cooked_chicken', 'cooked_mutton',
   'cooked_rabbit', 'cooked_salmon', 'cooked_cod', 'baked_potato', 'apple',
   'golden_apple', 'enchanted_golden_apple', 'golden_carrot', 'sweet_berries',
@@ -65,45 +61,10 @@ const WEAPON_ITEMS = new Set([
   'wooden_axe', 'stone_axe', 'iron_axe', 'golden_axe', 'diamond_axe', 'netherite_axe',
 ]);
 
-export type GoalBehavior =
-  | 'mine_logs'
-  | 'mine_stone'
-  | 'mine_iron'
-  | 'mine_diamond'
-  | 'mine_coal'
-  | 'craft'
-  | 'explore'
-  | 'return_to_base'
-  | 'sleep'
-  | 'gather_food';
-
-export interface InventorySnapshotItem {
-  name: string;
-  count: number;
-}
-
 export interface ReflexLayerEvents {
   onDeath: (cause: string) => void;
-  onDisconnect: (reason: string) => void;
   onReactiveAction: (event: RecentEvent) => void;
   onStateChange: (from: ReflexState, to: ReflexState) => void;
-}
-
-export interface ReflexRuntimeDiagnostics {
-  reflexState: ReflexState;
-  currentGoal: string;
-  threatLevel: CognitiveThreatLevel;
-  currentActionLabel: string | null;
-  currentActionAgeMs: number | null;
-  lastTickAgeMs: number | null;
-  maxTickDriftMs: number;
-  lastPacketAgeMs: number | null;
-  lastKeepAliveAgeMs: number | null;
-  lastPhysicsTickAgeMs: number | null;
-  lastMoveAgeMs: number | null;
-  hp: number | null;
-  hunger: number | null;
-  position: Position | null;
 }
 
 export class ReflexLayer {
@@ -118,22 +79,6 @@ export class ReflexLayer {
   private spectatorPlayer: string | null = null;
   private lastDeathMessage = '';
   private shelterBuilt = false;
-  private disconnecting = false;
-  private currentActionLabel: string | null = null;
-  private currentActionStartedAt = 0;
-  private currentActionToken = 0;
-  private lastTickStartedAt = 0;
-  private nextExpectedTickAt = 0;
-  private maxTickDriftMs = 0;
-  private lastPacketAt = 0;
-  private lastKeepAliveAt = 0;
-  private lastPhysicsTickAt = 0;
-  private lastMoveAt = 0;
-  private readonly miningFailureGuard = new ActionFailureGuard({
-    failureThreshold: 3,
-    failureWindowMs: 30_000,
-    cooldownMs: BLOCKED_TARGET_COOLDOWN_MS,
-  });
 
   constructor(shared: SharedStateBus) {
     this.shared = shared;
@@ -144,73 +89,33 @@ export class ReflexLayer {
     events: ReflexLayerEvents,
   ): Promise<void> {
     this.events = events;
-    this.disconnecting = false;
-    this.resetRuntimeDiagnostics();
 
     return new Promise((resolve, reject) => {
-      const bot = mineflayer.createBot({
+      this.bot = mineflayer.createBot({
         host: options.host,
         port: options.port,
         username: options.username,
         hideErrors: false,
       });
-      this.bot = bot;
-      this.attachRuntimeDiagnostics(bot);
 
-      bot.loadPlugin(pathfinder);
-      let spawned = false;
-      let disconnectHandled = false;
+      this.bot.loadPlugin(pathfinder);
 
-      const handleDisconnect = (reason: unknown) => {
-        if (disconnectHandled) return;
-        disconnectHandled = true;
-        const message = describeDisconnectReason(reason, this.getRuntimeDiagnostics(bot));
-        const planned = this.disconnecting;
-        this.cleanupConnection(bot);
-
-        if (!spawned) {
-          reject(reason instanceof Error ? reason : new Error(message));
-          return;
-        }
-
-        if (!planned) {
-          this.events?.onDisconnect(message);
-        }
-      };
-
-      bot.once('spawn', () => {
-        if (disconnectHandled) return;
-        spawned = true;
+      this.bot.once('spawn', () => {
         this.startTickLoop();
         this.setupEventListeners();
         resolve();
       });
 
-      bot.on('error', (err) => {
-        if (!spawned) {
-          handleDisconnect(err);
-          return;
-        }
+      this.bot.once('error', (err) => reject(err));
 
-        handleDisconnect(err);
-      });
-      bot.once('end', (reason) => handleDisconnect(reason));
-      bot.once('kicked', (reason) => handleDisconnect(reason));
-
-      bot.on('death', () => {
+      this.bot.on('death', () => {
         this.shared.updateEmotion({ valence: -0.8, arousal: 0.9, dominance: -0.5 }, 'death');
-        this.events?.onReactiveAction({
-          time: 'now',
-          event: 'bot_death_context',
-          detail: formatRuntimeDiagnostics(this.getRuntimeDiagnostics(bot)),
-        });
         this.events?.onDeath(this.getDeathCause());
       });
     });
   }
 
   disconnect(): void {
-    this.disconnecting = true;
     this.stopTickLoop();
     this.bot?.quit();
     this.bot = null;
@@ -304,52 +209,21 @@ export class ReflexLayer {
   }
 
   interruptCurrentAction(): void {
-    const interruptedAction = this.currentActionLabel;
-    const interruptedAgeMs = toAgeMs(this.currentActionStartedAt);
     this.actionAbortController?.abort();
     try { this.bot?.pathfinder.stop(); } catch { /* ignore */ }
-
-    if (interruptedAction) {
-      const detail = `${interruptedAction} interrupted (${formatAgeMs(interruptedAgeMs)})`;
-      this.events?.onReactiveAction({ time: 'now', event: 'action_interrupted', detail });
-      this.shared.pushEvent({ type: 'action_interrupted', detail, importance: 'medium' });
-    }
-
-    this.currentActionToken += 1;
-    this.currentAction = null;
-    this.currentActionLabel = null;
-    this.currentActionStartedAt = 0;
-    this.actionAbortController = null;
     this.isExecutingAction = false;
   }
 
   // --- Tick Loop (System 1 core) ---
 
   private startTickLoop(): void {
-    this.nextExpectedTickAt = Date.now() + TICK_MS;
-    this.tickTimer = setInterval(() => {
-      const now = Date.now();
-      const drift = Math.max(0, now - this.nextExpectedTickAt);
-      this.maxTickDriftMs = Math.max(this.maxTickDriftMs, drift);
-      this.lastTickStartedAt = now;
-      this.nextExpectedTickAt = now + TICK_MS;
-      this.tick();
-    }, TICK_MS);
+    this.tickTimer = setInterval(() => this.tick(), TICK_MS);
   }
 
   private stopTickLoop(): void {
     if (this.tickTimer) {
       clearInterval(this.tickTimer);
       this.tickTimer = null;
-    }
-    this.nextExpectedTickAt = 0;
-  }
-
-  private cleanupConnection(bot: mineflayer.Bot): void {
-    this.stopTickLoop();
-    this.interruptCurrentAction();
-    if (this.bot === bot) {
-      this.bot = null;
     }
   }
 
@@ -367,35 +241,12 @@ export class ReflexLayer {
         return;
       }
 
-      if (this.isExecutingAction) {
-        this.detectActionStall();
-        return;
-      }
+      if (this.isExecutingAction) return;
 
       this.executeGoalBehavior();
     } catch {
       // tick errors are non-fatal
     }
-  }
-
-  private detectActionStall(): void {
-    if (!this.currentActionLabel) return;
-
-    const actionAgeMs = toAgeMs(this.currentActionStartedAt);
-    if (actionAgeMs === null || actionAgeMs < ACTION_STALL_THRESHOLD_MS) {
-      return;
-    }
-
-    const moveAgeMs = toAgeMs(this.lastMoveAt);
-    if (moveAgeMs !== null && moveAgeMs < ACTION_STALL_THRESHOLD_MS) {
-      return;
-    }
-
-    const detail = `${this.currentActionLabel} stalled (${Math.round(actionAgeMs / 1000)}s no movement)`;
-    this.events?.onReactiveAction({ time: 'now', event: 'action_stalled', detail });
-    this.shared.pushEvent({ type: 'action_stalled', detail, importance: 'high' });
-    this.shared.updateEmotion({ arousal: -0.05, dominance: -0.05 }, 'action_stalled');
-    this.interruptCurrentAction();
   }
 
   private updateThreatLevel(): void {
@@ -474,16 +325,16 @@ export class ReflexLayer {
       case 'flee':
         this.shared.setReflexState('fleeing');
         this.shared.updateEmotion({ valence: -0.3, arousal: 0.4 }, action.reason);
-        this.runAction('flee', () => this.doFlee());
+        this.runAction(() => this.doFlee());
         break;
       case 'eat':
         this.shared.setReflexState('eating');
-        this.runAction('eat', () => this.doEat());
+        this.runAction(() => this.doEat());
         break;
       case 'fight':
         this.shared.setReflexState('combat');
         this.shared.updateEmotion({ arousal: 0.3 }, action.reason);
-        this.runAction(`fight:${action.target!}`, () => this.doFight(action.target!));
+        this.runAction(() => this.doFight(action.target!));
         break;
     }
   }
@@ -499,13 +350,13 @@ export class ReflexLayer {
       if (state.worldModel.basePosition) {
         this.shared.setReflexState('returning_to_base');
         this.shared.pushEvent({ type: 'night_retreat', detail: '夜になったので拠点へ帰還', importance: 'medium' });
-        this.runAction('return_to_base', () => this.doReturnToBase());
+        this.runAction(() => this.doReturnToBase());
         return;
       }
       if (!this.shelterBuilt) {
         this.shared.setReflexState('crafting');
         this.shared.pushEvent({ type: 'shelter_build', detail: '夜間・拠点なし：シェルター建設', importance: 'medium' });
-        this.runAction('build_shelter', () => this.doBuildShelter());
+        this.runAction(() => this.doBuildShelter());
         return;
       }
     }
@@ -516,18 +367,9 @@ export class ReflexLayer {
       if (animal) {
         this.shared.setReflexState('combat');
         this.shared.pushEvent({ type: 'hunt_food', detail: `食料危機：${animal.name} を狩猟`, importance: 'high' });
-        this.runAction(`hunt:${animal.name!}`, () => this.doHuntAnimal(animal.name!));
+        this.runAction(() => this.doHuntAnimal(animal.name!));
         return;
       }
-    }
-
-    if (shouldForceCraftBootstrap(
-      bot.inventory.items().map(item => ({ name: item.name, count: item.count })),
-      this.findNearbyCraftingTable() !== null,
-    )) {
-      this.shared.setReflexState('crafting');
-      this.runAction('craft_bootstrap', () => this.doCraftAdvanced());
-      return;
     }
 
     const goal = state.currentGoal.toLowerCase();
@@ -538,48 +380,39 @@ export class ReflexLayer {
 
     const activeGoal = goal || state.subGoals[0] || '';
 
-    switch (resolveGoalBehavior(activeGoal)) {
-      case 'mine_logs':
+    if (activeGoal.includes('木') || activeGoal.includes('log') || activeGoal.includes('伐採')) {
       this.shared.setReflexState('mining');
-      this.runAction('mine_logs', () => this.doMineBlock(['oak_log', 'birch_log', 'spruce_log', 'jungle_log', 'acacia_log', 'dark_oak_log', 'cherry_log', 'mangrove_log']));
-      break;
-      case 'mine_stone':
+      this.runAction(() => this.doMineBlock(['oak_log', 'birch_log', 'spruce_log', 'jungle_log', 'acacia_log', 'dark_oak_log', 'cherry_log', 'mangrove_log']));
+    } else if (activeGoal.includes('石') || activeGoal.includes('stone') || activeGoal.includes('cobble')) {
       this.shared.setReflexState('mining');
-      this.runAction('mine_stone', () => this.doMineBlock(['stone', 'cobblestone']));
-      break;
-      case 'mine_iron':
+      this.runAction(() => this.doMineBlock(['stone', 'cobblestone']));
+    } else if (activeGoal.includes('鉄') || activeGoal.includes('iron')) {
       this.shared.setReflexState('mining');
-      this.runAction('mine_iron', () => this.doMineBlock(['iron_ore', 'deepslate_iron_ore']));
-      break;
-      case 'mine_diamond':
+      this.runAction(() => this.doMineBlock(['iron_ore', 'deepslate_iron_ore']));
+    } else if (activeGoal.includes('ダイヤ') || activeGoal.includes('diamond')) {
       this.shared.setReflexState('mining');
-      this.runAction('mine_diamond', () => this.doMineBlock(['diamond_ore', 'deepslate_diamond_ore']));
-      break;
-      case 'mine_coal':
+      this.runAction(() => this.doMineBlock(['diamond_ore', 'deepslate_diamond_ore']));
+    } else if (activeGoal.includes('石炭') || activeGoal.includes('coal')) {
       this.shared.setReflexState('mining');
-      this.runAction('mine_coal', () => this.doMineBlock(['coal_ore', 'deepslate_coal_ore']));
-      break;
-      case 'craft':
+      this.runAction(() => this.doMineBlock(['coal_ore', 'deepslate_coal_ore']));
+    } else if (activeGoal.includes('クラフト') || activeGoal.includes('craft') || activeGoal.includes('作成')) {
       this.shared.setReflexState('crafting');
-      this.runAction('craft', () => this.doCraftAdvanced());
-      break;
-      case 'return_to_base':
-      this.shared.setReflexState('returning_to_base');
-      this.runAction('return_to_base', () => this.doReturnToBase());
-      break;
-      case 'sleep':
-      this.shared.setReflexState('sleeping');
-      this.runAction('sleep', () => this.doSleep());
-      break;
-      case 'gather_food':
-      this.shared.setReflexState('gathering');
-      this.runAction('gather_food', () => this.doHuntAnimal(''));
-      break;
-      case 'explore':
-      default:
+      this.runAction(() => this.doCraftAdvanced());
+    } else if (activeGoal.includes('探索') || activeGoal.includes('explor')) {
       this.shared.setReflexState('exploring');
-      this.runAction('explore', () => this.doExplore());
-      break;
+      this.runAction(() => this.doExplore());
+    } else if (activeGoal.includes('拠点') || activeGoal.includes('帰') || activeGoal.includes('base')) {
+      this.shared.setReflexState('returning_to_base');
+      this.runAction(() => this.doReturnToBase());
+    } else if (activeGoal.includes('寝') || activeGoal.includes('sleep') || activeGoal.includes('ベッド')) {
+      this.shared.setReflexState('sleeping');
+      this.runAction(() => this.doSleep());
+    } else if (activeGoal.includes('食料') || activeGoal.includes('food') || activeGoal.includes('狩')) {
+      this.shared.setReflexState('gathering');
+      this.runAction(() => this.doHuntAnimal(''));
+    } else {
+      this.shared.setReflexState('exploring');
+      this.runAction(() => this.doExplore());
     }
   }
 
@@ -654,7 +487,7 @@ export class ReflexLayer {
   private async doMineBlock(blockTypes: string[]): Promise<void> {
     const bot = this.requireBot();
     const block = bot.findBlock({
-      matching: (b) => blockTypes.includes(b.name) && !this.miningFailureGuard.isBlocked(this.getBlockActionKey(b)),
+      matching: b => blockTypes.includes(b.name),
       maxDistance: 64,
     });
     if (!block) {
@@ -669,30 +502,13 @@ export class ReflexLayer {
     const movements = new Movements(bot);
     movements.allowSprinting = true;
     bot.pathfinder.setMovements(movements);
-    const actionKey = this.getBlockActionKey(block);
+    await bot.pathfinder.goto(
+      new goals.GoalNear(block.position.x, block.position.y, block.position.z, 2),
+    );
 
-    try {
-      await bot.pathfinder.goto(
-        new goals.GoalNear(block.position.x, block.position.y, block.position.z, 2),
-      );
-
-      const freshBlock = bot.blockAt(block.position);
-      if (!freshBlock || !bot.canDigBlock(freshBlock)) {
-        this.handleMiningFailure(actionKey, block.name);
-        await this.doExplore();
-        return;
-      }
-
+    const freshBlock = bot.blockAt(block.position);
+    if (freshBlock && bot.canDigBlock(freshBlock)) {
       await bot.dig(freshBlock);
-      await sleep(250);
-      const afterDig = bot.blockAt(block.position);
-      if (!didBlockBreak(freshBlock.name, afterDig?.name ?? null)) {
-        this.handleMiningFailure(actionKey, block.name);
-        await this.doExplore();
-        return;
-      }
-
-      this.miningFailureGuard.recordSuccess(actionKey);
       this.shared.updateEmotion({ valence: 0.05, dominance: 0.02 }, `mined_${freshBlock.name}`);
       this.shared.pushEvent({
         type: 'mined',
@@ -705,9 +521,6 @@ export class ReflexLayer {
           block.position.x, block.position.y, block.position.z,
         ));
       } catch { /* can't reach dropped item */ }
-    } catch {
-      this.handleMiningFailure(actionKey, block.name);
-      await this.doExplore();
     }
   }
 
@@ -788,7 +601,7 @@ export class ReflexLayer {
     const sticks = bot.inventory.items().find(i => i.name === 'stick');
     const hasSticks = sticks && sticks.count >= 2;
 
-    let craftingTable = this.findNearbyCraftingTable();
+    const craftingTable = this.findNearbyCraftingTable();
 
     if (craftingTable && hasSticks) {
       if (!hasPickaxe) {
@@ -819,21 +632,7 @@ export class ReflexLayer {
       // Place crafting table if we have one
       const tableItem = bot.inventory.items().find(i => i.name === 'crafting_table');
       if (tableItem) {
-        const placed = await this.placeBlockNearby(tableItem);
-        if (placed) {
-          craftingTable = this.findNearbyCraftingTable();
-          if (craftingTable && hasSticks) {
-            if (!hasPickaxe) {
-              await this.tryCraftAt(craftingTable, cobble && cobble.count >= 3 ? 'stone_pickaxe' : 'wooden_pickaxe', 1);
-            }
-            if (!hasSword) {
-              await this.tryCraftAt(craftingTable, cobble && cobble.count >= 2 ? 'stone_sword' : 'wooden_sword', 1);
-            }
-            if (!hasAxe) {
-              await this.tryCraftAt(craftingTable, cobble && cobble.count >= 3 ? 'stone_axe' : 'wooden_axe', 1);
-            }
-          }
-        }
+        await this.placeBlockNearby(tableItem);
       }
     }
 
@@ -852,12 +651,8 @@ export class ReflexLayer {
         this.shared.pushEvent({ type: 'crafted', detail: itemName, importance: 'low' });
         this.shared.updateEmotion({ valence: 0.05 }, `crafted_${itemName}`);
         return true;
-      } catch {
-        this.shared.pushEvent({ type: 'craft_failed', detail: itemName, importance: 'medium' });
-        return false;
-      }
+      } catch { return false; }
     }
-    this.shared.pushEvent({ type: 'craft_unavailable', detail: itemName, importance: 'low' });
     return false;
   }
 
@@ -872,12 +667,8 @@ export class ReflexLayer {
         this.shared.pushEvent({ type: 'crafted', detail: itemName, importance: 'medium' });
         this.shared.updateEmotion({ valence: 0.1, dominance: 0.05 }, `crafted_${itemName}`);
         return true;
-      } catch {
-        this.shared.pushEvent({ type: 'craft_failed', detail: itemName, importance: 'medium' });
-        return false;
-      }
+      } catch { return false; }
     }
-    this.shared.pushEvent({ type: 'craft_unavailable', detail: itemName, importance: 'low' });
     return false;
   }
 
@@ -886,19 +677,14 @@ export class ReflexLayer {
     return bot.findBlock({ matching: b => b.name === 'crafting_table', maxDistance: 8 }) ?? null;
   }
 
-  private async placeBlockNearby(item: any): Promise<boolean> {
+  private async placeBlockNearby(item: any): Promise<void> {
     const bot = this.requireBot();
     const refBlock = bot.blockAt(bot.entity.position.offset(0, -1, 0));
-    if (!refBlock) return false;
+    if (!refBlock) return;
     try {
       await bot.equip(item, 'hand');
       await bot.placeBlock(refBlock, new Vec3(0, 1, 0));
-      this.shared.pushEvent({ type: 'placed', detail: item.name, importance: 'low' });
-      return true;
-    } catch {
-      this.shared.pushEvent({ type: 'placement_failed', detail: item.name, importance: 'medium' });
-      return false;
-    }
+    } catch { /* placement failed */ }
   }
 
   private async trySmelt(): Promise<void> {
@@ -960,8 +746,6 @@ export class ReflexLayer {
         bot.attack(fresh);
         await sleep(350);
       }
-      await sleep(500);
-      await this.collectNearbyDrops();
       this.shared.pushEvent({ type: 'hunted', detail: target.name ?? 'animal', importance: 'medium' });
     } catch { /* hunt failed */ }
   }
@@ -1033,88 +817,25 @@ export class ReflexLayer {
     }
   }
 
-  private runAction(label: string, fn: () => Promise<void>): void {
+  private runAction(fn: () => Promise<void>): void {
     if (this.isExecutingAction) return;
     this.isExecutingAction = true;
-    const actionToken = ++this.currentActionToken;
-    this.currentActionLabel = label;
-    this.currentActionStartedAt = Date.now();
-    const startedAt = this.currentActionStartedAt;
     this.actionAbortController = new AbortController();
-    this.events?.onReactiveAction({ time: 'now', event: 'action_start', detail: label });
-    this.shared.pushEvent({ type: 'action_start', detail: label, importance: 'low' });
 
     const timeout = setTimeout(() => {
       this.interruptCurrentAction();
     }, 30_000);
 
-    let failed = false;
     this.currentAction = fn()
       .catch(() => {
-        failed = true;
         try { this.bot?.pathfinder.stop(); } catch { /* ignore */ }
       })
       .finally(() => {
         clearTimeout(timeout);
-        if (this.currentActionToken !== actionToken) {
-          return;
-        }
-        const durationMs = Math.max(0, Date.now() - startedAt);
-        if (failed) {
-          const detail = `${label} failed (${durationMs}ms)`;
-          this.events?.onReactiveAction({ time: 'now', event: 'action_failed', detail });
-          this.shared.pushEvent({ type: 'action_failed', detail, importance: 'medium' });
-        } else {
-          const detail = `${label} done (${durationMs}ms)`;
-          this.events?.onReactiveAction({ time: 'now', event: 'action_done', detail });
-          this.shared.pushEvent({ type: 'action_done', detail, importance: 'low' });
-        }
         this.isExecutingAction = false;
         this.currentAction = null;
         this.actionAbortController = null;
-        this.currentActionLabel = null;
-        this.currentActionStartedAt = 0;
       });
-  }
-
-  private async collectNearbyDrops(): Promise<void> {
-    const bot = this.requireBot();
-    for (let i = 0; i < 3; i++) {
-      const item = bot.nearestEntity(e => e.name === 'item' || e.name === 'experience_orb');
-      if (!item || bot.entity.position.distanceTo(item.position) > 10) {
-        return;
-      }
-
-      const movements = new Movements(bot);
-      bot.pathfinder.setMovements(movements);
-      try {
-        await bot.pathfinder.goto(new goals.GoalNear(
-          item.position.x,
-          item.position.y,
-          item.position.z,
-          1,
-        ));
-      } catch {
-        return;
-      }
-      await sleep(150);
-    }
-  }
-
-  private getBlockActionKey(block: { name: string; position: { x: number; y: number; z: number } }): string {
-    return `${block.name}@${Math.round(block.position.x)},${Math.round(block.position.y)},${Math.round(block.position.z)}`;
-  }
-
-  private handleMiningFailure(actionKey: string, blockName: string): void {
-    const failure = this.miningFailureGuard.recordFailure(actionKey);
-    if (!failure.blocked) return;
-
-    this.shared.pushEvent({
-      type: 'action_loop_avoided',
-      detail: `${blockName} で同じ失敗を繰り返したため ${Math.round(BLOCKED_TARGET_COOLDOWN_MS / 1000)} 秒回避`,
-      importance: 'medium',
-    });
-    this.shared.updateEmotion({ arousal: -0.05, dominance: -0.05 }, `avoid_loop_${blockName}`);
   }
 
   // --- Event listeners for world model updates ---
@@ -1160,70 +881,7 @@ export class ReflexLayer {
     });
   }
 
-  private attachRuntimeDiagnostics(bot: mineflayer.Bot): void {
-    const client = (bot as mineflayer.Bot & {
-      _client?: {
-        on?: (event: string, listener: (...args: any[]) => void) => void;
-      };
-    })._client;
-
-    client?.on?.('packet', (_data: unknown, meta?: { name?: string }) => {
-      const now = Date.now();
-      this.lastPacketAt = now;
-      if (meta?.name === 'keep_alive') {
-        this.lastKeepAliveAt = now;
-      }
-    });
-
-    bot.on('physicsTick', () => {
-      this.lastPhysicsTickAt = Date.now();
-    });
-
-    bot.on('move', () => {
-      this.lastMoveAt = Date.now();
-    });
-  }
-
   // --- Helper methods ---
-
-  private getRuntimeDiagnostics(bot: mineflayer.Bot | null = this.bot): ReflexRuntimeDiagnostics {
-    const state = this.shared.get();
-    return {
-      reflexState: state.reflexState,
-      currentGoal: state.currentGoal,
-      threatLevel: state.threatLevel,
-      currentActionLabel: this.currentActionLabel,
-      currentActionAgeMs: toAgeMs(this.currentActionStartedAt),
-      lastTickAgeMs: toAgeMs(this.lastTickStartedAt),
-      maxTickDriftMs: this.maxTickDriftMs,
-      lastPacketAgeMs: toAgeMs(this.lastPacketAt),
-      lastKeepAliveAgeMs: toAgeMs(this.lastKeepAliveAt),
-      lastPhysicsTickAgeMs: toAgeMs(this.lastPhysicsTickAt),
-      lastMoveAgeMs: toAgeMs(this.lastMoveAt),
-      hp: bot?.health ?? null,
-      hunger: bot?.food ?? null,
-      position: bot
-        ? {
-          x: bot.entity.position.x,
-          y: bot.entity.position.y,
-          z: bot.entity.position.z,
-        }
-        : null,
-    };
-  }
-
-  private resetRuntimeDiagnostics(): void {
-    this.currentActionLabel = null;
-    this.currentActionStartedAt = 0;
-    this.currentActionToken = 0;
-    this.lastTickStartedAt = 0;
-    this.nextExpectedTickAt = 0;
-    this.maxTickDriftMs = 0;
-    this.lastPacketAt = 0;
-    this.lastKeepAliveAt = 0;
-    this.lastPhysicsTickAt = 0;
-    this.lastMoveAt = 0;
-  }
 
   private getNearbyEntities(): SensedEntity[] {
     const bot = this.requireBot();
@@ -1309,143 +967,4 @@ const DEATH_KEYWORDS = [
 export function isDeathMessage(message: string): boolean {
   const lower = message.toLowerCase();
   return DEATH_KEYWORDS.some(kw => lower.includes(kw));
-}
-
-export function resolveGoalBehavior(activeGoal: string): GoalBehavior {
-  const goal = activeGoal.toLowerCase();
-
-  if (goal.includes('寝') || goal.includes('sleep') || goal.includes('ベッド')) {
-    return 'sleep';
-  }
-  if (goal.includes('拠点') || goal.includes('帰') || goal.includes('base')) {
-    return 'return_to_base';
-  }
-  if (goal.includes('食料') || goal.includes('food') || goal.includes('狩')) {
-    return 'gather_food';
-  }
-  if (
-    goal.includes('クラフト') ||
-    goal.includes('craft') ||
-    goal.includes('作成') ||
-    goal.includes('作業台') ||
-    goal.includes('ツール') ||
-    goal.includes('pickaxe') ||
-    goal.includes('sword') ||
-    goal.includes('axe') ||
-    goal.includes('炉') ||
-    goal.includes('furnace') ||
-    goal.includes('stick') ||
-    goal.includes('planks')
-  ) {
-    return 'craft';
-  }
-  if (goal.includes('木') || goal.includes('log') || goal.includes('伐採')) {
-    return 'mine_logs';
-  }
-  if (goal.includes('石炭') || goal.includes('coal')) {
-    return 'mine_coal';
-  }
-  if (goal.includes('石') || goal.includes('stone') || goal.includes('cobble')) {
-    return 'mine_stone';
-  }
-  if (goal.includes('鉄') || goal.includes('iron')) {
-    return 'mine_iron';
-  }
-  if (goal.includes('ダイヤ') || goal.includes('diamond')) {
-    return 'mine_diamond';
-  }
-  if (goal.includes('探索') || goal.includes('explor')) {
-    return 'explore';
-  }
-  return 'explore';
-}
-
-export function shouldForceCraftBootstrap(
-  inventory: InventorySnapshotItem[],
-  hasNearbyCraftingTable: boolean,
-): boolean {
-  const hasPickaxe = inventory.some(item => item.name.endsWith('_pickaxe'));
-  if (hasPickaxe) {
-    return false;
-  }
-
-  const countBy = (name: string) => inventory
-    .filter(item => item.name === name)
-    .reduce((sum, item) => sum + item.count, 0);
-  const sumBySuffix = (suffix: string) => inventory
-    .filter(item => item.name.endsWith(suffix))
-    .reduce((sum, item) => sum + item.count, 0);
-
-  const logCount = sumBySuffix('_log');
-  const plankCount = sumBySuffix('_planks');
-  const stickCount = countBy('stick');
-  const cobbleCount = countBy('cobblestone');
-  const hasCraftingTableItem = countBy('crafting_table') > 0;
-
-  const canReachCraftingTable = hasNearbyCraftingTable || hasCraftingTableItem;
-  const canBootstrapWorkbench = logCount > 0 || plankCount >= 4 || hasCraftingTableItem;
-  const canBootstrapPickaxe = canReachCraftingTable && stickCount >= 2 && (cobbleCount >= 3 || plankCount >= 3);
-
-  return canBootstrapWorkbench || canBootstrapPickaxe;
-}
-
-export function didBlockBreak(originalName: string, currentBlockName: string | null): boolean {
-  return currentBlockName !== originalName;
-}
-
-export function isFoodItemName(name: string): boolean {
-  return FOOD_ITEMS.has(name);
-}
-
-export function formatRuntimeDiagnostics(diagnostics: ReflexRuntimeDiagnostics): string {
-  const position = diagnostics.position
-    ? `${Math.round(diagnostics.position.x)},${Math.round(diagnostics.position.y)},${Math.round(diagnostics.position.z)}`
-    : 'n/a';
-
-  return [
-    `state=${diagnostics.reflexState}`,
-    `goal=${diagnostics.currentGoal || 'none'}`,
-    `threat=${diagnostics.threatLevel}`,
-    `action=${diagnostics.currentActionLabel ?? 'none'}`,
-    `actionAge=${formatAgeMs(diagnostics.currentActionAgeMs)}`,
-    `tickAge=${formatAgeMs(diagnostics.lastTickAgeMs)}`,
-    `maxTickDrift=${diagnostics.maxTickDriftMs}ms`,
-    `packetAge=${formatAgeMs(diagnostics.lastPacketAgeMs)}`,
-    `keepAliveAge=${formatAgeMs(diagnostics.lastKeepAliveAgeMs)}`,
-    `physicsAge=${formatAgeMs(diagnostics.lastPhysicsTickAgeMs)}`,
-    `moveAge=${formatAgeMs(diagnostics.lastMoveAgeMs)}`,
-    `hp=${diagnostics.hp ?? 'n/a'}`,
-    `hunger=${diagnostics.hunger ?? 'n/a'}`,
-    `pos=${position}`,
-  ].join(' ');
-}
-
-export function describeDisconnectReason(
-  reason: unknown,
-  diagnostics?: ReflexRuntimeDiagnostics,
-): string {
-  if (reason instanceof Error && reason.message.trim()) {
-    return diagnostics ? `${reason.message} | ${formatRuntimeDiagnostics(diagnostics)}` : reason.message;
-  }
-  if (typeof reason === 'string' && reason.trim()) {
-    return diagnostics ? `${reason} | ${formatRuntimeDiagnostics(diagnostics)}` : reason;
-  }
-  if (reason && typeof reason === 'object') {
-    try {
-      const message = JSON.stringify(reason);
-      return diagnostics ? `${message} | ${formatRuntimeDiagnostics(diagnostics)}` : message;
-    } catch {
-      return 'unknown disconnect';
-    }
-  }
-  return diagnostics ? `unknown disconnect | ${formatRuntimeDiagnostics(diagnostics)}` : 'unknown disconnect';
-}
-
-function toAgeMs(timestamp: number): number | null {
-  if (timestamp <= 0) return null;
-  return Math.max(0, Date.now() - timestamp);
-}
-
-function formatAgeMs(ageMs: number | null): string {
-  return ageMs === null ? 'n/a' : `${ageMs}ms`;
 }

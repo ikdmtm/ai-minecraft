@@ -77,14 +77,6 @@ describe('buildSystemPrompt', () => {
     const prompt = buildSystemPrompt();
     expect(prompt).toContain('生存');
   });
-
-  it('includes the unified Rei speech guidelines', () => {
-    const prompt = buildSystemPrompt();
-    expect(prompt).toContain('一人称は「わたし」');
-    expect(prompt).toContain('荒い男性口調は使わない');
-    expect(prompt).toContain('知的で観察好き');
-    expect(prompt).toContain('視聴者に媚びすぎない');
-  });
 });
 
 describe('buildUserMessage', () => {

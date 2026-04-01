@@ -2,7 +2,6 @@ import type { SharedStateBus } from './sharedState.js';
 import type { LLMApiAdapter } from '../llm/client.js';
 import type { BotSensors } from '../bot/types.js';
 import type { DeathRecord } from '../types/gameState.js';
-import { REI_PERSONA_GUIDELINES, REI_SYSTEM_INTRO } from '../persona/rei.js';
 
 const STRATEGIC_INTERVAL_MS = 45_000;
 const STRATEGIC_TIMEOUT_MS = 30_000;
@@ -84,10 +83,8 @@ export class StrategicLayer {
     const emotionLabel = shared.getEmotionLabel();
     const lessons = shared.get().lessonsThisLife;
 
-    return `${REI_SYSTEM_INTRO}
+    return `あなたは「星守レイ」です。Minecraft ハードコアモードをプレイする AI VTuber です。
 あなたの現在の気分: ${emotionLabel}
-
-${REI_PERSONA_GUIDELINES}
 
 【役割】長期的な戦略計画の立案。
 あなたはゲームの全体的な方向性を決める「頭脳」です。
@@ -114,9 +111,6 @@ ${lessons.length > 0 ? `【この世代で学んだ教訓】\n${lessons.map(l =>
 \`\`\`
 
 - main_goal: 反射層が解釈できるシンプルな目標（「木を伐採する」「鉄鉱石を採掘する」「探索する」等）
-- main_goal は短く具体的に。複数工程を 1 文に詰め込まない
-- インベントリクラフトで作れるのは plank / stick / crafting_table まで。pickaxe / sword / axe / furnace は作業台が必要
-- 食料が生肉でも、インベントリにあれば「食べられる食料あり」とみなしてよい。調理は改善策であって絶対条件ではない
 - sub_goals: 目標達成のための具体的ステップ
 - lessons_learned: この状況から学べること。なければ空配列
 - personality_note: キャラクターの内面を表現する短い一言`;

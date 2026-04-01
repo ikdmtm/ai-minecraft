@@ -1,14 +1,20 @@
-export type RuntimeState =
+export type OrchestratorState =
   | 'IDLE'
-  | 'STARTING'
+  | 'BOOTING'
+  | 'PREPARING_STREAM'
   | 'LIVE_RUNNING'
   | 'DEATH_DETECTED'
-  | 'RESETTING';
+  | 'ENDING_STREAM'
+  | 'COOL_DOWN'
+  | 'CREATING_NEXT_STREAM'
+  | 'RECOVERING'
+  | 'RETRY_WAIT'
+  | 'SUSPENDED_UNTIL_NEXT_DAY';
 
 export type OperationMode = 'MANUAL' | 'AUTO';
 
 export interface PersistentState {
-  currentState: RuntimeState;
+  currentState: OrchestratorState;
   currentGeneration: number;
   bestRecordMinutes: number;
   currentStreamId: string | null;

@@ -9,14 +9,11 @@ User=ubuntu
 WorkingDirectory=/home/ubuntu/ai-minecraft
 EnvironmentFile=/home/ubuntu/ai-minecraft/.env
 Environment=NODE_ENV=production
-Environment=DISPLAY=:99
-Environment=XDG_RUNTIME_DIR=/run/user/1000
-Environment=PULSE_SERVER=unix:/run/user/1000/pulse/native
 ExecStartPre=/bin/bash /home/ubuntu/.config/pulse/set-volumes.sh
 ExecStart=/usr/bin/node dist/index.js
 Restart=always
 RestartSec=15
-CPUAffinity=2
+CPUAffinity=3
 StandardOutput=journal
 StandardError=journal
 

@@ -21,7 +21,6 @@ export interface HudOverlayConfig {
   enabled: boolean;
   fontPath: string;
   filePaths: HudFilePaths;
-  showTopRightInfo?: boolean;
 }
 
 export interface FFmpegProcess {
@@ -79,6 +78,11 @@ export function buildHudFilters(hud: HudOverlayConfig): string {
       x: '10', y: 'H-40',
     }),
     drawtext({
+      textfile: hud.filePaths.info,
+      fontPath: font, fontSize: 18, fontColor: 'white', borderW: 2,
+      x: 'W-360', y: '15',
+    }),
+    drawtext({
       textfile: hud.filePaths.goal,
       fontPath: font, fontSize: 18, fontColor: 'yellow', borderW: 2,
       x: '10', y: '15',
@@ -89,15 +93,6 @@ export function buildHudFilters(hud: HudOverlayConfig): string {
       x: '(W-text_w)/2', y: 'H-80',
     }),
   ];
-
-  if (hud.showTopRightInfo) {
-    filters.splice(1, 0, drawtext({
-      textfile: hud.filePaths.info,
-      fontPath: font, fontSize: 18, fontColor: 'white', borderW: 2,
-      x: 'W-360', y: '15',
-    }));
-  }
-
   return filters.join(',');
 }
 
@@ -109,7 +104,6 @@ export function buildHudFilters(hud: HudOverlayConfig): string {
  * overlay → アバター合成用、drawtext → HUD 情報表示
  */
 export function buildFFmpegArgs(config: FFmpegConfig): string[] {
-  const threadQueueSize = '2048';
   let filterComplex = '[0:v][2:v]overlay=W-w-20:H-h-20:format=auto';
 
   if (config.hud?.enabled) {
@@ -120,19 +114,16 @@ export function buildFFmpegArgs(config: FFmpegConfig): string[] {
 
   return [
     // Input 0: Video (X11 screen capture)
-    '-thread_queue_size', threadQueueSize,
     '-f', 'x11grab',
     '-framerate', String(config.fps),
     '-video_size', config.resolution,
     '-i', config.display,
 
     // Input 1: Audio (PulseAudio combined sink)
-    '-thread_queue_size', threadQueueSize,
     '-f', 'pulse',
     '-i', config.pulseAudioSource,
 
     // Input 2: Avatar (raw RGBA from named pipe)
-    '-thread_queue_size', threadQueueSize,
     '-f', 'rawvideo',
     '-pixel_format', 'rgba',
     '-video_size', `${config.avatarWidth}x${config.avatarHeight}`,
@@ -150,13 +141,9 @@ export function buildFFmpegArgs(config: FFmpegConfig): string[] {
     '-preset', 'ultrafast',
     '-tune', 'zerolatency',
     '-b:v', config.videoBitrate,
-    '-minrate', config.videoBitrate,
     '-maxrate', config.videoBitrate,
     '-bufsize', `${parseInt(config.videoBitrate) * 2}k`,
     '-g', String(config.fps * 2),
-    '-keyint_min', String(config.fps * 2),
-    '-x264-params', 'nal-hrd=cbr:force-cfr=1',
-    '-pix_fmt', 'yuv420p',
 
     // Output frame rate cap
     '-r', String(config.fps),

@@ -1,4 +1,4 @@
-import { HudWriter, type HudData, type HudWriterDeps, formatCommentary, formatHealthBar, formatHungerBar, formatSurvivalDuration, formatPosition } from './hudWriter.js';
+import { HudWriter, type HudData, type HudWriterDeps, formatHealthBar, formatHungerBar, formatSurvivalDuration, formatPosition } from './hudWriter.js';
 
 function makeHudData(overrides: Partial<HudData> = {}): HudData {
   return {
@@ -80,27 +80,6 @@ describe('HudWriter', () => {
     });
   });
 
-  describe('formatCommentary', () => {
-    it('should keep short commentary as-is', () => {
-      expect(formatCommentary('クリーパーが近い！')).toBe('クリーパーが近い！');
-    });
-
-    it('should wrap long commentary into multiple lines', () => {
-      const text = 'クラフトテーブルが作れないままだ。とにかく木を見つけて丸太を集めよう。食料もないし、時間がない。';
-      const formatted = formatCommentary(text);
-
-      expect(formatted.split('\n').length).toBeGreaterThan(1);
-      expect(formatted.split('\n').length).toBeLessThanOrEqual(3);
-    });
-
-    it('should truncate with ellipsis when the wrapped text exceeds the visible lines', () => {
-      const formatted = formatCommentary('あ'.repeat(120));
-
-      expect(formatted.split('\n')).toHaveLength(3);
-      expect(formatted.endsWith('…')).toBe(true);
-    });
-  });
-
   describe('HudWriter update and write', () => {
     let writer: HudWriter;
     let deps: ReturnType<typeof createMockDeps>;
@@ -152,14 +131,13 @@ describe('HudWriter', () => {
       expect(commentary).toContain('クリーパーが近い！気をつけないと...');
     });
 
-    it('should wrap and truncate long commentary', () => {
+    it('should truncate long commentary', () => {
       const longText = 'あ'.repeat(200);
       writer.update(makeHudData({ commentary: longText }));
       writer.flush();
 
       const commentary = deps.written.get('/tmp/hud/ai-mc-hud-commentary.txt')!;
-      expect(commentary.split('\n').length).toBeLessThanOrEqual(3);
-      expect(commentary.endsWith('…')).toBe(true);
+      expect(commentary.length).toBeLessThan(200);
     });
 
     it('should include threat level indicator in info', () => {

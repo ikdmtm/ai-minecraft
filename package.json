@@ -4,7 +4,7 @@
   "private": true,
   "description": "AI VTuber 星守レイ - Minecraft ハードコア自動配信システム",
   "scripts": {
-    "build": "tsc -p tsconfig.build.json",
+    "build": "tsc",
     "start": "tsx src/index.ts",
     "dev": "tsx watch src/index.ts",
     "test": "jest --runInBand",

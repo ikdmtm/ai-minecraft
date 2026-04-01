@@ -26,8 +26,7 @@ export interface HudFilePaths {
   commentary: string;
 }
 
-const MAX_COMMENTARY_LINE_LENGTH = 26;
-const MAX_COMMENTARY_LINES = 3;
+const MAX_COMMENTARY_LENGTH = 80;
 
 const THREAT_DISPLAY: Record<string, string> = {
   safe: 'SAFE',
@@ -60,26 +59,6 @@ export function formatSurvivalDuration(startTime: number): string {
 
 export function formatPosition(pos: { x: number; y: number; z: number }): string {
   return `X:${Math.round(pos.x)} Y:${Math.round(pos.y)} Z:${Math.round(pos.z)}`;
-}
-
-export function formatCommentary(text: string): string {
-  if (!text) return '';
-
-  const normalized = text.replace(/\r\n/g, '\n').trim();
-  const sourceLines = normalized.split('\n').flatMap((line) => wrapLine(line, MAX_COMMENTARY_LINE_LENGTH));
-  const limitedLines = sourceLines.slice(0, MAX_COMMENTARY_LINES);
-  const truncated = sourceLines.length > MAX_COMMENTARY_LINES;
-
-  if (limitedLines.length === 0) {
-    return '';
-  }
-
-  if (truncated) {
-    const lastIndex = limitedLines.length - 1;
-    limitedLines[lastIndex] = appendEllipsis(limitedLines[lastIndex], MAX_COMMENTARY_LINE_LENGTH);
-  }
-
-  return limitedLines.join('\n');
 }
 
 export class HudWriter {
@@ -175,34 +154,10 @@ export class HudWriter {
   }
 
   private buildCommentaryContent(): string {
-    return formatCommentary(this.data.commentary);
+    if (!this.data.commentary) return '';
+    if (this.data.commentary.length > MAX_COMMENTARY_LENGTH) {
+      return this.data.commentary.slice(0, MAX_COMMENTARY_LENGTH - 1) + '…';
+    }
+    return this.data.commentary;
   }
-}
-
-function wrapLine(line: string, maxLength: number): string[] {
-  if (!line) return [''];
-
-  const result: string[] = [];
-  let rest = line.trim();
-
-  while (rest.length > maxLength) {
-    const candidate = rest.slice(0, maxLength + 1);
-    const breakAtWhitespace = Math.max(candidate.lastIndexOf(' '), candidate.lastIndexOf('　'));
-    const cut = breakAtWhitespace >= Math.floor(maxLength * 0.6) ? breakAtWhitespace : maxLength;
-    result.push(rest.slice(0, cut).trim());
-    rest = rest.slice(cut).trim();
-  }
-
-  if (rest) {
-    result.push(rest);
-  }
-
-  return result.length > 0 ? result : [''];
-}
-
-function appendEllipsis(line: string, maxLength: number): string {
-  if (line.length >= maxLength) {
-    return `${line.slice(0, Math.max(0, maxLength - 1)).trimEnd()}…`;
-  }
-  return `${line}…`;
 }

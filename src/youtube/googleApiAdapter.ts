@@ -5,7 +5,6 @@ import type {
   YouTubeApiAdapter,
   BroadcastCreateParams,
   BroadcastCreateResult,
-  BroadcastLifeCycleStatus,
   StreamStatus,
 } from './api.js';
 
@@ -39,7 +38,7 @@ export class GoogleYouTubeApiAdapter implements YouTubeApiAdapter {
           scheduledStartTime: scheduled,
         },
         status: {
-          privacyStatus: params.privacyStatus ?? 'unlisted',
+          privacyStatus: 'public',
           selfDeclaredMadeForKids: false,
         },
         contentDetails: {
@@ -146,15 +145,6 @@ export class GoogleYouTubeApiAdapter implements YouTubeApiAdapter {
     const raw = res.data.items?.[0]?.status?.streamStatus;
     return mapStreamStatus(raw);
   }
-
-  async getBroadcastStatus(broadcastId: string): Promise<BroadcastLifeCycleStatus> {
-    const res = await this.youtube.liveBroadcasts.list({
-      part: ['status'],
-      id: [broadcastId],
-    });
-    const raw = res.data.items?.[0]?.status?.lifeCycleStatus;
-    return mapBroadcastStatus(raw);
-  }
 }
 
 function mapStreamStatus(raw: string | null | undefined): StreamStatus {
@@ -170,22 +160,6 @@ function mapStreamStatus(raw: string | null | undefined): StreamStatus {
     case 'created':
     default:
       return 'inactive';
-  }
-}
-
-function mapBroadcastStatus(raw: string | null | undefined): BroadcastLifeCycleStatus {
-  switch (raw) {
-    case 'complete':
-    case 'created':
-    case 'live':
-    case 'liveStarting':
-    case 'ready':
-    case 'revoked':
-    case 'testStarting':
-    case 'testing':
-      return raw;
-    default:
-      return 'created';
   }
 }
 

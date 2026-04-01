@@ -6,7 +6,6 @@ export interface BroadcastCreateParams {
   description: string;
   tags: string[];
   categoryId: string;
-  privacyStatus?: 'private' | 'public' | 'unlisted';
 }
 
 export interface BroadcastCreateResult {
@@ -17,15 +16,6 @@ export interface BroadcastCreateResult {
 }
 
 export type StreamStatus = 'active' | 'inactive' | 'ready' | 'error';
-export type BroadcastLifeCycleStatus =
-  | 'complete'
-  | 'created'
-  | 'live'
-  | 'liveStarting'
-  | 'ready'
-  | 'revoked'
-  | 'testStarting'
-  | 'testing';
 
 /**
  * YouTube Data API / Live Streaming API の抽象化。
@@ -38,7 +28,6 @@ export interface YouTubeApiAdapter {
   endBroadcast(broadcastId: string): Promise<void>;
   uploadThumbnail(broadcastId: string, filePath: string): Promise<void>;
   getStreamStatus(streamId: string): Promise<StreamStatus>;
-  getBroadcastStatus(broadcastId: string): Promise<BroadcastLifeCycleStatus>;
 }
 
 /**
@@ -79,15 +68,6 @@ export class YouTubeClient {
     }
   }
 
-  async transitionToTesting(broadcastId: string): Promise<Result<void>> {
-    try {
-      await this.adapter.transitionBroadcast(broadcastId, 'testing');
-      return ok(undefined);
-    } catch (e) {
-      return err(`testing 遷移失敗: ${errorMessage(e)}`);
-    }
-  }
-
   async updateTitle(broadcastId: string, title: string): Promise<Result<void>> {
     try {
       await this.adapter.updateBroadcast(broadcastId, { title });
@@ -112,15 +92,6 @@ export class YouTubeClient {
       return ok(status);
     } catch (e) {
       return err(`ストリームステータス取得失敗: ${errorMessage(e)}`);
-    }
-  }
-
-  async getBroadcastStatus(broadcastId: string): Promise<Result<BroadcastLifeCycleStatus>> {
-    try {
-      const status = await this.adapter.getBroadcastStatus(broadcastId);
-      return ok(status);
-    } catch (e) {
-      return err(`配信枠ステータス取得失敗: ${errorMessage(e)}`);
     }
   }
 

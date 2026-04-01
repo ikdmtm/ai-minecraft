@@ -23,10 +23,12 @@ export type {
 } from './llm.js';
 
 export type {
-  RuntimeState,
+  OrchestratorState,
   OperationMode,
   PersistentState,
 } from './state.js';
+
+export type { OrchestratorEvent } from './events.js';
 
 export type { AppConfig } from './config.js';
 

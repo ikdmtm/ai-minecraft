@@ -13,7 +13,6 @@ function createMockAdapter(): jest.Mocked<YouTubeApiAdapter> {
     endBroadcast: jest.fn().mockResolvedValue(undefined),
     uploadThumbnail: jest.fn().mockResolvedValue(undefined),
     getStreamStatus: jest.fn().mockResolvedValue('active'),
-    getBroadcastStatus: jest.fn().mockResolvedValue('ready'),
   };
 }
 
@@ -46,7 +45,6 @@ describe('YouTubeClient', () => {
         description: 'テスト概要欄',
         tags: ['Minecraft', 'AI'],
         categoryId: '20',
-        privacyStatus: undefined,
       });
     });
 
@@ -115,14 +113,6 @@ describe('YouTubeClient', () => {
       const result = await client.getStreamStatus('stream-456');
       expect(result.ok).toBe(true);
       if (result.ok) expect(result.value).toBe('active');
-    });
-  });
-
-  describe('getBroadcastStatus', () => {
-    it('returns broadcast lifecycle status', async () => {
-      const result = await client.getBroadcastStatus('broadcast-123');
-      expect(result.ok).toBe(true);
-      if (result.ok) expect(result.value).toBe('ready');
     });
   });
 

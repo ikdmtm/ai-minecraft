@@ -322,7 +322,7 @@ exec java \\
   --version "\$FABRIC_LOADER" \\
   --width 1280 --height 720 \\
   --quickPlayMultiplayer "localhost:25565" \\
-  --username StreamCamera
+  --username AI_Rei
 LAUNCH
 
 chmod +x "$CLIENT_DIR/launch.sh"

@@ -24,7 +24,6 @@ export interface CognitiveOrchestratorConfig {
 export interface CognitiveEvents {
   onCommentary: (text: string) => void;
   onDeath: (cause: string) => void;
-  onDisconnect: (reason: string) => void;
   onGoalChanged: (goal: string) => void;
   onReactiveAction: (event: RecentEvent) => void;
 }
@@ -78,11 +77,6 @@ export class CognitiveOrchestrator {
       onDeath: (cause) => {
         this.shared.pushEvent({ type: 'death', detail: cause, importance: 'critical' });
         events.onDeath(cause);
-      },
-      onDisconnect: (reason) => {
-        this.shared.pushEvent({ type: 'bot_disconnect', detail: reason, importance: 'critical' });
-        this.stop();
-        events.onDisconnect(reason);
       },
       onReactiveAction: (event) => {
         events.onReactiveAction(event);
