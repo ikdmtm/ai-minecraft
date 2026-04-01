@@ -657,17 +657,12 @@ export class ReflexLayer {
       matching: (b) => {
         // mineflayer's matcher can receive null for unloaded chunk positions.
         if (!b || typeof b.name !== 'string') return false;
-        if (!hasBlockPosition(b)) return false;
         if (!blockTypes.includes(b.name)) return false;
         return !this.miningFailureGuard.isBlocked(this.getBlockActionKey(b));
       },
       maxDistance: 64,
     });
     if (!block) {
-      await this.doExplore();
-      return;
-    }
-    if (!hasBlockPosition(block)) {
       await this.doExplore();
       return;
     }
@@ -1115,12 +1110,8 @@ export class ReflexLayer {
     }
   }
 
-  private getBlockActionKey(block: {
-    name?: string;
-    position?: { x?: number; y?: number; z?: number } | null;
-  }): string {
-    if (!hasBlockPosition(block)) return `${block.name ?? 'unknown'}@unknown`;
-    return `${block.name ?? 'unknown'}@${Math.round(block.position.x)},${Math.round(block.position.y)},${Math.round(block.position.z)}`;
+  private getBlockActionKey(block: { name: string; position: { x: number; y: number; z: number } }): string {
+    return `${block.name}@${Math.round(block.position.x)},${Math.round(block.position.y)},${Math.round(block.position.z)}`;
   }
 
   private handleMiningFailure(actionKey: string, blockName: string): void {
@@ -1457,17 +1448,6 @@ export function describeDisconnectReason(
     }
   }
   return diagnostics ? `unknown disconnect | ${formatRuntimeDiagnostics(diagnostics)}` : 'unknown disconnect';
-}
-
-function hasBlockPosition(block: unknown): block is {
-  name?: string;
-  position: { x: number; y: number; z: number };
-} {
-  if (!block || typeof block !== 'object') return false;
-  const position = (block as { position?: unknown }).position;
-  if (!position || typeof position !== 'object') return false;
-  const { x, y, z } = position as { x?: unknown; y?: unknown; z?: unknown };
-  return typeof x === 'number' && typeof y === 'number' && typeof z === 'number';
 }
 
 function toAgeMs(timestamp: number): number | null {
