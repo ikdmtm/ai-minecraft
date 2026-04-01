@@ -24,6 +24,8 @@ const NIGHT_RETREAT_TIME = 12500;
 const DAWN_TIME = 23500;
 const BLOCKED_TARGET_COOLDOWN_MS = 90_000;
 const ACTION_STALL_THRESHOLD_MS = 10_000;
+const GOAL_CHANGE_INTERRUPT_THRESHOLD_MS = 8_000;
+const NO_PROGRESS_BLOCK_COOLDOWN_MS = 15_000;
 
 const FOOD_ITEMS = new Set([
   'beef', 'porkchop', 'chicken', 'mutton', 'rabbit', 'salmon', 'cod',
@@ -106,6 +108,11 @@ export interface ReflexRuntimeDiagnostics {
   position: Position | null;
 }
 
+interface ActionExecutionResult {
+  progress: boolean;
+  reason?: string;
+}
+
 export class ReflexLayer {
   private bot: mineflayer.Bot | null = null;
   private shared: SharedStateBus;
@@ -120,6 +127,7 @@ export class ReflexLayer {
   private shelterBuilt = false;
   private disconnecting = false;
   private currentActionLabel: string | null = null;
+  private currentActionInitialGoal = '';
   private currentActionStartedAt = 0;
   private currentActionToken = 0;
   private lastTickStartedAt = 0;
@@ -133,6 +141,11 @@ export class ReflexLayer {
     failureThreshold: 3,
     failureWindowMs: 30_000,
     cooldownMs: BLOCKED_TARGET_COOLDOWN_MS,
+  });
+  private readonly noProgressGuard = new ActionFailureGuard({
+    failureThreshold: 4,
+    failureWindowMs: 20_000,
+    cooldownMs: NO_PROGRESS_BLOCK_COOLDOWN_MS,
   });
 
   constructor(shared: SharedStateBus) {
@@ -303,14 +316,16 @@ export class ReflexLayer {
     };
   }
 
-  interruptCurrentAction(): void {
+  interruptCurrentAction(reason?: string): void {
     const interruptedAction = this.currentActionLabel;
     const interruptedAgeMs = toAgeMs(this.currentActionStartedAt);
     this.actionAbortController?.abort();
     try { this.bot?.pathfinder.stop(); } catch { /* ignore */ }
 
     if (interruptedAction) {
-      const detail = `${interruptedAction} interrupted (${formatAgeMs(interruptedAgeMs)})`;
+      const detail = reason
+        ? `${interruptedAction} interrupted (${formatAgeMs(interruptedAgeMs)}): ${reason}`
+        : `${interruptedAction} interrupted (${formatAgeMs(interruptedAgeMs)})`;
       this.events?.onReactiveAction({ time: 'now', event: 'action_interrupted', detail });
       this.shared.pushEvent({ type: 'action_interrupted', detail, importance: 'medium' });
     }
@@ -318,6 +333,7 @@ export class ReflexLayer {
     this.currentActionToken += 1;
     this.currentAction = null;
     this.currentActionLabel = null;
+    this.currentActionInitialGoal = '';
     this.currentActionStartedAt = 0;
     this.actionAbortController = null;
     this.isExecutingAction = false;
@@ -369,6 +385,7 @@ export class ReflexLayer {
 
       if (this.isExecutingAction) {
         this.detectActionStall();
+        this.detectGoalChangeInterrupt();
         return;
       }
 
@@ -395,7 +412,26 @@ export class ReflexLayer {
     this.events?.onReactiveAction({ time: 'now', event: 'action_stalled', detail });
     this.shared.pushEvent({ type: 'action_stalled', detail, importance: 'high' });
     this.shared.updateEmotion({ arousal: -0.05, dominance: -0.05 }, 'action_stalled');
-    this.interruptCurrentAction();
+    this.interruptCurrentAction('stalled');
+  }
+
+  private detectGoalChangeInterrupt(): void {
+    if (!this.currentActionLabel || !this.currentActionInitialGoal) return;
+    if (this.currentActionLabel === 'flee' || this.currentActionLabel === 'eat') return;
+    if (this.currentActionLabel.startsWith('fight:')) return;
+
+    const latestGoal = this.shared.get().currentGoal;
+    if (!latestGoal || latestGoal === this.currentActionInitialGoal) {
+      return;
+    }
+
+    const actionAgeMs = toAgeMs(this.currentActionStartedAt);
+    if (actionAgeMs === null || actionAgeMs < GOAL_CHANGE_INTERRUPT_THRESHOLD_MS) {
+      return;
+    }
+
+    const reason = `goal_changed "${this.currentActionInitialGoal}" -> "${latestGoal}"`;
+    this.interruptCurrentAction(reason);
   }
 
   private updateThreatLevel(): void {
@@ -459,7 +495,7 @@ export class ReflexLayer {
   private executeUrgentAction(action: UrgentAction): void {
     if (this.isExecutingAction && action.type !== 'flee' && action.type !== 'eat') return;
 
-    this.interruptCurrentAction();
+    this.interruptCurrentAction(`urgent_${action.type}`);
 
     const prevState = this.shared.get().reflexState;
     const event: RecentEvent = {
@@ -526,6 +562,10 @@ export class ReflexLayer {
       this.findNearbyCraftingTable() !== null,
     )) {
       this.shared.setReflexState('crafting');
+      if (this.isActionSuppressed('craft_bootstrap')) {
+        this.runSuppressedActionFallback('craft_bootstrap');
+        return;
+      }
       this.runAction('craft_bootstrap', () => this.doCraftAdvanced());
       return;
     }
@@ -541,26 +581,50 @@ export class ReflexLayer {
     switch (resolveGoalBehavior(activeGoal)) {
       case 'mine_logs':
       this.shared.setReflexState('mining');
+      if (this.isActionSuppressed('mine_logs')) {
+        this.runSuppressedActionFallback('mine_logs');
+        break;
+      }
       this.runAction('mine_logs', () => this.doMineBlock(['oak_log', 'birch_log', 'spruce_log', 'jungle_log', 'acacia_log', 'dark_oak_log', 'cherry_log', 'mangrove_log']));
       break;
       case 'mine_stone':
       this.shared.setReflexState('mining');
+      if (this.isActionSuppressed('mine_stone')) {
+        this.runSuppressedActionFallback('mine_stone');
+        break;
+      }
       this.runAction('mine_stone', () => this.doMineBlock(['stone', 'cobblestone']));
       break;
       case 'mine_iron':
       this.shared.setReflexState('mining');
+      if (this.isActionSuppressed('mine_iron')) {
+        this.runSuppressedActionFallback('mine_iron');
+        break;
+      }
       this.runAction('mine_iron', () => this.doMineBlock(['iron_ore', 'deepslate_iron_ore']));
       break;
       case 'mine_diamond':
       this.shared.setReflexState('mining');
+      if (this.isActionSuppressed('mine_diamond')) {
+        this.runSuppressedActionFallback('mine_diamond');
+        break;
+      }
       this.runAction('mine_diamond', () => this.doMineBlock(['diamond_ore', 'deepslate_diamond_ore']));
       break;
       case 'mine_coal':
       this.shared.setReflexState('mining');
+      if (this.isActionSuppressed('mine_coal')) {
+        this.runSuppressedActionFallback('mine_coal');
+        break;
+      }
       this.runAction('mine_coal', () => this.doMineBlock(['coal_ore', 'deepslate_coal_ore']));
       break;
       case 'craft':
       this.shared.setReflexState('crafting');
+      if (this.isActionSuppressed('craft')) {
+        this.runSuppressedActionFallback('craft');
+        break;
+      }
       this.runAction('craft', () => this.doCraftAdvanced());
       break;
       case 'return_to_base':
@@ -573,6 +637,10 @@ export class ReflexLayer {
       break;
       case 'gather_food':
       this.shared.setReflexState('gathering');
+      if (this.isActionSuppressed('gather_food')) {
+        this.runSuppressedActionFallback('gather_food');
+        break;
+      }
       this.runAction('gather_food', () => this.doHuntAnimal(''));
       break;
       case 'explore':
@@ -581,6 +649,18 @@ export class ReflexLayer {
       this.runAction('explore', () => this.doExplore());
       break;
     }
+  }
+
+  private isActionSuppressed(label: string): boolean {
+    return this.noProgressGuard.isBlocked(label);
+  }
+
+  private runSuppressedActionFallback(label: string): void {
+    const detail = `${label} temporarily suppressed after repeated no-progress; fallback explore`;
+    this.events?.onReactiveAction({ time: 'now', event: 'action_suppressed', detail });
+    this.shared.pushEvent({ type: 'action_suppressed', detail, importance: 'medium' });
+    this.shared.setReflexState('exploring');
+    this.runAction('explore', () => this.doExplore());
   }
 
   private doIdleBehavior(): void {
@@ -601,7 +681,7 @@ export class ReflexLayer {
 
   // --- Action implementations ---
 
-  private async doFlee(): Promise<void> {
+  private async doFlee(): Promise<ActionExecutionResult> {
     const bot = this.requireBot();
     const dx = -Math.cos(bot.entity.yaw) * 15;
     const dz = -Math.sin(bot.entity.yaw) * 15;
@@ -612,26 +692,30 @@ export class ReflexLayer {
       await bot.pathfinder.goto(new goals.GoalNear(
         bot.entity.position.x + dx, bot.entity.position.y, bot.entity.position.z + dz, 3,
       ));
+      return { progress: true, reason: 'moved_away_from_threat' };
     } catch { /* best effort */ }
+    return { progress: false, reason: 'flee_path_unreachable' };
   }
 
-  private async doEat(): Promise<void> {
+  private async doEat(): Promise<ActionExecutionResult> {
     const bot = this.requireBot();
     const foodName = this.getBestFood();
-    if (!foodName) return;
+    if (!foodName) return { progress: false, reason: 'no_food_available' };
     const item = bot.inventory.items().find(i => i.name === foodName);
-    if (!item) return;
+    if (!item) return { progress: false, reason: 'food_item_missing' };
     try {
       await bot.equip(item, 'hand');
       await bot.consume();
       this.shared.updateEmotion({ valence: 0.1 }, 'ate_food');
+      return { progress: true, reason: `ate_${foodName}` };
     } catch { /* full or interrupted */ }
+    return { progress: false, reason: 'consume_failed_or_interrupted' };
   }
 
-  private async doFight(targetType: string): Promise<void> {
+  private async doFight(targetType: string): Promise<ActionExecutionResult> {
     const bot = this.requireBot();
     const target = bot.nearestEntity(e => e.name === targetType);
-    if (!target) return;
+    if (!target) return { progress: false, reason: `target_missing:${targetType}` };
 
     const movements = new Movements(bot);
     movements.allowSprinting = true;
@@ -641,17 +725,22 @@ export class ReflexLayer {
       await bot.pathfinder.goto(
         new goals.GoalNear(target.position.x, target.position.y, target.position.z, 2),
       );
+      let attackCount = 0;
       for (let i = 0; i < 5; i++) {
         const freshTarget = bot.nearestEntity(e => e.name === targetType);
         if (!freshTarget || bot.entity.position.distanceTo(freshTarget.position) > 4) break;
         bot.attack(freshTarget);
+        attackCount++;
         await sleep(400);
       }
+      if (attackCount <= 0) return { progress: false, reason: `target_out_of_range:${targetType}` };
       this.shared.updateEmotion({ dominance: 0.1 }, `fought_${targetType}`);
+      return { progress: true, reason: `attacked_${targetType}_${attackCount}` };
     } catch { /* target escaped */ }
+    return { progress: false, reason: `fight_failed:${targetType}` };
   }
 
-  private async doMineBlock(blockTypes: string[]): Promise<void> {
+  private async doMineBlock(blockTypes: string[]): Promise<ActionExecutionResult> {
     const bot = this.requireBot();
     const block = bot.findBlock({
       matching: (b) => {
@@ -665,11 +754,11 @@ export class ReflexLayer {
     });
     if (!block) {
       await this.doExplore();
-      return;
+      return { progress: false, reason: `target_not_found:${blockTypes.join('|')}` };
     }
     if (!hasBlockPosition(block)) {
       await this.doExplore();
-      return;
+      return { progress: false, reason: 'target_without_position' };
     }
 
     this.shared.addResourceLocation(block.name, {
@@ -690,7 +779,7 @@ export class ReflexLayer {
       if (!freshBlock || !bot.canDigBlock(freshBlock)) {
         this.handleMiningFailure(actionKey, block.name);
         await this.doExplore();
-        return;
+        return { progress: false, reason: `cannot_dig:${block.name}` };
       }
 
       await bot.dig(freshBlock);
@@ -699,7 +788,7 @@ export class ReflexLayer {
       if (!didBlockBreak(freshBlock.name, afterDig?.name ?? null)) {
         this.handleMiningFailure(actionKey, block.name);
         await this.doExplore();
-        return;
+        return { progress: false, reason: `dig_no_break:${freshBlock.name}` };
       }
 
       this.miningFailureGuard.recordSuccess(actionKey);
@@ -715,13 +804,15 @@ export class ReflexLayer {
           block.position.x, block.position.y, block.position.z,
         ));
       } catch { /* can't reach dropped item */ }
+      return { progress: true, reason: `mined:${freshBlock.name}` };
     } catch {
       this.handleMiningFailure(actionKey, block.name);
       await this.doExplore();
+      return { progress: false, reason: `mine_failed:${block.name}` };
     }
   }
 
-  private async doExplore(): Promise<void> {
+  private async doExplore(): Promise<ActionExecutionResult> {
     const bot = this.requireBot();
     const angle = Math.random() * Math.PI * 2;
     const dist = 15 + Math.random() * 25;
@@ -734,59 +825,75 @@ export class ReflexLayer {
     try {
       await bot.pathfinder.goto(new goals.GoalXZ(tx, tz));
       this.shared.updateEmotion({ valence: 0.02, arousal: 0.01 }, 'explored');
+      return { progress: true, reason: 'explore_primary' };
     } catch {
       const angle2 = angle + Math.PI;
       const tx2 = bot.entity.position.x + Math.cos(angle2) * 10;
       const tz2 = bot.entity.position.z + Math.sin(angle2) * 10;
-      try { await bot.pathfinder.goto(new goals.GoalXZ(tx2, tz2)); } catch { /* stuck */ }
+      try {
+        await bot.pathfinder.goto(new goals.GoalXZ(tx2, tz2));
+        return { progress: true, reason: 'explore_recovery' };
+      } catch { /* stuck */ }
+      return { progress: false, reason: 'explore_path_unreachable' };
     }
   }
 
-  private async doReturnToBase(): Promise<void> {
+  private async doReturnToBase(): Promise<ActionExecutionResult> {
     const basePos = this.shared.get().worldModel.basePosition;
     if (!basePos) {
       await this.doExplore();
-      return;
+      return { progress: false, reason: 'base_unknown' };
     }
     const bot = this.requireBot();
     const movements = new Movements(bot);
     movements.allowSprinting = true;
     bot.pathfinder.setMovements(movements);
     await bot.pathfinder.goto(new goals.GoalNear(basePos.x, basePos.y, basePos.z, 3));
+    return { progress: true, reason: 'returned_to_base' };
   }
 
-  private async doSleep(): Promise<void> {
+  private async doSleep(): Promise<ActionExecutionResult> {
     const bot = this.requireBot();
     const bed = bot.findBlock({ matching: b => b.name.includes('bed'), maxDistance: 32 });
-    if (!bed) return;
+    if (!bed) return { progress: false, reason: 'bed_not_found' };
     const movements = new Movements(bot);
     bot.pathfinder.setMovements(movements);
-    await bot.pathfinder.goto(
-      new goals.GoalNear(bed.position.x, bed.position.y, bed.position.z, 2),
-    );
-    try { await bot.sleep(bed); } catch { /* not night or occupied */ }
+    try {
+      await bot.pathfinder.goto(
+        new goals.GoalNear(bed.position.x, bed.position.y, bed.position.z, 2),
+      );
+    } catch {
+      return { progress: false, reason: 'bed_unreachable' };
+    }
+    try {
+      await bot.sleep(bed);
+      return { progress: true, reason: 'slept' };
+    } catch {
+      return { progress: false, reason: 'sleep_unavailable' };
+    }
   }
 
-  private async doCraftAdvanced(): Promise<void> {
+  private async doCraftAdvanced(): Promise<ActionExecutionResult> {
     const bot = this.requireBot();
+    let progressed = false;
 
     // Step 1: logs → planks
     const logItem = bot.inventory.items().find(i => i.name.includes('_log'));
     if (logItem) {
       const logPrefix = logItem.name.replace('_log', '');
       const planksName = `${logPrefix}_planks`;
-      await this.tryCraft(planksName, 4);
+      progressed = (await this.tryCraft(planksName, 4)) || progressed;
     }
 
     // Step 2: planks → sticks
     const planks = bot.inventory.items().find(i => i.name.includes('_planks'));
     if (planks && planks.count >= 2) {
-      await this.tryCraft('stick', 1);
+      progressed = (await this.tryCraft('stick', 1)) || progressed;
     }
 
     // Step 3: crafting table if missing
     if (!bot.inventory.items().some(i => i.name === 'crafting_table')) {
-      await this.tryCraft('crafting_table', 1);
+      progressed = (await this.tryCraft('crafting_table', 1)) || progressed;
     }
 
     // Step 4: tools progression (wooden → stone → iron)
@@ -803,44 +910,45 @@ export class ReflexLayer {
     if (craftingTable && hasSticks) {
       if (!hasPickaxe) {
         if (cobble && cobble.count >= 3) {
-          await this.tryCraftAt(craftingTable, 'stone_pickaxe', 1);
+          progressed = (await this.tryCraftAt(craftingTable, 'stone_pickaxe', 1)) || progressed;
         } else {
-          await this.tryCraftAt(craftingTable, 'wooden_pickaxe', 1);
+          progressed = (await this.tryCraftAt(craftingTable, 'wooden_pickaxe', 1)) || progressed;
         }
       }
       if (!hasSword) {
         if (cobble && cobble.count >= 2) {
-          await this.tryCraftAt(craftingTable, 'stone_sword', 1);
+          progressed = (await this.tryCraftAt(craftingTable, 'stone_sword', 1)) || progressed;
         } else {
-          await this.tryCraftAt(craftingTable, 'wooden_sword', 1);
+          progressed = (await this.tryCraftAt(craftingTable, 'wooden_sword', 1)) || progressed;
         }
       }
       if (!hasAxe) {
         if (cobble && cobble.count >= 3) {
-          await this.tryCraftAt(craftingTable, 'stone_axe', 1);
+          progressed = (await this.tryCraftAt(craftingTable, 'stone_axe', 1)) || progressed;
         } else {
-          await this.tryCraftAt(craftingTable, 'wooden_axe', 1);
+          progressed = (await this.tryCraftAt(craftingTable, 'wooden_axe', 1)) || progressed;
         }
       }
       if (!hasFurnace && cobble && cobble.count >= 8) {
-        await this.tryCraftAt(craftingTable, 'furnace', 1);
+        progressed = (await this.tryCraftAt(craftingTable, 'furnace', 1)) || progressed;
       }
     } else if (!craftingTable) {
       // Place crafting table if we have one
       const tableItem = bot.inventory.items().find(i => i.name === 'crafting_table');
       if (tableItem) {
         const placed = await this.placeBlockNearby(tableItem);
+        progressed = placed || progressed;
         if (placed) {
           craftingTable = this.findNearbyCraftingTable();
           if (craftingTable && hasSticks) {
             if (!hasPickaxe) {
-              await this.tryCraftAt(craftingTable, cobble && cobble.count >= 3 ? 'stone_pickaxe' : 'wooden_pickaxe', 1);
+              progressed = (await this.tryCraftAt(craftingTable, cobble && cobble.count >= 3 ? 'stone_pickaxe' : 'wooden_pickaxe', 1)) || progressed;
             }
             if (!hasSword) {
-              await this.tryCraftAt(craftingTable, cobble && cobble.count >= 2 ? 'stone_sword' : 'wooden_sword', 1);
+              progressed = (await this.tryCraftAt(craftingTable, cobble && cobble.count >= 2 ? 'stone_sword' : 'wooden_sword', 1)) || progressed;
             }
             if (!hasAxe) {
-              await this.tryCraftAt(craftingTable, cobble && cobble.count >= 3 ? 'stone_axe' : 'wooden_axe', 1);
+              progressed = (await this.tryCraftAt(craftingTable, cobble && cobble.count >= 3 ? 'stone_axe' : 'wooden_axe', 1)) || progressed;
             }
           }
         }
@@ -848,7 +956,9 @@ export class ReflexLayer {
     }
 
     // Step 5: smelt raw ores/meat if furnace nearby
-    await this.trySmelt();
+    progressed = (await this.trySmelt()) || progressed;
+    if (progressed) return { progress: true, reason: 'crafted_or_prepared' };
+    return { progress: false, reason: 'craft_no_recipe_or_material' };
   }
 
   private async tryCraft(itemName: string, count: number): Promise<boolean> {
@@ -911,27 +1021,26 @@ export class ReflexLayer {
     }
   }
 
-  private async trySmelt(): Promise<void> {
+  private async trySmelt(): Promise<boolean> {
     const bot = this.requireBot();
     const furnaceBlock = bot.findBlock({ matching: b => b.name === 'furnace' || b.name === 'lit_furnace', maxDistance: 8 });
     if (!furnaceBlock) {
       const furnaceItem = bot.inventory.items().find(i => i.name === 'furnace');
       if (furnaceItem) {
-        await this.placeBlockNearby(furnaceItem);
-        return;
+        return this.placeBlockNearby(furnaceItem);
       }
-      return;
+      return false;
     }
 
     const rawItems = bot.inventory.items().filter(i =>
       i.name.startsWith('raw_') || Object.keys(RAW_TO_COOKED).includes(i.name),
     );
-    if (rawItems.length === 0) return;
+    if (rawItems.length === 0) return false;
 
     const fuel = bot.inventory.items().find(i =>
       i.name === 'coal' || i.name === 'charcoal' || i.name.includes('_log') || i.name.includes('_planks'),
     );
-    if (!fuel) return;
+    if (!fuel) return false;
 
     try {
       const movements = new Movements(bot);
@@ -945,15 +1054,17 @@ export class ReflexLayer {
       await sleep(500);
       furnace.close();
       this.shared.pushEvent({ type: 'smelting', detail: rawItems[0].name, importance: 'low' });
+      return true;
     } catch { /* furnace interaction failed */ }
+    return false;
   }
 
-  private async doHuntAnimal(targetName: string): Promise<void> {
+  private async doHuntAnimal(targetName: string): Promise<ActionExecutionResult> {
     const bot = this.requireBot();
     const target = targetName
       ? bot.nearestEntity(e => e.name === targetName)
       : bot.nearestEntity(e => e.name !== undefined && FOOD_ANIMALS.has(e.name!));
-    if (!target) return;
+    if (!target) return { progress: false, reason: 'hunt_target_not_found' };
 
     const movements = new Movements(bot);
     movements.allowSprinting = true;
@@ -962,21 +1073,26 @@ export class ReflexLayer {
       await bot.pathfinder.goto(
         new goals.GoalNear(target.position.x, target.position.y, target.position.z, 2),
       );
+      let attackCount = 0;
       for (let i = 0; i < 8; i++) {
         const fresh = targetName
           ? bot.nearestEntity(e => e.name === targetName)
           : bot.nearestEntity(e => e.name !== undefined && FOOD_ANIMALS.has(e.name!));
         if (!fresh || bot.entity.position.distanceTo(fresh.position) > 4) break;
         bot.attack(fresh);
+        attackCount++;
         await sleep(350);
       }
+      if (attackCount <= 0) return { progress: false, reason: 'hunt_target_out_of_range' };
       await sleep(500);
       await this.collectNearbyDrops();
       this.shared.pushEvent({ type: 'hunted', detail: target.name ?? 'animal', importance: 'medium' });
+      return { progress: true, reason: `hunted_${target.name ?? 'animal'}_${attackCount}` };
     } catch { /* hunt failed */ }
+    return { progress: false, reason: 'hunt_failed' };
   }
 
-  private async doBuildShelter(): Promise<void> {
+  private async doBuildShelter(): Promise<ActionExecutionResult> {
     const bot = this.requireBot();
     const dirt = bot.inventory.items().find(i =>
       i.name === 'dirt' || i.name === 'cobblestone' || i.name.includes('_planks'),
@@ -997,7 +1113,7 @@ export class ReflexLayer {
           await sleep(100);
         }
       }
-      return;
+      return { progress: false, reason: 'collecting_shelter_materials' };
     }
 
     // Build 3x1 walls around current position
@@ -1021,7 +1137,9 @@ export class ReflexLayer {
       this.shelterBuilt = true;
       this.shared.pushEvent({ type: 'shelter_built', detail: '簡易シェルター建設', importance: 'medium' });
       this.shared.updateEmotion({ valence: 0.1, dominance: 0.1 }, 'built_shelter');
+      return { progress: true, reason: 'shelter_built' };
     } catch { /* shelter building failed */ }
+    return { progress: false, reason: 'shelter_build_failed' };
   }
 
   private hasWeaponEquipped(): boolean {
@@ -1043,11 +1161,12 @@ export class ReflexLayer {
     }
   }
 
-  private runAction(label: string, fn: () => Promise<void>): void {
+  private runAction(label: string, fn: () => Promise<ActionExecutionResult>): void {
     if (this.isExecutingAction) return;
     this.isExecutingAction = true;
     const actionToken = ++this.currentActionToken;
     this.currentActionLabel = label;
+    this.currentActionInitialGoal = this.shared.get().currentGoal;
     this.currentActionStartedAt = Date.now();
     const startedAt = this.currentActionStartedAt;
     this.actionAbortController = new AbortController();
@@ -1055,12 +1174,16 @@ export class ReflexLayer {
     this.shared.pushEvent({ type: 'action_start', detail: label, importance: 'low' });
 
     const timeout = setTimeout(() => {
-      this.interruptCurrentAction();
+      this.interruptCurrentAction('timeout_30s');
     }, 30_000);
 
     let failed = false;
     let failureReason: string | null = null;
+    let result: ActionExecutionResult = { progress: false, reason: 'unknown' };
     this.currentAction = fn()
+      .then((r) => {
+        result = r;
+      })
       .catch((error: unknown) => {
         failed = true;
         failureReason = formatActionError(error);
@@ -1078,15 +1201,33 @@ export class ReflexLayer {
             : `${label} failed (${durationMs}ms)`;
           this.events?.onReactiveAction({ time: 'now', event: 'action_failed', detail });
           this.shared.pushEvent({ type: 'action_failed', detail, importance: 'medium' });
-        } else {
-          const detail = `${label} done (${durationMs}ms)`;
+          this.noProgressGuard.recordFailure(label);
+        } else if (result.progress) {
+          this.noProgressGuard.recordSuccess(label);
+          const detail = result.reason
+            ? `${label} done (${durationMs}ms): ${result.reason}`
+            : `${label} done (${durationMs}ms)`;
           this.events?.onReactiveAction({ time: 'now', event: 'action_done', detail });
           this.shared.pushEvent({ type: 'action_done', detail, importance: 'low' });
+        } else {
+          const failure = this.noProgressGuard.recordFailure(label);
+          const detail = result.reason
+            ? `${label} no_progress (${durationMs}ms): ${result.reason}`
+            : `${label} no_progress (${durationMs}ms)`;
+          this.events?.onReactiveAction({ time: 'now', event: 'action_no_progress', detail });
+          this.shared.pushEvent({ type: 'action_no_progress', detail, importance: 'medium' });
+
+          if (failure.blocked) {
+            const blockDetail = `${label} blocked for ${Math.round(NO_PROGRESS_BLOCK_COOLDOWN_MS / 1000)}s due to repeated no-progress`;
+            this.events?.onReactiveAction({ time: 'now', event: 'action_loop_avoided', detail: blockDetail });
+            this.shared.pushEvent({ type: 'action_loop_avoided', detail: blockDetail, importance: 'medium' });
+          }
         }
         this.isExecutingAction = false;
         this.currentAction = null;
         this.actionAbortController = null;
         this.currentActionLabel = null;
+        this.currentActionInitialGoal = '';
         this.currentActionStartedAt = 0;
       });
   }
@@ -1232,6 +1373,7 @@ export class ReflexLayer {
 
   private resetRuntimeDiagnostics(): void {
     this.currentActionLabel = null;
+    this.currentActionInitialGoal = '';
     this.currentActionStartedAt = 0;
     this.currentActionToken = 0;
     this.lastTickStartedAt = 0;
