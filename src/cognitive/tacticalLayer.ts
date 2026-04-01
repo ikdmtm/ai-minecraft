@@ -109,8 +109,7 @@ ${REI_PERSONA_GUIDELINES}
 - commentary: 今この瞬間に自然に口にする言葉。テンプレートではなく状況に応じた生きた言葉。1文、できるだけ短く
 - threat_assessment: "safe" / "caution" / "danger" / "critical"
 - emotion_shift: { "valence": 0.1, "arousal": -0.1 } のように感情変化がある場合のみ。不要なら null
-- 同じフレーズの繰り返しを避ける
-- 進捗を断定する発言は recent_progress_events を根拠にする。action_done だけで成功扱いしない`;
+- 同じフレーズの繰り返しを避ける`;
   }
 
   private buildTacticalPrompt(
@@ -119,9 +118,6 @@ ${REI_PERSONA_GUIDELINES}
     events: ReturnType<SharedStateBus['getRecentEvents']>,
   ): string {
     const eventSummary = events.slice(-8).map(e => `[${e.type}] ${e.detail}`).join('\n');
-    const progressEvents = events
-      .filter(e => ['mined', 'crafted', 'hunted', 'smelting', 'placed', 'shelter_built'].includes(e.type));
-    const noProgressEvents = events.filter(e => e.type === 'action_no_progress');
     const survivalMinutes = Math.round(this.shared.getSurvivalMinutes());
 
     const stagnationWarning = this.detectStagnation(survivalMinutes, state);
@@ -141,10 +137,6 @@ ${REI_PERSONA_GUIDELINES}
       edible_food: sensors.foodItem,
       survival_minutes: survivalMinutes,
       recent_events: eventSummary || '(なし)',
-      recent_progress_events: progressEvents.slice(-6).map(e => `[${e.type}] ${e.detail}`),
-      recent_no_progress_events: noProgressEvents.slice(-6).map(e => `[${e.type}] ${e.detail}`),
-      progress_event_count: progressEvents.length,
-      no_progress_event_count: noProgressEvents.length,
       emotion: this.shared.getEmotionLabel(),
       tactical_notes: [
         '目標変更は本当に必要な時だけ行う。直前の方針を数秒でひっくり返さない',
