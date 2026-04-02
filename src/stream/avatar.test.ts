@@ -9,6 +9,7 @@ describe('AvatarState', () => {
 
   afterEach(() => {
     avatar.destroy();
+    jest.useRealTimers();
   });
 
   describe('expression from threat level', () => {
@@ -29,6 +30,52 @@ describe('AvatarState', () => {
 
     it('returns surprised for critical threat', () => {
       avatar.update({ threatLevel: 'critical', isSpeaking: false });
+      expect(avatar.getExpression()).toBe('surprised');
+    });
+  });
+
+  describe('expression from emotion', () => {
+    it('uses happy when the bot is emotionally positive', () => {
+      avatar.update({ threatLevel: 'low', emotionLabel: 'excited', isSpeaking: false });
+      expect(avatar.getExpression()).toBe('happy');
+    });
+
+    it('uses serious when the bot is anxious', () => {
+      avatar.update({ threatLevel: 'low', emotionLabel: 'anxious', isSpeaking: false });
+      expect(avatar.getExpression()).toBe('serious');
+    });
+
+    it('keeps danger-first expression on high threat even if emotion is positive', () => {
+      avatar.update({ threatLevel: 'high', emotionLabel: 'excited', isSpeaking: false });
+      expect(avatar.getExpression()).toBe('sad');
+    });
+
+    it('does not rapidly flip expressions for small emotional changes', () => {
+      jest.useFakeTimers();
+      let now = 1_000;
+      avatar = new AvatarState({ now: () => now, expressionHoldMs: 1_500 });
+
+      avatar.update({ threatLevel: 'low', emotionLabel: 'excited', isSpeaking: false });
+      expect(avatar.getExpression()).toBe('happy');
+
+      now = 1_400;
+      avatar.update({ threatLevel: 'low', emotionLabel: 'neutral', isSpeaking: false });
+      expect(avatar.getExpression()).toBe('happy');
+
+      now = 2_600;
+      avatar.update({ threatLevel: 'low', emotionLabel: 'neutral', isSpeaking: false });
+      expect(avatar.getExpression()).toBe('normal');
+    });
+
+    it('still switches immediately on urgent threat changes', () => {
+      let now = 1_000;
+      avatar = new AvatarState({ now: () => now, expressionHoldMs: 5_000 });
+
+      avatar.update({ threatLevel: 'low', emotionLabel: 'content', isSpeaking: false });
+      expect(avatar.getExpression()).toBe('happy');
+
+      now = 1_100;
+      avatar.update({ threatLevel: 'critical', emotionLabel: 'content', isSpeaking: true });
       expect(avatar.getExpression()).toBe('surprised');
     });
   });
@@ -89,6 +136,14 @@ describe('AvatarState', () => {
       avatar.update({ threatLevel: 'low', isSpeaking: false });
       expect(avatar.isMouthOpen()).toBe(false);
     });
+
+    it('keeps the mouth closed for emotional expressions even while speaking', () => {
+      avatar.update({ threatLevel: 'low', emotionLabel: 'excited', isSpeaking: true });
+      avatar.tick();
+
+      expect(avatar.isMouthOpen()).toBe(false);
+      expect(avatar.getImagePath('assets/avatar')).toBe('assets/avatar/happy_closed.png');
+    });
   });
 
   describe('image file path', () => {
@@ -97,10 +152,10 @@ describe('AvatarState', () => {
       expect(avatar.getImagePath('assets/avatar')).toBe('assets/avatar/normal_closed.png');
     });
 
-    it('returns correct path for surprised + mouth open', () => {
+    it('returns closed-mouth path for surprised even while speaking', () => {
       avatar.update({ threatLevel: 'critical', isSpeaking: true });
       avatar.tick();
-      expect(avatar.getImagePath('assets/avatar')).toBe('assets/avatar/surprised_open.png');
+      expect(avatar.getImagePath('assets/avatar')).toBe('assets/avatar/surprised_closed.png');
     });
 
     it('returns correct path for happy + mouth closed', () => {

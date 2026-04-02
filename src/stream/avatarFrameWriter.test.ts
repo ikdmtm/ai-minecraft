@@ -9,6 +9,8 @@ interface MockState {
   shouldConvertFail: boolean;
   shouldWriteReturn: boolean;
   drainCallback: (() => void) | null;
+  errorCallback: (() => void) | null;
+  destroyed: boolean;
 }
 
 function createMockDeps(): { deps: AvatarFrameWriterDeps; state: MockState } {
@@ -21,6 +23,8 @@ function createMockDeps(): { deps: AvatarFrameWriterDeps; state: MockState } {
     shouldConvertFail: false,
     shouldWriteReturn: true,
     drainCallback: null,
+    errorCallback: null,
+    destroyed: false,
   };
 
   const deps: AvatarFrameWriterDeps = {
@@ -31,10 +35,11 @@ function createMockDeps(): { deps: AvatarFrameWriterDeps; state: MockState } {
         state.writtenFrames.push(Buffer.from(buf));
         return state.shouldWriteReturn;
       },
-      destroy: () => {},
+      destroy: () => { state.destroyed = true; },
       destroyed: false,
       on: (event: string, cb: () => void) => {
         if (event === 'drain') state.drainCallback = cb;
+        if (event === 'error') state.errorCallback = cb;
       },
     }),
     readExpressionFile: () => state.expressionContent,
@@ -146,6 +151,27 @@ describe('AvatarFrameWriter', () => {
       expect(state.convertCalls.length).toBe(2);
     });
 
+    it('should reuse a previously converted frame when switching back', () => {
+      const { deps, state } = createMockDeps();
+      state.expressionContent = '/path/to/normal_closed.png';
+      const writer = new AvatarFrameWriter(CONFIG, deps);
+      writer.createPipe();
+      writer.connectPipe();
+      writer.writeFrameOnce();
+
+      state.expressionContent = '/path/to/happy_open.png';
+      writer.writeFrameOnce();
+
+      state.expressionContent = '/path/to/normal_closed.png';
+      writer.writeFrameOnce();
+      writer.stop();
+
+      expect(state.convertCalls).toEqual([
+        '/path/to/normal_closed.png',
+        '/path/to/happy_open.png',
+      ]);
+    });
+
     it('should use cached frame when convert fails', () => {
       const { deps, state } = createMockDeps();
       state.expressionContent = '/path/to/normal_closed.png';
@@ -174,6 +200,23 @@ describe('AvatarFrameWriter', () => {
       writer.writeFrameOnce();
       writer.stop();
 
+      expect(state.writtenFrames.length).toBe(1);
+    });
+
+    it('should swallow pipe errors and stop writing further frames', () => {
+      const { deps, state } = createMockDeps();
+      state.expressionContent = '/path/to/normal_closed.png';
+      const writer = new AvatarFrameWriter(CONFIG, deps);
+      writer.createPipe();
+      writer.connectPipe();
+      writer.writeFrameOnce();
+
+      state.errorCallback?.();
+      writer.writeFrameOnce();
+      writer.stop();
+
+      expect(state.errorCallback).not.toBeNull();
+      expect(state.destroyed).toBe(true);
       expect(state.writtenFrames.length).toBe(1);
     });
   });

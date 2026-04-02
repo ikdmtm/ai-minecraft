@@ -52,6 +52,13 @@ describe('buildFFmpegArgs', () => {
     expect(args).toContain('combined_sink.monitor');
   });
 
+  it('adds thread queues to each real-time input', () => {
+    const args = buildFFmpegArgs(BASE_CONFIG);
+    const queueCount = args.filter((arg) => arg === '-thread_queue_size').length;
+    expect(queueCount).toBe(3);
+    expect(args).toContain('2048');
+  });
+
   it('includes resolution and framerate', () => {
     const args = buildFFmpegArgs(BASE_CONFIG);
     expect(args).toContain('1920x1080');
@@ -82,6 +89,28 @@ describe('buildFFmpegArgs', () => {
     const args = buildFFmpegArgs(BASE_CONFIG);
     expect(args).toContain('-c:a');
     expect(args).toContain('aac');
+  });
+
+  it('uses yuv420p output for YouTube compatibility', () => {
+    const args = buildFFmpegArgs(BASE_CONFIG);
+    const pixFmtIdx = args.indexOf('-pix_fmt');
+    expect(pixFmtIdx).toBeGreaterThan(0);
+    expect(args[pixFmtIdx + 1]).toBe('yuv420p');
+  });
+
+  it('uses CBR-oriented output settings for YouTube ingest stability', () => {
+    const args = buildFFmpegArgs(BASE_CONFIG);
+    const minRateIdx = args.indexOf('-minrate');
+    const maxRateIdx = args.indexOf('-maxrate');
+    const paramsIdx = args.indexOf('-x264-params');
+
+    expect(minRateIdx).toBeGreaterThan(0);
+    expect(args[minRateIdx + 1]).toBe(BASE_CONFIG.videoBitrate);
+    expect(maxRateIdx).toBeGreaterThan(0);
+    expect(args[maxRateIdx + 1]).toBe(BASE_CONFIG.videoBitrate);
+    expect(paramsIdx).toBeGreaterThan(0);
+    expect(args[paramsIdx + 1]).toContain('nal-hrd=cbr');
+    expect(args[paramsIdx + 1]).toContain('force-cfr=1');
   });
 
   it('includes avatar overlay filter', () => {
@@ -131,10 +160,10 @@ describe('buildFFmpegArgs', () => {
 });
 
 describe('buildHudFilters', () => {
-  it('generates four drawtext filters', () => {
+  it('generates three drawtext filters by default', () => {
     const result = buildHudFilters(HUD_CONFIG);
     const count = (result.match(/drawtext=/g) || []).length;
-    expect(count).toBe(4);
+    expect(count).toBe(3);
   });
 
   it('includes font path', () => {
@@ -142,18 +171,27 @@ describe('buildHudFilters', () => {
     expect(result).toContain('NotoSansCJK-Regular.ttc');
   });
 
-  it('includes all four file paths', () => {
+  it('includes core hud file paths', () => {
     const result = buildHudFilters(HUD_CONFIG);
     expect(result).toContain('ai-mc-hud-stats.txt');
-    expect(result).toContain('ai-mc-hud-info.txt');
     expect(result).toContain('ai-mc-hud-goal.txt');
     expect(result).toContain('ai-mc-hud-commentary.txt');
+  });
+
+  it('does not include top-right info text by default', () => {
+    const result = buildHudFilters(HUD_CONFIG);
+    expect(result).not.toContain('ai-mc-hud-info.txt');
+  });
+
+  it('includes top-right info text when explicitly enabled', () => {
+    const result = buildHudFilters({ ...HUD_CONFIG, showTopRightInfo: true });
+    expect(result).toContain('ai-mc-hud-info.txt');
   });
 
   it('uses reload=1 for dynamic updates', () => {
     const result = buildHudFilters(HUD_CONFIG);
     const reloadCount = (result.match(/reload=1/g) || []).length;
-    expect(reloadCount).toBe(4);
+    expect(reloadCount).toBe(3);
   });
 
   it('positions stats at bottom-left', () => {
