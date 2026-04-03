@@ -21,10 +21,13 @@ import { writeFileSync, mkdirSync } from 'fs';
 import { CognitiveOrchestrator, type CognitiveOrchestratorConfig } from './cognitive/orchestrator.js';
 import { VoicevoxClient, createFetchAdapter } from './tts/voicevox.js';
 import { AudioQueue, type AudioPlayer } from './tts/audioQueue.js';
+import { CommentaryThrottle } from './tts/commentaryThrottle.js';
 import { AvatarState } from './stream/avatar.js';
+import { resolveAvatarBasePath } from './stream/avatarConfig.js';
 import { AvatarRenderer, EXPRESSION_FILE } from './stream/avatarRenderer.js';
 import { AvatarFrameWriter } from './stream/avatarFrameWriter.js';
 import { HudWriter } from './stream/hudWriter.js';
+import { CommentarySubtitleSync } from './stream/commentarySubtitleSync.js';
 import { buildFFmpegArgs, type FFmpegConfig } from './stream/ffmpeg.js';
 import { startDashboard } from './dashboard/server.js';
 import type { DashboardDeps } from './dashboard/routes.js';
@@ -45,7 +48,7 @@ import {
 const COOLDOWN_MS = 15_000;
 const MC_SERVER_DIR = '/home/ubuntu/minecraft-server';
 const AVATAR_PIPE = '/tmp/ai-minecraft-avatar.pipe';
-const AVATAR_BASE_PATH = process.env.AVATAR_BASE_PATH || '/home/ubuntu/ai-minecraft/assets/avatar';
+const AVATAR_BASE_PATH = resolveAvatarBasePath();
 const AVATAR_WIDTH = 300;
 const AVATAR_HEIGHT = 400;
 const BOT_USERNAME = 'AI_Rei';
@@ -56,6 +59,14 @@ const HUD_FONT = process.env.HUD_FONT_PATH || '/usr/share/fonts/opentype/noto/No
 const DEFAULT_TACTICAL_MODEL = 'claude-haiku-4-5-20251001';
 const DEFAULT_STRATEGIC_MODEL = 'claude-sonnet-4-6';
 const DEFAULT_FAREWELL_MODEL = DEFAULT_TACTICAL_MODEL;
+const COMMENTARY_MIN_INTERVAL_MS = Number.parseInt(
+  process.env.COMMENTARY_MIN_INTERVAL_MS?.trim() || '18000',
+  10,
+);
+const COMMENTARY_SUBTITLE_DELAY_MS = Number.parseInt(
+  process.env.COMMENTARY_SUBTITLE_DELAY_MS?.trim() || '220',
+  10,
+);
 const YOUTUBE_PRIVACY_STATUS = (
   process.env.YOUTUBE_PRIVACY_STATUS?.trim().toLowerCase() || 'unlisted'
 ) as 'private' | 'public' | 'unlisted';
@@ -208,12 +219,15 @@ async function runOneGeneration(
   audioQueue: AudioQueue,
   avatarState: AvatarState,
   hudWriter: HudWriter,
+  commentarySubtitleSync: CommentarySubtitleSync,
   ytCtx: YoutubeSessionCtx,
   streamTitleTemplate: string,
+  commentaryThrottle: CommentaryThrottle,
 ): Promise<'died' | 'stopped' | 'disconnected'> {
   currentState = 'LIVE_RUNNING';
   survivalStart = Date.now();
   stopRequested = false;
+  commentaryThrottle.reset();
   let died = false;
   let deathCause = 'unknown';
 
@@ -225,11 +239,18 @@ async function runOneGeneration(
   try {
     await cogOrch.start({
       onCommentary: async (text) => {
+        const commentaryAction = commentaryThrottle.decide(audioQueue.pendingCount());
+        if (commentaryAction === 'skip') {
+          return;
+        }
         log(`  [TTS] "${text}"`);
-        hudWriter.update({ commentary: text });
         const result = await tts.synthesize(text);
         if (result.ok) {
-          audioQueue.enqueue(result.value);
+          if (commentaryAction === 'replace') {
+            audioQueue.replacePending(result.value, text);
+          } else {
+            audioQueue.enqueue(result.value, text);
+          }
         }
       },
       onDeath: (cause) => {
@@ -441,6 +462,9 @@ async function main() {
   const tts = new VoicevoxClient(voicevoxHost, cogConfig.voicevoxSpeakerId, createFetchAdapter());
   const audioPlayer = createPaplayAudioPlayer();
   const audioQueue = new AudioQueue(audioPlayer);
+  const commentaryThrottle = new CommentaryThrottle({
+    minIntervalMs: COMMENTARY_MIN_INTERVAL_MS,
+  });
   const avatarState = new AvatarState();
   const avatarRenderer = new AvatarRenderer(avatarState, AVATAR_BASE_PATH);
 
@@ -456,6 +480,11 @@ async function main() {
   const hudWriter = new HudWriter(HUD_DIR);
   hudWriter.update({ generation, survivalStartTime: Date.now(), bestRecordMinutes: 0 });
   hudWriter.flush();
+  const commentarySubtitleSync = new CommentarySubtitleSync((text) => {
+    hudWriter.update({ commentary: text });
+  }, {
+    displayDelayMs: COMMENTARY_SUBTITLE_DELAY_MS,
+  });
 
   const ytCtx: YoutubeSessionCtx = {
     client: youtubeClient,
@@ -476,14 +505,25 @@ async function main() {
 
   let ffmpegProc: ChildProcess | null = null;
 
+  const syncAvatarState = (isSpeaking = audioQueue.isPlaying?.() ?? false) => {
+    const shared = cogOrch.getShared();
+    const threatLevel = shared.get().threatLevel;
+    avatarState.update({
+      threatLevel: threatLevel === 'critical'
+        ? 'critical'
+        : threatLevel === 'danger'
+          ? 'high'
+          : threatLevel === 'caution'
+            ? 'medium'
+            : 'low',
+      emotionLabel: shared.getEmotionLabel(),
+      isSpeaking,
+    });
+  };
+
   cogOrch.getShared().onStateChange((field) => {
     if (field === 'emotionalState' || field === 'threatLevel') {
-      const threatLevel = cogOrch.getShared().get().threatLevel;
-      const isSpeaking = audioQueue.isPlaying?.() ?? false;
-      avatarState.update({
-        threatLevel: threatLevel === 'critical' ? 'critical' : threatLevel === 'danger' ? 'high' : threatLevel === 'caution' ? 'medium' : 'low',
-        isSpeaking,
-      });
+      syncAvatarState();
     }
   });
 
@@ -524,8 +564,15 @@ async function main() {
     ffmpegProc = startFFmpegWithHud(hudWriter, rtmpUrl);
     await new Promise(r => setTimeout(r, 1000));
     avatarWriter.connectPipe();
-    audioQueue.onPlaybackStart(() => avatarState.update({ threatLevel: 'low', isSpeaking: true }));
-    audioQueue.onPlaybackEnd(() => avatarState.update({ threatLevel: 'low', isSpeaking: false }));
+    commentarySubtitleSync.reset();
+    audioQueue.onPlaybackStart((item) => {
+      syncAvatarState(true);
+      commentarySubtitleSync.onPlaybackStart(item.text);
+    });
+    audioQueue.onPlaybackEnd(() => {
+      syncAvatarState(false);
+      commentarySubtitleSync.onPlaybackEnd();
+    });
     await new Promise(r => setTimeout(r, 3000));
 
     if (ytCtx.client && ytCtx.broadcastId && ytCtx.streamId) {
@@ -544,6 +591,7 @@ async function main() {
 
   const stopStreaming = () => {
     audioPlayer.stop();
+    commentarySubtitleSync.reset();
     avatarRenderer.stop();
     avatarWriter.stop();
     hudWriter.stop();
@@ -640,7 +688,7 @@ async function main() {
     let continueLoop = true;
     while (continueLoop) {
       const result = await runOneGeneration(
-        cogOrch, tts, audioQueue, avatarState, hudWriter, ytCtx, streamTitleTemplate,
+        cogOrch, tts, audioQueue, avatarState, hudWriter, commentarySubtitleSync, ytCtx, streamTitleTemplate, commentaryThrottle,
       );
 
       if (result === 'died' && operationMode === 'AUTO' && !stopRequested) {
