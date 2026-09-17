@@ -3,17 +3,55 @@
 Date: 2026-09-17
 Baseline: `main` at `5caef7d87e035a4d62d9a31a56d056352c157298`
 
-## 1. Revival objective
+## 1. Project objective
 
-This project is being revived with a different development priority.
+This project exists to make an autonomous AI play Minecraft Hardcore and eventually broadcast that play live as an AI VTuber / game commentator.
+
+There are two simultaneous objectives:
+
+### Surface objective — survive as long as possible
+
+The character's explicit in-world objective is to survive for as long as possible in Minecraft Hardcore.
+
+- death is permanent for that run
+- survival decisions must matter
+- preparation, retreat, food, shelter, equipment, and learning from previous deaths are important
+- reckless behavior purely for spectacle is not desirable
+
+### Underlying product objective — make the play worth watching
+
+The actual product must be interesting to watch as a game stream.
+
+Pure survival-time optimization can degenerate into trivial behavior such as securing food, hiding in a safe location, and avoiding meaningful progression forever. That may maximize survival time but fails the streaming product.
+
+The intended behavior is therefore:
+
+> **Prioritize survival, but once immediate safety is sufficiently secured, continue progressing through Minecraft: improve equipment, explore, build, discover, and eventually accept reasonable new risks instead of remaining permanently in a solved safe state.**
+
+The AI should not be forced into scripted danger for entertainment. Interesting situations should emerge from competent Minecraft progression under Hardcore risk.
+
+A useful mental model is:
+
+1. survive immediate danger
+2. establish safety
+3. improve capability
+4. explore / progress
+5. take the next reasonable challenge
+6. repeat while protecting the life already built
+
+This balance between preservation and forward progress is a long-term cognition objective. It must not distract from the current engineering priority: first make the agent capable of ordinary Minecraft play.
+
+## 2. Revival priority
 
 The immediate objective is **not** to produce a polished YouTube/VTuber stream. The immediate objective is to build an AI agent that can play Minecraft competently, continuously, and autonomously.
 
 Streaming, TTS, subtitles, avatar rendering, lip sync, YouTube integration, and presentation polish remain valuable existing assets, but they are frozen until the gameplay system reaches an acceptable level of reliability and autonomy.
 
-The original long-term concept remains useful: an autonomous AI character that survives in Minecraft Hardcore, learns from previous runs, and can eventually be presented as a VTuber/live-streamed character. The implementation order is now explicitly changed to gameplay first.
+The implementation order is explicitly:
 
-## 2. Development phases
+**Gameplay quality → tactical intelligence/Jev → evaluation → commentary/TTS → VTuber presentation → live streaming.**
+
+## 3. Development phases
 
 ### Phase 0 — Establish a clean gameplay-only development path
 
@@ -26,6 +64,8 @@ Required outcomes:
 - Log decisions, actions, failures, progress, inventory, position, threats, and goals in a way that is easy to inspect.
 - Allow repeated local/manual test runs.
 - Preserve the existing streaming implementation without deleting it.
+
+Local WSL2 is the primary development environment. AWS returns later for long-running autonomous tests and production streaming.
 
 ### Phase 1 — Make the bot reliably play Minecraft
 
@@ -44,7 +84,7 @@ Priority areas:
 - detecting actual progress vs. repeated no-progress loops
 - goal changes interrupting stale actions
 
-A gameplay action must report whether it actually made progress. Silent failure followed by repeating the same action is considered a core bug.
+A gameplay action must eventually make observable progress or expose that it failed. Silent failure followed by repeating the same action is considered a core bug.
 
 ### Phase 2 — Restore and improve layered cognition
 
@@ -69,6 +109,7 @@ Keep the current three-timescale architecture, but sharpen responsibilities:
    - long-term goals
    - multi-step plans
    - adapting strategy from progress and previous deaths
+   - balancing survival with continued Minecraft progression
    - generating new goals when the current plan is exhausted or invalid
 
 The Jev integration is intentionally **not** the first implementation task. First stabilize state collection, action execution, progress/failure reporting, and a gameplay-only harness so Jev can be evaluated against a reliable environment.
@@ -90,6 +131,9 @@ Track at minimum:
 - unnecessary combat entries
 - successful retreats
 - goal completion rate
+- progression reached before death
+
+Use fixed seeds for regression comparison and random seeds for generalization testing.
 
 Use these metrics to compare tactical implementations (rules vs. Jev vs. LLM-assisted variants).
 
@@ -106,7 +150,9 @@ Only after gameplay is strong enough to be interesting on its own:
 - YouTube Live lifecycle
 - long-running autonomous broadcast operation
 
-## 3. Existing assets to preserve
+At this point the underlying entertainment objective becomes more visible: commentary should explain decisions, expose uncertainty, react to danger, and make progression legible without changing the game policy into reckless spectacle.
+
+## 4. Existing assets to preserve
 
 The repository already contains useful work that should not be rewritten without a reason:
 
@@ -125,35 +171,35 @@ The repository already contains useful work that should not be rewritten without
 
 Streaming-related code is currently **out of scope**, not deprecated.
 
-## 4. Known restart concern
+## 5. Known restart concern
 
 The commit history shows that gameplay fixes related to no-progress loops, goal-change interruption, and richer action progress reporting were implemented and then reverted while later work focused on streaming/runtime restoration.
 
-Before introducing Jev, review those reverted changes and reintroduce the useful behavior deliberately with tests rather than blindly cherry-picking the old commits.
+Reintroduce useful behavior deliberately with tests rather than blindly restoring all old runtime changes at once.
 
-## 5. First implementation milestone
+The first restored capability is an external gameplay progress monitor that observes position, inventory, goals, and reflex state. Sustained no-progress is published into shared cognition as `gameplay_no_progress`, allowing the tactical layer to abandon an ineffective approach rather than repeat it indefinitely.
+
+## 6. First implementation milestone
 
 The first milestone for this revival is:
 
 > **Run the agent in a gameplay-only mode and have it autonomously progress from spawn through basic early-game survival without YouTube/TTS/FFmpeg dependencies.**
 
-Suggested acceptance criteria for the first milestone:
+Acceptance criteria:
 
 - spawn reliably
 - collect wood
-- craft basic tools
-- obtain food or establish a viable food path
+- craft planks / crafting table / basic tools
 - obtain stone tools
+- obtain food or establish a viable food path
 - survive the first night or intentionally create a safe shelter
 - recover from at least one unreachable/stalled action without manual intervention
-- emit structured logs showing goals, chosen actions, results, and failures
+- emit structured logs showing goals, state, inventory, position, progress warnings, and failures
 
 After this milestone is stable, integrate Jev into the tactical/intuition layer and evaluate whether it improves decision quality and responsiveness.
 
-## 6. Relationship to the original specification
+## 7. Relationship to the original specification
 
 `ai_minecraft_stream_spec_hoshimori_rei.md`, `ARCHITECTURE.md`, `DEPLOY.md`, and the existing source tree remain historical/current reference material.
 
-Where this revival plan conflicts with the old implementation order, **this document controls development priority**:
-
-**Gameplay quality → tactical intelligence/Jev → evaluation → commentary/TTS → VTuber presentation → live streaming.**
+Where this revival plan conflicts with the old implementation order, this document controls development priority.
