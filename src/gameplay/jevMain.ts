@@ -217,13 +217,15 @@ function startStatusLogging(): void {
 
 async function main(): Promise<void> {
   logEvent('startup', {
-    mode: 'gameplay-jev',
+    mode: 'gameplay-typed-policy',
     run_log: process.env.AI_MC_RUN_LOG ?? null,
     minecraft_host: process.env.MINECRAFT_HOST?.trim() || 'localhost',
     minecraft_port: parsePositiveInt(process.env.MINECRAFT_PORT, 25565),
     bot_username: process.env.BOT_USERNAME?.trim() || 'AI_Rei',
+    policy_provider: process.env.POLICY_PROVIDER?.trim() || 'auto',
     jev_model: process.env.JEV_MODEL?.trim() || 'jev-latest',
-    jev_interval_ms: parsePositiveInt(process.env.JEV_INTERVAL_MS, 400),
+    openai_policy_model: process.env.OPENAI_POLICY_MODEL?.trim() || 'gpt-5.6-luna',
+    policy_interval_ms: parsePositiveInt(process.env.JEV_INTERVAL_MS, 400),
     strategic_model: process.env.STRATEGIC_MODEL?.trim() || DEFAULT_STRATEGIC_MODEL,
   });
 
@@ -242,7 +244,7 @@ async function main(): Promise<void> {
   attachDiagnostics();
   startViewer();
   startStatusLogging();
-  logEvent('ready', { message: 'Jev policy runtime active. Safety is deterministic; normal action selection is Jev.' });
+  logEvent('ready', { message: 'Typed policy runtime active. Safety is deterministic; normal action selection uses Jev when available, otherwise OpenAI Structured Outputs.' });
 }
 
 process.once('SIGINT', () => shutdown('SIGINT'));
