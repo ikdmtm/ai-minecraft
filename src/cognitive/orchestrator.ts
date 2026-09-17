@@ -6,10 +6,14 @@ import { StrategicLayer, type StrategicLayerDeps } from './strategicLayer.js';
 import { SkillLibrary } from './skillLibrary.js';
 import { EpisodicMemory } from './memory.js';
 import type { LLMApiAdapter } from '../llm/client.js';
-import type { DeathRecord, RecentEvent } from '../types/gameState.js';
+import type { RecentEvent } from '../types/gameState.js';
+
+export type LLMProvider = 'anthropic' | 'openai';
 
 export interface CognitiveOrchestratorConfig {
-  anthropicApiKey: string;
+  llmProvider?: LLMProvider;
+  anthropicApiKey?: string;
+  openaiApiKey?: string;
   tacticalModel: string;
   strategicModel: string;
   mcHost: string;
@@ -203,30 +207,88 @@ export class CognitiveOrchestrator {
   }
 
   private createAdapter(model: string, maxTokens: number): LLMApiAdapter {
-    const apiKey = this.config.anthropicApiKey;
-    return {
-      async call(systemPrompt: string, userMessage: string): Promise<string> {
-        const res = await fetch('https://api.anthropic.com/v1/messages', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'x-api-key': apiKey,
-            'anthropic-version': '2023-06-01',
-          },
-          body: JSON.stringify({
-            model,
-            max_tokens: maxTokens,
-            system: systemPrompt,
-            messages: [{ role: 'user', content: userMessage }],
-          }),
-        });
-        if (!res.ok) {
-          const body = await res.text();
-          throw new Error(`Anthropic API ${res.status}: ${body}`);
-        }
-        const data = (await res.json()) as any;
-        return data.content[0].text;
-      },
-    };
+    const provider = this.config.llmProvider ?? 'anthropic';
+    if (provider === 'openai') {
+      return createOpenAIAdapter(this.config.openaiApiKey, model, maxTokens);
+    }
+    return createAnthropicAdapter(this.config.anthropicApiKey, model, maxTokens);
   }
+}
+
+function createAnthropicAdapter(
+  apiKey: string | undefined,
+  model: string,
+  maxTokens: number,
+): LLMApiAdapter {
+  if (!apiKey) throw new Error('ANTHROPIC_API_KEY is required when LLM_PROVIDER=anthropic');
+
+  return {
+    async call(systemPrompt: string, userMessage: string): Promise<string> {
+      const res = await fetch('https://api.anthropic.com/v1/messages', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-api-key': apiKey,
+          'anthropic-version': '2023-06-01',
+        },
+        body: JSON.stringify({
+          model,
+          max_tokens: maxTokens,
+          system: systemPrompt,
+          messages: [{ role: 'user', content: userMessage }],
+        }),
+      });
+      if (!res.ok) {
+        const body = await res.text();
+        throw new Error(`Anthropic API ${res.status}: ${body}`);
+      }
+      const data = (await res.json()) as any;
+      return data.content?.[0]?.text ?? '';
+    },
+  };
+}
+
+function createOpenAIAdapter(
+  apiKey: string | undefined,
+  model: string,
+  maxTokens: number,
+): LLMApiAdapter {
+  if (!apiKey) throw new Error('OPENAI_API_KEY is required when LLM_PROVIDER=openai');
+
+  return {
+    async call(systemPrompt: string, userMessage: string): Promise<string> {
+      const res = await fetch('https://api.openai.com/v1/responses', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${apiKey}`,
+        },
+        body: JSON.stringify({
+          model,
+          instructions: systemPrompt,
+          input: userMessage,
+          max_output_tokens: maxTokens,
+        }),
+      });
+
+      if (!res.ok) {
+        const body = await res.text();
+        throw new Error(`OpenAI API ${res.status}: ${body}`);
+      }
+
+      const data = (await res.json()) as any;
+      const direct = typeof data.output_text === 'string' ? data.output_text.trim() : '';
+      if (direct) return direct;
+
+      const parts: string[] = [];
+      for (const item of Array.isArray(data.output) ? data.output : []) {
+        for (const content of Array.isArray(item?.content) ? item.content : []) {
+          if (content?.type === 'output_text' && typeof content.text === 'string') {
+            parts.push(content.text);
+          }
+        }
+      }
+      return parts.join('\n').trim();
+    },
+  };
 }
