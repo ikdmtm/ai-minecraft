@@ -61,6 +61,7 @@ export class TacticalLayer {
 
   private async runCycle(): Promise<void> {
     if (!this.running) return;
+    const startedAt = Date.now();
 
     try {
       const state = this.shared.get();
@@ -74,6 +75,31 @@ export class TacticalLayer {
       );
 
       const output = this.parseTacticalResponse(rawResponse);
+      console.log(JSON.stringify({
+        ts: new Date().toISOString(),
+        kind: 'tactical_decision',
+        latency_ms: Date.now() - startedAt,
+        input: {
+          hp: sensors.hp,
+          hunger: sensors.hunger,
+          is_night: sensors.isNight,
+          current_goal: state.currentGoal || null,
+          reflex_state: state.reflexState,
+          threat_level: state.threatLevel,
+          nearby_hostiles: sensors.nearbyEntities
+            .filter(e => e.isHostile)
+            .slice(0, 5)
+            .map(e => ({ type: e.type, distance: e.distance, direction: e.direction })),
+          has_food: sensors.hasFood,
+          recent_event_types: recentEvents.slice(-8).map(e => e.type),
+        },
+        output: {
+          goal_adjustment: output.goalAdjustment,
+          threat_assessment: output.threatAssessment,
+          emotion_shift: output.emotionShift,
+          commentary: output.commentary,
+        },
+      }));
       this.applyOutput(output);
       this.consecutiveErrors = 0;
     } catch (e) {
