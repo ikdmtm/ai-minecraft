@@ -155,7 +155,15 @@ ensure_env() {
   fi
   set_env_value LLM_PROVIDER openai
   ensure_secret OPENAI_API_KEY
-  ensure_secret TYPESAFE_API_KEY
+
+  local typesafe_key
+  typesafe_key="$(sed -n 's/^TYPESAFE_API_KEY=//p' .env | head -n1 || true)"
+  if is_placeholder "$typesafe_key"; then
+    set_env_value POLICY_PROVIDER auto
+    log "TypeSafe/Jev access is not configured; using OpenAI typed policy for now"
+  else
+    log "TypeSafe/Jev key detected; POLICY_PROVIDER=auto will prefer Jev"
+  fi
 }
 
 ensure_minecraft_server() {
@@ -191,7 +199,7 @@ stop_previous_gameplay() {
 
 run_gameplay() {
   stop_previous_gameplay
-  log "Launching Jev-first gameplay AI"
+  log "Launching typed-policy gameplay AI (Jev when available, OpenAI fallback otherwise)"
   log "Close this terminal or press Ctrl+C to stop the AI. Minecraft server stays running."
   [[ -n "${AI_MC_RUN_LOG:-}" ]] && log "Share this run log when reporting behavior: $AI_MC_RUN_LOG"
   echo "$$" > "$GAMEPLAY_PID_FILE"
