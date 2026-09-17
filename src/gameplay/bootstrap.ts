@@ -11,4 +11,4 @@ ReflexLayer.prototype.connect = async function patchedGameplayConnect(
   return originalConnect.call(this, options, events);
 };
 
-await import('../gameplay.js');
+void import('../gameplay.js');
