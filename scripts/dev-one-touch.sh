@@ -8,14 +8,8 @@ LOCK_HASH_FILE="$STATE_DIR/.package-lock.sha256"
 GAMEPLAY_PID_FILE="$STATE_DIR/gameplay.pid"
 VIEWER_VERSION="${GAMEPLAY_VIEWER_VERSION:-1.33.0}"
 VIEWER_CANVAS_VERSION="${GAMEPLAY_VIEWER_CANVAS_VERSION:-3.1.0}"
-MODE="${1:-start}"
+MODE="${1:-reset}"
 RESET_SEED="${2:-8675309}"
-
-# If an older launcher pulled a newer run.sh, immediately re-enter through run.sh
-# so this very run gets its own fresh log file rather than waiting for the next run.
-if [[ -z "${AI_MC_RUN_LOG:-}" && "${AI_MC_REEXECED:-0}" == "1" && "${AI_MC_LOG_BOOTSTRAPPED:-0}" != "1" ]]; then
-  exec env AI_MC_LOG_BOOTSTRAPPED=1 bash "$ROOT_DIR/run.sh" "$MODE" "$RESET_SEED"
-fi
 
 cd "$ROOT_DIR"
 mkdir -p "$STATE_DIR"
@@ -24,33 +18,8 @@ log() {
   printf '\n[AI Minecraft] %s\n' "$*"
 }
 
-ensure_system_dependencies() {
-  local missing=()
-  command -v curl >/dev/null 2>&1 || missing+=(curl)
-  command -v jq >/dev/null 2>&1 || missing+=(jq)
-  command -v java >/dev/null 2>&1 || missing+=(openjdk-21-jre-headless)
-
-  if (( ${#missing[@]} > 0 )); then
-    log "First-time setup: installing ${missing[*]}"
-    sudo apt-get update
-    sudo apt-get install -y "${missing[@]}"
-  fi
-
-  local node_major=0
-  if command -v node >/dev/null 2>&1; then
-    node_major="$(node -p 'Number(process.versions.node.split(".")[0])' 2>/dev/null || echo 0)"
-  fi
-
-  if ! command -v npm >/dev/null 2>&1 || (( node_major < 20 )); then
-    log "First-time setup: installing Node.js 20"
-    curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
-    sudo apt-get install -y nodejs
-  fi
-}
-
 sync_repository() {
   log "Syncing $BRANCH from GitHub"
-
   local stashed=0
   if [[ -n "$(git status --porcelain --untracked-files=normal)" ]]; then
     log "Local source changes detected; temporarily stashing them"
@@ -60,7 +29,6 @@ sync_repository() {
 
   local before
   before="$(git rev-parse HEAD)"
-
   git fetch origin "$BRANCH"
   if git show-ref --verify --quiet "refs/heads/$BRANCH"; then
     git switch "$BRANCH" >/dev/null
@@ -79,10 +47,32 @@ sync_repository() {
   local after
   after="$(git rev-parse HEAD)"
   log "Code revision: $(git rev-parse --short HEAD)"
-
   if [[ "$before" != "$after" && "${AI_MC_REEXECED:-0}" != "1" ]]; then
-    log "Updated launcher detected; restarting with the newest script"
-    exec env AI_MC_REEXECED=1 bash "$ROOT_DIR/scripts/dev-one-touch.sh" "$MODE" "$RESET_SEED"
+    log "Updated launcher detected; restarting with newest launcher"
+    exec env AI_MC_REEXECED=1 AI_MC_RUN_LOG="${AI_MC_RUN_LOG:-}" bash "$ROOT_DIR/scripts/dev-one-touch.sh" "$MODE" "$RESET_SEED"
+  fi
+}
+
+ensure_system_dependencies() {
+  local missing=()
+  command -v curl >/dev/null 2>&1 || missing+=(curl)
+  command -v jq >/dev/null 2>&1 || missing+=(jq)
+  command -v java >/dev/null 2>&1 || missing+=(openjdk-21-jre-headless)
+  if (( ${#missing[@]} > 0 )); then
+    log "Installing system dependencies: ${missing[*]}"
+    sudo apt-get update
+    sudo apt-get install -y "${missing[@]}"
+  fi
+
+  local node_major=0
+  if command -v node >/dev/null 2>&1; then
+    node_major="$(node -p 'Number(process.versions.node.split(".")[0])' 2>/dev/null || echo 0)"
+  fi
+  if ! command -v npm >/dev/null 2>&1 || (( node_major < 22 )); then
+    log "Installing Node.js 22 (required by current Mineflayer)"
+    curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash -
+    sudo apt-get install -y nodejs
+    rm -f "$LOCK_HASH_FILE"
   fi
 }
 
@@ -91,7 +81,6 @@ ensure_node_modules() {
   current_hash="$(sha256sum package-lock.json | awk '{print $1}')"
   local saved_hash=""
   [[ -f "$LOCK_HASH_FILE" ]] && saved_hash="$(cat "$LOCK_HASH_FILE")"
-
   if [[ ! -d node_modules || "$current_hash" != "$saved_hash" ]]; then
     log "Installing/updating Node dependencies"
     npm ci
@@ -101,47 +90,25 @@ ensure_node_modules() {
   fi
 }
 
-ensure_viewer_system_dependencies() {
-  local packages=(
-    build-essential
-    python3
-    pkg-config
-    libcairo2-dev
-    libpango1.0-dev
-    libjpeg-dev
-    libgif-dev
-    librsvg2-dev
-  )
-  local missing=()
+ensure_viewer_dependencies() {
+  if [[ "${GAMEPLAY_VIEWER_ENABLED:-1}" == "0" ]]; then return; fi
+  if node -e "require.resolve('prismarine-viewer'); require.resolve('canvas')" >/dev/null 2>&1; then return; fi
 
+  local packages=(build-essential python3 pkg-config libcairo2-dev libpango1.0-dev libjpeg-dev libgif-dev librsvg2-dev)
+  local missing=()
   for package in "${packages[@]}"; do
     dpkg -s "$package" >/dev/null 2>&1 || missing+=("$package")
   done
-
   if (( ${#missing[@]} > 0 )); then
     log "Installing viewer native dependencies: ${missing[*]}"
     sudo apt-get update
     sudo apt-get install -y "${missing[@]}"
   fi
-}
-
-ensure_viewer_dependency() {
-  if [[ "${GAMEPLAY_VIEWER_ENABLED:-1}" == "0" ]]; then
-    return
-  fi
-
-  if node -e "require.resolve('prismarine-viewer'); require.resolve('canvas')" >/dev/null 2>&1; then
-    return
-  fi
-
-  ensure_viewer_system_dependencies
 
   log "Installing local gameplay viewer + canvas"
   npm install --no-save --package-lock=false \
     "prismarine-viewer@${VIEWER_VERSION}" \
     "canvas@${VIEWER_CANVAS_VERSION}"
-
-  node -e "require('prismarine-viewer'); require('canvas')" >/dev/null
 }
 
 set_env_value() {
@@ -154,19 +121,31 @@ set_env_value() {
   fi
 }
 
-is_placeholder_key() {
+is_placeholder() {
   local value="$1"
-  [[ -z "$value" || "$value" == "changeme" || "$value" == "sk-xxxxx" || "$value" == "sk-proj-xxxxx" || "$value" == "sk-ant-xxxxx" ]]
+  [[ -z "$value" || "$value" == "replace-me" || "$value" == "changeme" || "$value" == "sk-xxxxx" || "$value" == "sk-proj-xxxxx" ]]
 }
 
-is_valid_openai_key() {
-  local value="$1"
-  [[ "$value" == sk-* && "$value" != *" "* ]]
-}
+ensure_secret() {
+  local name="$1"
+  local current
+  current="$(sed -n "s/^${name}=//p" .env | head -n1 || true)"
+  if ! is_placeholder "$current"; then return; fi
 
-is_valid_anthropic_key() {
-  local value="$1"
-  [[ "$value" == sk-ant-* && "$value" != *" "* ]]
+  local from_environment="${!name:-}"
+  local key="$from_environment"
+  if [[ -z "$key" ]]; then
+    echo
+    echo "First run only: enter ${name}. Input is hidden."
+    read -r -s key
+    echo
+  fi
+  if [[ -z "$key" ]]; then
+    echo "ERROR: ${name} is required for Jev gameplay mode." >&2
+    exit 1
+  fi
+  set_env_value "$name" "$key"
+  log "Saved ${name} to local .env (gitignored)"
 }
 
 ensure_env() {
@@ -174,63 +153,9 @@ ensure_env() {
     log "First-time setup: creating .env"
     cp .env.example .env
   fi
-
-  local provider
-  provider="$(sed -n 's/^LLM_PROVIDER=//p' .env | head -n1 | tr '[:upper:]' '[:lower:]' || true)"
-  local anthropic_key
-  anthropic_key="$(sed -n 's/^ANTHROPIC_API_KEY=//p' .env | head -n1 || true)"
-  local openai_key
-  openai_key="$(sed -n 's/^OPENAI_API_KEY=//p' .env | head -n1 || true)"
-
-  if [[ -z "$provider" ]] || { [[ "$provider" == "anthropic" ]] && is_placeholder_key "$anthropic_key"; }; then
-    provider="openai"
-    set_env_value LLM_PROVIDER openai
-    log "Using OpenAI for gameplay cognition"
-  fi
-
-  case "$provider" in
-    openai)
-      if ! is_valid_openai_key "$openai_key"; then
-        if [[ -n "$openai_key" ]] && ! is_placeholder_key "$openai_key"; then
-          log "Existing OPENAI_API_KEY is not a valid key format; replacing it"
-        fi
-        local key="${OPENAI_API_KEY:-}"
-        if [[ -z "$key" ]]; then
-          echo
-          echo "First run only: enter OPENAI_API_KEY. Input is hidden."
-          read -r -s key
-          echo
-        fi
-        if ! is_valid_openai_key "$key"; then
-          echo "ERROR: OPENAI_API_KEY must look like an OpenAI secret key (sk-...)." >&2
-          exit 1
-        fi
-        set_env_value OPENAI_API_KEY "$key"
-        log "Saved OpenAI API key to local .env (gitignored)"
-      fi
-      ;;
-    anthropic)
-      if ! is_valid_anthropic_key "$anthropic_key"; then
-        local key="${ANTHROPIC_API_KEY:-}"
-        if [[ -z "$key" ]]; then
-          echo
-          echo "First run only: enter ANTHROPIC_API_KEY. Input is hidden."
-          read -r -s key
-          echo
-        fi
-        if ! is_valid_anthropic_key "$key"; then
-          echo "ERROR: ANTHROPIC_API_KEY must look like sk-ant-..." >&2
-          exit 1
-        fi
-        set_env_value ANTHROPIC_API_KEY "$key"
-        log "Saved Anthropic API key to local .env (gitignored)"
-      fi
-      ;;
-    *)
-      echo "ERROR: Unsupported LLM_PROVIDER '$provider'. Use openai or anthropic." >&2
-      exit 1
-      ;;
-  esac
+  set_env_value LLM_PROVIDER openai
+  ensure_secret OPENAI_API_KEY
+  ensure_secret TYPESAFE_API_KEY
 }
 
 ensure_minecraft_server() {
@@ -238,7 +163,6 @@ ensure_minecraft_server() {
     log "First-time setup: preparing local Minecraft server"
     npm run mc:setup
   fi
-
   if [[ "$MODE" == "reset" ]]; then
     log "Resetting Hardcore world with fixed seed $RESET_SEED"
     npm run mc:reset -- "$RESET_SEED"
@@ -249,28 +173,17 @@ ensure_minecraft_server() {
 }
 
 stop_previous_gameplay() {
-  if [[ ! -f "$GAMEPLAY_PID_FILE" ]]; then
-    return
-  fi
-
+  [[ -f "$GAMEPLAY_PID_FILE" ]] || return
   local old_pid
   old_pid="$(cat "$GAMEPLAY_PID_FILE" 2>/dev/null || true)"
   if [[ -n "$old_pid" ]] && kill -0 "$old_pid" 2>/dev/null; then
     local cmdline=""
-    if [[ -r "/proc/$old_pid/cmdline" ]]; then
-      cmdline="$(tr '\0' ' ' < "/proc/$old_pid/cmdline")"
-    fi
-
+    [[ -r "/proc/$old_pid/cmdline" ]] && cmdline="$(tr '\0' ' ' < "/proc/$old_pid/cmdline")"
     if [[ "$cmdline" == *"dev-one-touch.sh"* || "$cmdline" == *"run.sh"* ]]; then
       log "Stopping previous gameplay launcher (pid=$old_pid)"
       kill "$old_pid" 2>/dev/null || true
-      for _ in {1..20}; do
-        kill -0 "$old_pid" 2>/dev/null || break
-        sleep 0.1
-      done
+      sleep 0.3
       kill -9 "$old_pid" 2>/dev/null || true
-    else
-      log "Ignoring stale gameplay PID $old_pid (belongs to another process)"
     fi
   fi
   rm -f "$GAMEPLAY_PID_FILE"
@@ -278,23 +191,18 @@ stop_previous_gameplay() {
 
 run_gameplay() {
   stop_previous_gameplay
-
-  log "Launching gameplay-only AI"
-  log "Close this terminal or press Ctrl+C to stop the AI. The Minecraft server stays running."
-  if [[ -n "${AI_MC_RUN_LOG:-}" ]]; then
-    log "Share this run log when reporting behavior: $AI_MC_RUN_LOG"
-  fi
-
+  log "Launching Jev-first gameplay AI"
+  log "Close this terminal or press Ctrl+C to stop the AI. Minecraft server stays running."
+  [[ -n "${AI_MC_RUN_LOG:-}" ]] && log "Share this run log when reporting behavior: $AI_MC_RUN_LOG"
   echo "$$" > "$GAMEPLAY_PID_FILE"
   trap 'rm -f "$GAMEPLAY_PID_FILE"' EXIT INT TERM
-
   npm run start:gameplay
 }
 
-ensure_system_dependencies
 sync_repository
+ensure_system_dependencies
 ensure_node_modules
-ensure_viewer_dependency
+ensure_viewer_dependencies
 ensure_env
 ensure_minecraft_server
 run_gameplay
