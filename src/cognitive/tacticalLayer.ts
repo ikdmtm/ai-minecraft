@@ -1,7 +1,6 @@
 import type { SharedStateBus, CognitiveThreatLevel } from './sharedState.js';
 import type { ReflexLayer } from './reflexLayer.js';
 import type { LLMApiAdapter } from '../llm/client.js';
-import type { ThreatLevel } from '../types/llm.js';
 
 const TACTICAL_INTERVAL_MS = 4_000;
 const TACTICAL_TIMEOUT_MS = 8_000;
@@ -87,10 +86,18 @@ export class TacticalLayer {
 
   private buildSystemPrompt(): string {
     const emotionLabel = this.shared.getEmotionLabel();
-    return `あなたは「星守レイ」です。Minecraft ハードコアモードをプレイする AI VTuber です。
+    return `あなたは「星守レイ」です。Minecraft ハードコアモードをプレイする AI です。
 あなたは今「${emotionLabel}」な気分です。
 
-【役割】リアルタイムの状況評価と短い実況コメントの生成。
+【役割】数秒単位の状況評価を行い、現在の行動を続けるか、目標を修正するかを判断する。
+長期戦略は別の戦略層が担当する。あなたは目の前の状況と直近の失敗から、実行可能な短期目標へ調整する。
+
+【最重要】
+- recent_events に gameplay_no_progress がある場合、現在の方法では実質的に進んでいない。
+- 生存上の緊急理由がない限り、同じ失敗をそのまま繰り返さず、別の実行可能な目標・アプローチへ変更する。
+- goal_adjustment は反射層が実行できる簡潔なMinecraft上の目標にする。例: 木を集める、石を掘る、鉄を探す、クラフトする、食料を集める、探索する、拠点へ戻る、寝る。
+- 危険が迫っている場合は生存を優先する。
+
 【重要】応答は必ず以下の JSON のみを返してください。
 
 \`\`\`json
@@ -103,13 +110,12 @@ export class TacticalLayer {
 \`\`\`
 
 - goal_adjustment: 現在の目標を変更すべき場合のみ文字列で指定。不要なら null
-- commentary: 今この瞬間に自然に口にする言葉。テンプレートではなく状況に応じた生きた言葉
+- commentary: 今この瞬間に自然に口にする言葉。不要なら空文字
 - threat_assessment: "safe" / "caution" / "danger" / "critical"
 - emotion_shift: { "valence": 0.1, "arousal": -0.1 } のように感情変化がある場合のみ。不要なら null
 
 【キャラクター】
 - 落ち着いた口調だが、危機には焦りが出る
-- 視聴者に向けて思考をそのまま言語化
 - 同じフレーズの繰り返しを避ける`;
   }
 
@@ -120,6 +126,7 @@ export class TacticalLayer {
   ): string {
     const eventSummary = events.slice(-8).map(e => `[${e.type}] ${e.detail}`).join('\n');
     const survivalMinutes = Math.round(this.shared.getSurvivalMinutes());
+    const noProgressEvents = events.filter(e => e.type === 'gameplay_no_progress');
 
     const stagnationWarning = this.detectStagnation(survivalMinutes, state);
 
@@ -137,6 +144,8 @@ export class TacticalLayer {
       inventory_has_food: sensors.hasFood,
       survival_minutes: survivalMinutes,
       recent_events: eventSummary || '(なし)',
+      no_progress_detected: noProgressEvents.length > 0,
+      no_progress_count_30s: noProgressEvents.length,
       emotion: this.shared.getEmotionLabel(),
       ...(stagnationWarning ? { stagnation_warning: stagnationWarning } : {}),
     }, null, 2);
@@ -152,7 +161,7 @@ export class TacticalLayer {
 
     const minutesSinceGoalChange = survivalMinutes - this.lastGoalChangeMinute;
     if (minutesSinceGoalChange >= STAGNATION_WARN_MINUTES) {
-      return `同じ目標「${state.currentGoal}」が${minutesSinceGoalChange}分間変わっていません。配信が単調にならないよう、新しいアプローチや別の目標を検討してください。`;
+      return `同じ目標「${state.currentGoal}」が${minutesSinceGoalChange}分間変わっていません。長期的な停滞を避けるため、新しいアプローチや別の目標を検討してください。`;
     }
     return null;
   }
