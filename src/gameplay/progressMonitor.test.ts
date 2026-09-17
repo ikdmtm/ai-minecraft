@@ -25,7 +25,7 @@ describe('GameplayProgressMonitor', () => {
     const alert = monitor.observe(snap({ timestamp: 11_000 }));
     expect(alert).not.toBeNull();
     expect(alert?.stagnantForMs).toBe(10_000);
-    expect(alert?.detail).toContain('No meaningful gameplay progress');
+    expect(alert?.detail).toContain('No observable world progress');
   });
 
   test('movement resets the stall timer', () => {
@@ -61,16 +61,21 @@ describe('GameplayProgressMonitor', () => {
     }))).toBeNull();
   });
 
-  test('goal/state changes count as progress', () => {
+  test('goal/state changes alone do not hide a stall', () => {
     const monitor = new GameplayProgressMonitor({ stallThresholdMs: 10_000 });
 
-    monitor.observe(snap({ timestamp: 0 }));
-    expect(monitor.observe(snap({ timestamp: 9_000, goal: '石を掘る' }))).toBeNull();
-    expect(monitor.observe(snap({
-      timestamp: 18_000,
-      goal: '石を掘る',
+    monitor.observe(snap({ timestamp: 1_000 }));
+    expect(monitor.observe(snap({ timestamp: 6_000, goal: '石を掘る' }))).toBeNull();
+
+    const alert = monitor.observe(snap({
+      timestamp: 11_000,
+      goal: '探索する',
       reflexState: 'exploring',
-    }))).toBeNull();
+    }));
+
+    expect(alert).not.toBeNull();
+    expect(alert?.goal).toBe('探索する');
+    expect(alert?.reflexState).toBe('exploring');
   });
 
   test('does not spam alerts during cooldown', () => {
