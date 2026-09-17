@@ -7,6 +7,7 @@ STATE_DIR="$ROOT_DIR/.minecraft-dev"
 LOCK_HASH_FILE="$STATE_DIR/.package-lock.sha256"
 GAMEPLAY_PID_FILE="$STATE_DIR/gameplay.pid"
 VIEWER_VERSION="${GAMEPLAY_VIEWER_VERSION:-1.33.0}"
+VIEWER_CANVAS_VERSION="${GAMEPLAY_VIEWER_CANVAS_VERSION:-3.1.0}"
 MODE="${1:-start}"
 RESET_SEED="${2:-8675309}"
 
@@ -92,17 +93,47 @@ ensure_node_modules() {
   fi
 }
 
+ensure_viewer_system_dependencies() {
+  local packages=(
+    build-essential
+    python3
+    pkg-config
+    libcairo2-dev
+    libpango1.0-dev
+    libjpeg-dev
+    libgif-dev
+    librsvg2-dev
+  )
+  local missing=()
+
+  for package in "${packages[@]}"; do
+    dpkg -s "$package" >/dev/null 2>&1 || missing+=("$package")
+  done
+
+  if (( ${#missing[@]} > 0 )); then
+    log "Installing viewer native dependencies: ${missing[*]}"
+    sudo apt-get update
+    sudo apt-get install -y "${missing[@]}"
+  fi
+}
+
 ensure_viewer_dependency() {
   if [[ "${GAMEPLAY_VIEWER_ENABLED:-1}" == "0" ]]; then
     return
   fi
 
-  if node -e "require.resolve('prismarine-viewer')" >/dev/null 2>&1; then
+  if node -e "require.resolve('prismarine-viewer'); require.resolve('canvas')" >/dev/null 2>&1; then
     return
   fi
 
-  log "Installing local gameplay viewer"
-  npm install --no-save --package-lock=false "prismarine-viewer@${VIEWER_VERSION}"
+  ensure_viewer_system_dependencies
+
+  log "Installing local gameplay viewer + canvas"
+  npm install --no-save --package-lock=false \
+    "prismarine-viewer@${VIEWER_VERSION}" \
+    "canvas@${VIEWER_CANVAS_VERSION}"
+
+  node -e "require('prismarine-viewer'); require('canvas')" >/dev/null
 }
 
 set_env_value() {
