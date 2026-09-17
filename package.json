@@ -6,7 +6,9 @@
   "scripts": {
     "build": "tsc",
     "start": "tsx src/index.ts",
+    "start:gameplay": "tsx src/gameplay.ts",
     "dev": "tsx watch src/index.ts",
+    "dev:gameplay": "tsx watch src/gameplay.ts",
     "test": "jest --runInBand",
     "test:parallel": "jest",
     "test:serial": "jest --runInBand",
