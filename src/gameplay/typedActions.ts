@@ -1,0 +1,116 @@
+export type GameplayActionType =
+  | 'CONTINUE'
+  | 'EXPLORE'
+  | 'MINE'
+  | 'CRAFT'
+  | 'BUILD_SHELTER'
+  | 'HUNT_FOOD'
+  | 'EAT'
+  | 'FLEE'
+  | 'ATTACK'
+  | 'SLEEP'
+  | 'WAIT';
+
+export type CompassDirection = 'N' | 'NE' | 'E' | 'SE' | 'S' | 'SW' | 'W' | 'NW';
+
+export type CraftItem =
+  | 'none'
+  | 'planks'
+  | 'sticks'
+  | 'crafting_table'
+  | 'wooden_pickaxe'
+  | 'wooden_axe'
+  | 'wooden_sword'
+  | 'stone_pickaxe'
+  | 'stone_axe'
+  | 'stone_sword'
+  | 'furnace';
+
+export interface TypedGameplayDecision {
+  action: GameplayActionType;
+  blockTargetId?: string;
+  entityTargetId?: string;
+  craftItem?: CraftItem;
+  direction?: CompassDirection;
+  confidence: number;
+  reason?: string;
+  source: 'jev' | 'safety' | 'fallback';
+}
+
+export interface SkillSnapshot {
+  id: number;
+  action: GameplayActionType | 'NONE';
+  targetId: string | null;
+  status: 'idle' | 'running' | 'succeeded' | 'failed' | 'interrupted';
+  startedAt: number | null;
+  updatedAt: number;
+  detail: string;
+}
+
+export interface WorldCandidate {
+  id: string;
+  kind: 'block' | 'entity';
+  name: string;
+  distance: number;
+  position: { x: number; y: number; z: number };
+  hostile?: boolean;
+  foodAnimal?: boolean;
+}
+
+export interface JevWorldState {
+  ts: number;
+  player: {
+    hp: number;
+    hunger: number;
+    oxygen: number;
+    onFire: boolean;
+    position: { x: number; y: number; z: number };
+    heldItem: string | null;
+  };
+  world: {
+    timeOfDay: number;
+    day: number;
+    isNight: boolean;
+    raining: boolean;
+    blockBelow: string | null;
+  };
+  inventory: Record<string, number>;
+  strategy: {
+    mainGoal: string;
+    subGoals: string[];
+  };
+  currentSkill: SkillSnapshot;
+  blockCandidates: WorldCandidate[];
+  entityCandidates: WorldCandidate[];
+  recentEvents: Array<{ type: string; detail: string; importance: string }>;
+}
+
+export const GAMEPLAY_ACTIONS: GameplayActionType[] = [
+  'CONTINUE',
+  'EXPLORE',
+  'MINE',
+  'CRAFT',
+  'BUILD_SHELTER',
+  'HUNT_FOOD',
+  'EAT',
+  'FLEE',
+  'ATTACK',
+  'SLEEP',
+  'WAIT',
+];
+
+export const COMPASS_DIRECTIONS: CompassDirection[] = ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW'];
+
+export const CRAFT_ITEMS: CraftItem[] = [
+  'none',
+  'planks',
+  'sticks',
+  'crafting_table',
+  'wooden_pickaxe',
+  'wooden_axe',
+  'wooden_sword',
+  'stone_pickaxe',
+  'stone_axe',
+  'stone_sword',
+  'furnace',
+];
