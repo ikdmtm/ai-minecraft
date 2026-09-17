@@ -28,6 +28,17 @@ export interface CognitiveEvents {
   onReactiveAction: (event: RecentEvent) => void;
 }
 
+export interface GameplayRuntimeSnapshot {
+  timestamp: number;
+  goal: string;
+  reflexState: string;
+  threatLevel: string;
+  hp: number;
+  hunger: number;
+  position: { x: number; y: number; z: number };
+  inventory: Record<string, number>;
+}
+
 export class CognitiveOrchestrator {
   private shared: SharedStateBus;
   private reflexLayer: ReflexLayer;
@@ -67,6 +78,32 @@ export class CognitiveOrchestrator {
 
   getGeneration(): number {
     return this.generation;
+  }
+
+  getGameplaySnapshot(): GameplayRuntimeSnapshot | null {
+    try {
+      const state = this.shared.get();
+      const partial = this.reflexLayer.getPartialGameState();
+      const bot = this.reflexLayer.getBot();
+      const inventory: Record<string, number> = {};
+
+      for (const item of bot.inventory.items()) {
+        inventory[item.name] = (inventory[item.name] ?? 0) + item.count;
+      }
+
+      return {
+        timestamp: Date.now(),
+        goal: state.currentGoal,
+        reflexState: state.reflexState,
+        threatLevel: state.threatLevel,
+        hp: partial.player.hp,
+        hunger: partial.player.hunger,
+        position: { ...partial.player.position },
+        inventory,
+      };
+    } catch {
+      return null;
+    }
   }
 
   async start(events: CognitiveEvents): Promise<void> {
