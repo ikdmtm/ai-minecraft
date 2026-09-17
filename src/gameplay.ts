@@ -1,6 +1,7 @@
 import { config as loadEnv } from 'dotenv';
 loadEnv();
 
+import { spawn } from 'child_process';
 import { mkdirSync } from 'fs';
 import { dirname, resolve } from 'path';
 import { CognitiveOrchestrator, type LLMProvider } from './cognitive/orchestrator.js';
@@ -14,6 +15,7 @@ const DEFAULT_ANTHROPIC_STRATEGIC_MODEL = 'claude-sonnet-4-6';
 const DEFAULT_STATUS_INTERVAL_MS = 2_000;
 const DEFAULT_STALL_THRESHOLD_MS = 20_000;
 const DEFAULT_STALL_ALERT_COOLDOWN_MS = 15_000;
+const DEFAULT_VIEWER_PORT = 3007;
 
 function requiredEnv(name: string): string {
   const value = process.env[name]?.trim();
@@ -25,6 +27,12 @@ function parsePositiveInt(raw: string | undefined, fallback: number): number {
   if (!raw?.trim()) return fallback;
   const value = Number.parseInt(raw, 10);
   return Number.isFinite(value) && value > 0 ? value : fallback;
+}
+
+function envEnabled(name: string, fallback = true): boolean {
+  const raw = process.env[name]?.trim().toLowerCase();
+  if (!raw) return fallback;
+  return !['0', 'false', 'no', 'off'].includes(raw);
 }
 
 function resolveProvider(): LLMProvider {
@@ -77,6 +85,7 @@ const progressMonitor = new GameplayProgressMonitor({
 });
 
 let statusTimer: ReturnType<typeof setInterval> | null = null;
+let viewerClose: (() => void) | null = null;
 let shuttingDown = false;
 
 function logEvent(kind: string, payload: Record<string, unknown> = {}): void {
@@ -93,10 +102,21 @@ function stopStatusTimer(): void {
   statusTimer = null;
 }
 
+function stopViewer(): void {
+  if (!viewerClose) return;
+  try {
+    viewerClose();
+  } catch {
+    // best effort
+  }
+  viewerClose = null;
+}
+
 function shutdown(reason: string, exitCode = 0): void {
   if (shuttingDown) return;
   shuttingDown = true;
   stopStatusTimer();
+  stopViewer();
   logEvent('shutdown', { reason });
 
   try {
@@ -108,6 +128,56 @@ function shutdown(reason: string, exitCode = 0): void {
   }
 
   process.exitCode = exitCode;
+}
+
+function startViewer(): void {
+  if (!envEnabled('GAMEPLAY_VIEWER_ENABLED', true)) {
+    logEvent('viewer_disabled');
+    return;
+  }
+
+  const port = parsePositiveInt(process.env.GAMEPLAY_VIEWER_PORT, DEFAULT_VIEWER_PORT);
+  const url = `http://localhost:${port}`;
+
+  try {
+    const viewerModule = require('prismarine-viewer') as {
+      mineflayer: (bot: unknown, options: Record<string, unknown>) => void;
+    };
+    const bot = orchestrator.getBotForDebug() as any;
+
+    viewerModule.mineflayer(bot, {
+      port,
+      firstPerson: true,
+      viewDistance: 6,
+    });
+
+    if (bot.viewer && typeof bot.viewer.close === 'function') {
+      viewerClose = () => bot.viewer.close();
+    }
+
+    logEvent('viewer_ready', { url, first_person: true });
+
+    if (envEnabled('GAMEPLAY_VIEWER_AUTO_OPEN', true)) {
+      setTimeout(() => {
+        try {
+          const child = spawn(
+            'powershell.exe',
+            ['-NoProfile', '-Command', `Start-Process '${url}'`],
+            { detached: true, stdio: 'ignore' },
+          );
+          child.on('error', () => {});
+          child.unref();
+        } catch {
+          // Auto-open is optional. The viewer URL is always logged.
+        }
+      }, 750);
+    }
+  } catch (error) {
+    logEvent('viewer_unavailable', {
+      url,
+      message: error instanceof Error ? error.message : String(error),
+    });
+  }
 }
 
 function startStatusLogging(): void {
@@ -199,6 +269,7 @@ async function main(): Promise<void> {
     },
   });
 
+  startViewer();
   startStatusLogging();
   logEvent('ready', {
     message: 'Gameplay-only runtime is active. Streaming/TTS/FFmpeg/YouTube are not started.',
