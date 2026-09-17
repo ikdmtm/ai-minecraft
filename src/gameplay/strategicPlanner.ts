@@ -24,9 +24,15 @@ export class StrategicPlanner {
     this.running = true;
     if (!this.shared.get().currentGoal) {
       this.apply({
-        mainGoal: '木材を確保して基本的な道具を作る',
-        subGoals: ['木を見つける', '原木を集める', '板材と作業台を作る', '木のツルハシを作る', '石を集める'],
-        assessment: '開始直後',
+        mainGoal: 'Acquire wood and establish basic tools.',
+        subGoals: [
+          'Find a reachable tree.',
+          'Collect at least 6 logs.',
+          'Craft planks and a crafting table.',
+          'Craft a wooden pickaxe.',
+          'Collect stone and upgrade to stone tools.',
+        ],
+        assessment: 'Fresh spawn with no equipment.',
       });
     }
     this.schedule(750);
@@ -62,6 +68,7 @@ export class StrategicPlanner {
             'Do not issue frame-by-frame movement commands. Jev handles immediate action selection.',
             'Priority order: survive immediate danger, establish safety, improve capability, explore/progress, take reasonable challenges.',
             'Do not optimize for hiding forever. Progress through ordinary Minecraft while protecting the single Hardcore life.',
+            'Write main_goal, sub_goals, and progress_assessment in concise English so the Jev policy can consume them consistently.',
             'Return JSON only with main_goal, sub_goals, progress_assessment.',
           ].join(' '),
           input: JSON.stringify({
