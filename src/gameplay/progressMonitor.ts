@@ -68,7 +68,7 @@ export class GameplayProgressMonitor {
       stagnantForMs,
       goal: snapshot.goal,
       reflexState: snapshot.reflexState,
-      detail: `No meaningful gameplay progress for ${Math.round(stagnantForMs / 1000)}s while state=${snapshot.reflexState} goal="${snapshot.goal || '(none)'}"`,
+      detail: `No observable world progress for ${Math.round(stagnantForMs / 1000)}s while state=${snapshot.reflexState} goal="${snapshot.goal || '(none)'}"`,
     };
   }
 
@@ -87,8 +87,8 @@ export class GameplayProgressMonitor {
     before: GameplayProgressSnapshot,
     after: GameplayProgressSnapshot,
   ): boolean {
-    if (before.goal !== after.goal) return true;
-    if (before.reflexState !== after.reflexState) return true;
+    // Intent/state changes are deliberately NOT counted as progress.
+    // The bot must actually move through the world or change its inventory.
     if (distanceSq(before.position, after.position) >= this.movementThresholdSq) return true;
     if (!sameInventory(before.inventory, after.inventory)) return true;
     return false;
