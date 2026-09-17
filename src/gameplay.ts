@@ -3,11 +3,14 @@ loadEnv();
 
 import { mkdirSync } from 'fs';
 import { dirname, resolve } from 'path';
-import { CognitiveOrchestrator } from './cognitive/orchestrator.js';
+import { CognitiveOrchestrator, type LLMProvider } from './cognitive/orchestrator.js';
 import { GameplayProgressMonitor } from './gameplay/progressMonitor.js';
 
-const DEFAULT_TACTICAL_MODEL = 'claude-haiku-4-5-20251001';
-const DEFAULT_STRATEGIC_MODEL = 'claude-sonnet-4-6';
+const DEFAULT_PROVIDER: LLMProvider = 'openai';
+const DEFAULT_OPENAI_TACTICAL_MODEL = 'gpt-5.6-luna';
+const DEFAULT_OPENAI_STRATEGIC_MODEL = 'gpt-5.6-terra';
+const DEFAULT_ANTHROPIC_TACTICAL_MODEL = 'claude-haiku-4-5-20251001';
+const DEFAULT_ANTHROPIC_STRATEGIC_MODEL = 'claude-sonnet-4-6';
 const DEFAULT_STATUS_INTERVAL_MS = 2_000;
 const DEFAULT_STALL_THRESHOLD_MS = 20_000;
 const DEFAULT_STALL_ALERT_COOLDOWN_MS = 15_000;
@@ -24,13 +27,30 @@ function parsePositiveInt(raw: string | undefined, fallback: number): number {
   return Number.isFinite(value) && value > 0 ? value : fallback;
 }
 
+function resolveProvider(): LLMProvider {
+  const raw = process.env.LLM_PROVIDER?.trim().toLowerCase();
+  if (!raw) return DEFAULT_PROVIDER;
+  if (raw === 'openai' || raw === 'anthropic') return raw;
+  throw new Error(`Unsupported LLM_PROVIDER: ${raw}`);
+}
+
+const llmProvider = resolveProvider();
+const defaultTacticalModel = llmProvider === 'openai'
+  ? DEFAULT_OPENAI_TACTICAL_MODEL
+  : DEFAULT_ANTHROPIC_TACTICAL_MODEL;
+const defaultStrategicModel = llmProvider === 'openai'
+  ? DEFAULT_OPENAI_STRATEGIC_MODEL
+  : DEFAULT_ANTHROPIC_STRATEGIC_MODEL;
+
 const dbPath = process.env.DB_PATH?.trim() || './data/gameplay.db';
 mkdirSync(dirname(resolve(dbPath)), { recursive: true });
 
 const orchestrator = new CognitiveOrchestrator({
-  anthropicApiKey: requiredEnv('ANTHROPIC_API_KEY'),
-  tacticalModel: process.env.TACTICAL_MODEL?.trim() || DEFAULT_TACTICAL_MODEL,
-  strategicModel: process.env.STRATEGIC_MODEL?.trim() || DEFAULT_STRATEGIC_MODEL,
+  llmProvider,
+  openaiApiKey: llmProvider === 'openai' ? requiredEnv('OPENAI_API_KEY') : undefined,
+  anthropicApiKey: llmProvider === 'anthropic' ? requiredEnv('ANTHROPIC_API_KEY') : undefined,
+  tacticalModel: process.env.TACTICAL_MODEL?.trim() || defaultTacticalModel,
+  strategicModel: process.env.STRATEGIC_MODEL?.trim() || defaultStrategicModel,
   mcHost: process.env.MINECRAFT_HOST?.trim() || 'localhost',
   mcPort: parsePositiveInt(process.env.MINECRAFT_PORT, 25565),
   botUsername: process.env.BOT_USERNAME?.trim() || 'AI_Rei',
@@ -136,11 +156,12 @@ function startStatusLogging(): void {
 async function main(): Promise<void> {
   logEvent('startup', {
     mode: 'gameplay-only',
+    llm_provider: llmProvider,
     minecraft_host: process.env.MINECRAFT_HOST?.trim() || 'localhost',
     minecraft_port: parsePositiveInt(process.env.MINECRAFT_PORT, 25565),
     bot_username: process.env.BOT_USERNAME?.trim() || 'AI_Rei',
-    tactical_model: process.env.TACTICAL_MODEL?.trim() || DEFAULT_TACTICAL_MODEL,
-    strategic_model: process.env.STRATEGIC_MODEL?.trim() || DEFAULT_STRATEGIC_MODEL,
+    tactical_model: process.env.TACTICAL_MODEL?.trim() || defaultTacticalModel,
+    strategic_model: process.env.STRATEGIC_MODEL?.trim() || defaultStrategicModel,
     db_path: dbPath,
     stall_threshold_ms: parsePositiveInt(
       process.env.GAMEPLAY_STALL_THRESHOLD_MS,
