@@ -11,6 +11,12 @@ VIEWER_CANVAS_VERSION="${GAMEPLAY_VIEWER_CANVAS_VERSION:-3.1.0}"
 MODE="${1:-start}"
 RESET_SEED="${2:-8675309}"
 
+# If an older launcher pulled a newer run.sh, immediately re-enter through run.sh
+# so this very run gets its own fresh log file rather than waiting for the next run.
+if [[ -z "${AI_MC_RUN_LOG:-}" && "${AI_MC_REEXECED:-0}" == "1" && "${AI_MC_LOG_BOOTSTRAPPED:-0}" != "1" ]]; then
+  exec env AI_MC_LOG_BOOTSTRAPPED=1 bash "$ROOT_DIR/run.sh" "$MODE" "$RESET_SEED"
+fi
+
 cd "$ROOT_DIR"
 mkdir -p "$STATE_DIR"
 
@@ -72,6 +78,8 @@ sync_repository() {
 
   local after
   after="$(git rev-parse HEAD)"
+  log "Code revision: $(git rev-parse --short HEAD)"
+
   if [[ "$before" != "$after" && "${AI_MC_REEXECED:-0}" != "1" ]]; then
     log "Updated launcher detected; restarting with the newest script"
     exec env AI_MC_REEXECED=1 bash "$ROOT_DIR/scripts/dev-one-touch.sh" "$MODE" "$RESET_SEED"
@@ -273,6 +281,9 @@ run_gameplay() {
 
   log "Launching gameplay-only AI"
   log "Close this terminal or press Ctrl+C to stop the AI. The Minecraft server stays running."
+  if [[ -n "${AI_MC_RUN_LOG:-}" ]]; then
+    log "Share this run log when reporting behavior: $AI_MC_RUN_LOG"
+  fi
 
   echo "$$" > "$GAMEPLAY_PID_FILE"
   trap 'rm -f "$GAMEPLAY_PID_FILE"' EXIT INT TERM
