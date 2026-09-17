@@ -6,6 +6,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 STATE_DIR="$ROOT_DIR/.minecraft-dev"
 LOCK_HASH_FILE="$STATE_DIR/.package-lock.sha256"
 GAMEPLAY_PID_FILE="$STATE_DIR/gameplay.pid"
+VIEWER_VERSION="${GAMEPLAY_VIEWER_VERSION:-1.33.0}"
 MODE="${1:-start}"
 RESET_SEED="${2:-8675309}"
 
@@ -91,6 +92,19 @@ ensure_node_modules() {
   fi
 }
 
+ensure_viewer_dependency() {
+  if [[ "${GAMEPLAY_VIEWER_ENABLED:-1}" == "0" ]]; then
+    return
+  fi
+
+  if node -e "require.resolve('prismarine-viewer')" >/dev/null 2>&1; then
+    return
+  fi
+
+  log "Installing local gameplay viewer"
+  npm install --no-save --package-lock=false "prismarine-viewer@${VIEWER_VERSION}"
+}
+
 set_env_value() {
   local name="$1"
   local value="$2"
@@ -106,6 +120,16 @@ is_placeholder_key() {
   [[ -z "$value" || "$value" == "changeme" || "$value" == "sk-xxxxx" || "$value" == "sk-proj-xxxxx" || "$value" == "sk-ant-xxxxx" ]]
 }
 
+is_valid_openai_key() {
+  local value="$1"
+  [[ "$value" == sk-* && "$value" != *" "* ]]
+}
+
+is_valid_anthropic_key() {
+  local value="$1"
+  [[ "$value" == sk-ant-* && "$value" != *" "* ]]
+}
+
 ensure_env() {
   if [[ ! -f .env ]]; then
     log "First-time setup: creating .env"
@@ -119,9 +143,7 @@ ensure_env() {
   local openai_key
   openai_key="$(sed -n 's/^OPENAI_API_KEY=//p' .env | head -n1 || true)"
 
-  # Migration from the previous launcher: an untouched Anthropic placeholder
-  # means the user never configured Anthropic, so move gameplay development to OpenAI.
-  if [[ -z "$provider" ]] || { [[ "$provider" == "anthropic" ]] && is_placeholder_key "$anthropic_key" && is_placeholder_key "$openai_key"; }; then
+  if [[ -z "$provider" ]] || { [[ "$provider" == "anthropic" ]] && is_placeholder_key "$anthropic_key"; }; then
     provider="openai"
     set_env_value LLM_PROVIDER openai
     log "Using OpenAI for gameplay cognition"
@@ -129,7 +151,10 @@ ensure_env() {
 
   case "$provider" in
     openai)
-      if is_placeholder_key "$openai_key"; then
+      if ! is_valid_openai_key "$openai_key"; then
+        if [[ -n "$openai_key" ]] && ! is_placeholder_key "$openai_key"; then
+          log "Existing OPENAI_API_KEY is not a valid key format; replacing it"
+        fi
         local key="${OPENAI_API_KEY:-}"
         if [[ -z "$key" ]]; then
           echo
@@ -137,8 +162,8 @@ ensure_env() {
           read -r -s key
           echo
         fi
-        if [[ -z "$key" ]]; then
-          echo "ERROR: OPENAI_API_KEY is required when LLM_PROVIDER=openai." >&2
+        if ! is_valid_openai_key "$key"; then
+          echo "ERROR: OPENAI_API_KEY must look like an OpenAI secret key (sk-...)." >&2
           exit 1
         fi
         set_env_value OPENAI_API_KEY "$key"
@@ -146,7 +171,7 @@ ensure_env() {
       fi
       ;;
     anthropic)
-      if is_placeholder_key "$anthropic_key"; then
+      if ! is_valid_anthropic_key "$anthropic_key"; then
         local key="${ANTHROPIC_API_KEY:-}"
         if [[ -z "$key" ]]; then
           echo
@@ -154,8 +179,8 @@ ensure_env() {
           read -r -s key
           echo
         fi
-        if [[ -z "$key" ]]; then
-          echo "ERROR: ANTHROPIC_API_KEY is required when LLM_PROVIDER=anthropic." >&2
+        if ! is_valid_anthropic_key "$key"; then
+          echo "ERROR: ANTHROPIC_API_KEY must look like sk-ant-..." >&2
           exit 1
         fi
         set_env_value ANTHROPIC_API_KEY "$key"
@@ -227,6 +252,7 @@ run_gameplay() {
 ensure_system_dependencies
 sync_repository
 ensure_node_modules
+ensure_viewer_dependency
 ensure_env
 ensure_minecraft_server
 run_gameplay
