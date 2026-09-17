@@ -86,6 +86,9 @@ const progressMonitor = new GameplayProgressMonitor({
 
 let statusTimer: ReturnType<typeof setInterval> | null = null;
 let viewerClose: (() => void) | null = null;
+let unsubscribeSharedEvents: (() => void) | null = null;
+let detachBotDiagnostics: (() => void) | null = null;
+let previousInventory: Record<string, number> | null = null;
 let shuttingDown = false;
 
 function logEvent(kind: string, payload: Record<string, unknown> = {}): void {
@@ -112,10 +115,18 @@ function stopViewer(): void {
   viewerClose = null;
 }
 
+function stopDiagnostics(): void {
+  unsubscribeSharedEvents?.();
+  unsubscribeSharedEvents = null;
+  detachBotDiagnostics?.();
+  detachBotDiagnostics = null;
+}
+
 function shutdown(reason: string, exitCode = 0): void {
   if (shuttingDown) return;
   shuttingDown = true;
   stopStatusTimer();
+  stopDiagnostics();
   stopViewer();
   logEvent('shutdown', { reason });
 
@@ -128,6 +139,93 @@ function shutdown(reason: string, exitCode = 0): void {
   }
 
   process.exitCode = exitCode;
+}
+
+function startSharedEventLogging(): void {
+  const shared = orchestrator.getShared();
+  unsubscribeSharedEvents = shared.onStateChange((field, value) => {
+    if (field === 'recentEvents' && value && typeof value === 'object') {
+      const event = value as {
+        timestamp?: number;
+        type?: string;
+        detail?: string;
+        importance?: string;
+      };
+      logEvent('game_event', {
+        event_ts: event.timestamp ?? null,
+        event_type: event.type ?? 'unknown',
+        detail: event.detail ?? '',
+        importance: event.importance ?? null,
+      });
+      return;
+    }
+
+    if (field === 'subGoals' && Array.isArray(value)) {
+      logEvent('sub_goals_changed', { sub_goals: value });
+      return;
+    }
+
+    if (field === 'worldModel.basePosition') {
+      logEvent('base_position_changed', { position: value });
+    }
+  });
+}
+
+function attachRuntimeDiagnostics(): void {
+  const bot = orchestrator.getBotForDebug() as any;
+  const removers: Array<() => void> = [];
+
+  const add = (emitter: any, event: string, handler: (...args: any[]) => void) => {
+    if (!emitter || typeof emitter.on !== 'function') return;
+    emitter.on(event, handler);
+    removers.push(() => emitter.removeListener?.(event, handler));
+  };
+
+  add(bot, 'kicked', (reason: unknown) => {
+    logEvent('bot_kicked', { reason: stringifyReason(reason) });
+  });
+  add(bot, 'error', (error: unknown) => {
+    logEvent('bot_error', { message: stringifyReason(error) });
+  });
+  add(bot, 'end', (reason: unknown) => {
+    logEvent('bot_connection_end', { reason: stringifyReason(reason) });
+  });
+  add(bot, 'health', () => {
+    logEvent('health_changed', { hp: bot.health, hunger: bot.food });
+  });
+
+  const pathfinder = bot.pathfinder;
+  add(pathfinder, 'goal_reached', () => {
+    logEvent('path_goal_reached', {
+      goal: orchestrator.getShared().get().currentGoal || null,
+      reflex_state: orchestrator.getShared().get().reflexState,
+      position: positionOf(bot),
+    });
+  });
+  add(pathfinder, 'path_reset', (reason: unknown) => {
+    logEvent('path_reset', {
+      reason: stringifyReason(reason),
+      goal: orchestrator.getShared().get().currentGoal || null,
+      reflex_state: orchestrator.getShared().get().reflexState,
+      position: positionOf(bot),
+    });
+  });
+  add(pathfinder, 'path_update', (result: any) => {
+    logEvent('path_update', {
+      status: result?.status ?? null,
+      path_length: Array.isArray(result?.path) ? result.path.length : null,
+      visited_nodes: result?.visitedNodes ?? null,
+      generated_nodes: result?.generatedNodes ?? null,
+      goal: orchestrator.getShared().get().currentGoal || null,
+      reflex_state: orchestrator.getShared().get().reflexState,
+    });
+  });
+
+  detachBotDiagnostics = () => {
+    for (const remove of removers.splice(0)) {
+      try { remove(); } catch { /* best effort */ }
+    }
+  };
 }
 
 function startViewer(): void {
@@ -183,6 +281,7 @@ function startViewer(): void {
 function startStatusLogging(): void {
   const shared = orchestrator.getShared();
   progressMonitor.reset();
+  previousInventory = null;
 
   statusTimer = setInterval(() => {
     const state = shared.get();
@@ -204,6 +303,19 @@ function startStatusLogging(): void {
           inventory: runtime.inventory,
         });
       }
+
+      if (previousInventory) {
+        const delta = diffInventory(previousInventory, runtime.inventory);
+        if (Object.keys(delta).length > 0) {
+          logEvent('inventory_changed', {
+            delta,
+            inventory: runtime.inventory,
+            goal: state.currentGoal || null,
+            reflex_state: state.reflexState,
+          });
+        }
+      }
+      previousInventory = { ...runtime.inventory };
     }
 
     logEvent('state', {
@@ -217,15 +329,81 @@ function startStatusLogging(): void {
       hunger: runtime?.hunger ?? null,
       position: runtime?.position ?? null,
       inventory: runtime?.inventory ?? null,
+      world: getWorldDebugSnapshot(),
       emotion: shared.getEmotionLabel(),
       lessons_this_life: state.lessonsThisLife,
     });
   }, statusIntervalMs);
 }
 
+function getWorldDebugSnapshot(): Record<string, unknown> | null {
+  try {
+    const bot = orchestrator.getBotForDebug() as any;
+    const entities = Object.values(bot.entities ?? {})
+      .filter((entity: any) => entity && entity !== bot.entity && entity.name && entity.position)
+      .map((entity: any) => ({
+        type: entity.name,
+        distance: Number(bot.entity.position.distanceTo(entity.position).toFixed(1)),
+        position: {
+          x: Number(entity.position.x.toFixed(1)),
+          y: Number(entity.position.y.toFixed(1)),
+          z: Number(entity.position.z.toFixed(1)),
+        },
+      }))
+      .filter((entity: any) => entity.distance <= 24)
+      .sort((a: any, b: any) => a.distance - b.distance)
+      .slice(0, 12);
+
+    const currentBlock = bot.blockAt?.(bot.entity.position);
+    return {
+      minecraft_time: bot.time?.timeOfDay ?? null,
+      day: bot.time?.day ?? null,
+      is_raining: bot.isRaining ?? null,
+      biome: currentBlock?.biome?.name ?? null,
+      held_item: bot.heldItem?.name ?? null,
+      on_ground: bot.entity?.onGround ?? null,
+      yaw: bot.entity?.yaw ?? null,
+      pitch: bot.entity?.pitch ?? null,
+      nearby_entities: entities,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function diffInventory(
+  before: Record<string, number>,
+  after: Record<string, number>,
+): Record<string, number> {
+  const result: Record<string, number> = {};
+  const names = new Set([...Object.keys(before), ...Object.keys(after)]);
+  for (const name of names) {
+    const delta = (after[name] ?? 0) - (before[name] ?? 0);
+    if (delta !== 0) result[name] = delta;
+  }
+  return result;
+}
+
+function positionOf(bot: any): Record<string, number> | null {
+  const p = bot?.entity?.position;
+  if (!p) return null;
+  return {
+    x: Number(p.x.toFixed(2)),
+    y: Number(p.y.toFixed(2)),
+    z: Number(p.z.toFixed(2)),
+  };
+}
+
+function stringifyReason(value: unknown): string {
+  if (value instanceof Error) return value.message;
+  if (typeof value === 'string') return value;
+  try { return JSON.stringify(value); } catch { return String(value); }
+}
+
 async function main(): Promise<void> {
   logEvent('startup', {
     mode: 'gameplay-only',
+    run_log: process.env.AI_MC_RUN_LOG ?? null,
     llm_provider: llmProvider,
     minecraft_host: process.env.MINECRAFT_HOST?.trim() || 'localhost',
     minecraft_port: parsePositiveInt(process.env.MINECRAFT_PORT, 25565),
@@ -238,6 +416,8 @@ async function main(): Promise<void> {
       DEFAULT_STALL_THRESHOLD_MS,
     ),
   });
+
+  startSharedEventLogging();
 
   await orchestrator.start({
     onCommentary: (text) => {
@@ -269,6 +449,7 @@ async function main(): Promise<void> {
     },
   });
 
+  attachRuntimeDiagnostics();
   startViewer();
   startStatusLogging();
   logEvent('ready', {
