@@ -4,6 +4,7 @@ coverage/
 data/
 .env
 *.log
+.minecraft-dev/
 
 # Terraform
 infra/.terraform/
