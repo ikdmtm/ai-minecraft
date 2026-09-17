@@ -4,10 +4,13 @@ loadEnv();
 import { mkdirSync } from 'fs';
 import { dirname, resolve } from 'path';
 import { CognitiveOrchestrator } from './cognitive/orchestrator.js';
+import { GameplayProgressMonitor } from './gameplay/progressMonitor.js';
 
 const DEFAULT_TACTICAL_MODEL = 'claude-haiku-4-5-20251001';
 const DEFAULT_STRATEGIC_MODEL = 'claude-sonnet-4-6';
 const DEFAULT_STATUS_INTERVAL_MS = 2_000;
+const DEFAULT_STALL_THRESHOLD_MS = 20_000;
+const DEFAULT_STALL_ALERT_COOLDOWN_MS = 15_000;
 
 function requiredEnv(name: string): string {
   const value = process.env[name]?.trim();
@@ -41,6 +44,17 @@ const statusIntervalMs = parsePositiveInt(
   process.env.GAMEPLAY_STATUS_INTERVAL_MS,
   DEFAULT_STATUS_INTERVAL_MS,
 );
+
+const progressMonitor = new GameplayProgressMonitor({
+  stallThresholdMs: parsePositiveInt(
+    process.env.GAMEPLAY_STALL_THRESHOLD_MS,
+    DEFAULT_STALL_THRESHOLD_MS,
+  ),
+  alertCooldownMs: parsePositiveInt(
+    process.env.GAMEPLAY_STALL_ALERT_COOLDOWN_MS,
+    DEFAULT_STALL_ALERT_COOLDOWN_MS,
+  ),
+});
 
 let statusTimer: ReturnType<typeof setInterval> | null = null;
 let shuttingDown = false;
@@ -78,8 +92,30 @@ function shutdown(reason: string, exitCode = 0): void {
 
 function startStatusLogging(): void {
   const shared = orchestrator.getShared();
+  progressMonitor.reset();
+
   statusTimer = setInterval(() => {
     const state = shared.get();
+    const runtime = orchestrator.getGameplaySnapshot();
+
+    if (runtime) {
+      const alert = progressMonitor.observe(runtime);
+      if (alert) {
+        shared.pushEvent({
+          type: 'gameplay_no_progress',
+          detail: alert.detail,
+          importance: 'high',
+        });
+        logEvent('gameplay_no_progress', {
+          stagnant_seconds: Math.round(alert.stagnantForMs / 1000),
+          goal: alert.goal || null,
+          reflex_state: alert.reflexState,
+          position: runtime.position,
+          inventory: runtime.inventory,
+        });
+      }
+    }
+
     logEvent('state', {
       generation: orchestrator.getGeneration(),
       survival_seconds: Math.round(shared.getSurvivalMinutes() * 60),
@@ -87,6 +123,10 @@ function startStatusLogging(): void {
       sub_goals: state.subGoals,
       reflex_state: state.reflexState,
       threat_level: state.threatLevel,
+      hp: runtime?.hp ?? null,
+      hunger: runtime?.hunger ?? null,
+      position: runtime?.position ?? null,
+      inventory: runtime?.inventory ?? null,
       emotion: shared.getEmotionLabel(),
       lessons_this_life: state.lessonsThisLife,
     });
@@ -102,6 +142,10 @@ async function main(): Promise<void> {
     tactical_model: process.env.TACTICAL_MODEL?.trim() || DEFAULT_TACTICAL_MODEL,
     strategic_model: process.env.STRATEGIC_MODEL?.trim() || DEFAULT_STRATEGIC_MODEL,
     db_path: dbPath,
+    stall_threshold_ms: parsePositiveInt(
+      process.env.GAMEPLAY_STALL_THRESHOLD_MS,
+      DEFAULT_STALL_THRESHOLD_MS,
+    ),
   });
 
   await orchestrator.start({
