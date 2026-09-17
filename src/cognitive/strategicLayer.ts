@@ -57,6 +57,7 @@ export class StrategicLayer {
 
   private async runCycle(): Promise<void> {
     if (!this.running) return;
+    const startedAt = Date.now();
 
     try {
       const systemPrompt = this.buildSystemPrompt();
@@ -68,6 +69,32 @@ export class StrategicLayer {
       );
 
       const output = this.parseStrategicResponse(rawResponse);
+      const state = this.deps.shared.get();
+      const sensors = this.deps.getSensors();
+      console.log(JSON.stringify({
+        ts: new Date().toISOString(),
+        kind: 'strategic_decision',
+        latency_ms: Date.now() - startedAt,
+        input: {
+          generation: state.generation,
+          survival_minutes: Math.round(this.deps.shared.getSurvivalMinutes()),
+          hp: sensors.hp,
+          hunger: sensors.hunger,
+          is_night: sensors.isNight,
+          current_goal: state.currentGoal || null,
+          reflex_state: state.reflexState,
+          threat_level: state.threatLevel,
+          inventory: this.deps.getInventorySummary(),
+          base_known: sensors.baseKnown,
+        },
+        output: {
+          main_goal: output.mainGoal,
+          sub_goals: output.subGoals,
+          progress_assessment: output.progressAssessment,
+          lessons_learned: output.lessonsLearned,
+          personality_note: output.personalityNote,
+        },
+      }));
       this.applyOutput(output);
       this.consecutiveErrors = 0;
     } catch (e) {
