@@ -91,35 +91,82 @@ ensure_node_modules() {
   fi
 }
 
+set_env_value() {
+  local name="$1"
+  local value="$2"
+  if grep -q "^${name}=" .env; then
+    sed -i "s|^${name}=.*|${name}=${value}|" .env
+  else
+    printf '\n%s=%s\n' "$name" "$value" >> .env
+  fi
+}
+
+is_placeholder_key() {
+  local value="$1"
+  [[ -z "$value" || "$value" == "changeme" || "$value" == "sk-xxxxx" || "$value" == "sk-proj-xxxxx" || "$value" == "sk-ant-xxxxx" ]]
+}
+
 ensure_env() {
   if [[ ! -f .env ]]; then
     log "First-time setup: creating .env"
     cp .env.example .env
   fi
 
-  local existing_key=""
-  existing_key="$(sed -n 's/^ANTHROPIC_API_KEY=//p' .env | head -n1 || true)"
+  local provider
+  provider="$(sed -n 's/^LLM_PROVIDER=//p' .env | head -n1 | tr '[:upper:]' '[:lower:]' || true)"
+  local anthropic_key
+  anthropic_key="$(sed -n 's/^ANTHROPIC_API_KEY=//p' .env | head -n1 || true)"
+  local openai_key
+  openai_key="$(sed -n 's/^OPENAI_API_KEY=//p' .env | head -n1 || true)"
 
-  if [[ -z "$existing_key" || "$existing_key" == "sk-ant-xxxxx" || "$existing_key" == "changeme" ]]; then
-    local key="${ANTHROPIC_API_KEY:-}"
-    if [[ -z "$key" ]]; then
-      echo
-      echo "First run only: enter ANTHROPIC_API_KEY. Input is hidden."
-      read -r -s key
-      echo
-    fi
-    if [[ -z "$key" ]]; then
-      echo "ERROR: ANTHROPIC_API_KEY is required for the current tactical/strategic layers." >&2
-      exit 1
-    fi
-
-    if grep -q '^ANTHROPIC_API_KEY=' .env; then
-      sed -i "s|^ANTHROPIC_API_KEY=.*|ANTHROPIC_API_KEY=$key|" .env
-    else
-      printf '\nANTHROPIC_API_KEY=%s\n' "$key" >> .env
-    fi
-    log "Saved API key to local .env (gitignored)"
+  # Migration from the previous launcher: an untouched Anthropic placeholder
+  # means the user never configured Anthropic, so move gameplay development to OpenAI.
+  if [[ -z "$provider" ]] || { [[ "$provider" == "anthropic" ]] && is_placeholder_key "$anthropic_key" && is_placeholder_key "$openai_key"; }; then
+    provider="openai"
+    set_env_value LLM_PROVIDER openai
+    log "Using OpenAI for gameplay cognition"
   fi
+
+  case "$provider" in
+    openai)
+      if is_placeholder_key "$openai_key"; then
+        local key="${OPENAI_API_KEY:-}"
+        if [[ -z "$key" ]]; then
+          echo
+          echo "First run only: enter OPENAI_API_KEY. Input is hidden."
+          read -r -s key
+          echo
+        fi
+        if [[ -z "$key" ]]; then
+          echo "ERROR: OPENAI_API_KEY is required when LLM_PROVIDER=openai." >&2
+          exit 1
+        fi
+        set_env_value OPENAI_API_KEY "$key"
+        log "Saved OpenAI API key to local .env (gitignored)"
+      fi
+      ;;
+    anthropic)
+      if is_placeholder_key "$anthropic_key"; then
+        local key="${ANTHROPIC_API_KEY:-}"
+        if [[ -z "$key" ]]; then
+          echo
+          echo "First run only: enter ANTHROPIC_API_KEY. Input is hidden."
+          read -r -s key
+          echo
+        fi
+        if [[ -z "$key" ]]; then
+          echo "ERROR: ANTHROPIC_API_KEY is required when LLM_PROVIDER=anthropic." >&2
+          exit 1
+        fi
+        set_env_value ANTHROPIC_API_KEY "$key"
+        log "Saved Anthropic API key to local .env (gitignored)"
+      fi
+      ;;
+    *)
+      echo "ERROR: Unsupported LLM_PROVIDER '$provider'. Use openai or anthropic." >&2
+      exit 1
+      ;;
+  esac
 }
 
 ensure_minecraft_server() {
@@ -145,13 +192,22 @@ stop_previous_gameplay() {
   local old_pid
   old_pid="$(cat "$GAMEPLAY_PID_FILE" 2>/dev/null || true)"
   if [[ -n "$old_pid" ]] && kill -0 "$old_pid" 2>/dev/null; then
-    log "Stopping previous gameplay process (pid=$old_pid)"
-    kill "$old_pid" 2>/dev/null || true
-    for _ in {1..20}; do
-      kill -0 "$old_pid" 2>/dev/null || break
-      sleep 0.1
-    done
-    kill -9 "$old_pid" 2>/dev/null || true
+    local cmdline=""
+    if [[ -r "/proc/$old_pid/cmdline" ]]; then
+      cmdline="$(tr '\0' ' ' < "/proc/$old_pid/cmdline")"
+    fi
+
+    if [[ "$cmdline" == *"dev-one-touch.sh"* || "$cmdline" == *"run.sh"* ]]; then
+      log "Stopping previous gameplay launcher (pid=$old_pid)"
+      kill "$old_pid" 2>/dev/null || true
+      for _ in {1..20}; do
+        kill -0 "$old_pid" 2>/dev/null || break
+        sleep 0.1
+      done
+      kill -9 "$old_pid" 2>/dev/null || true
+    else
+      log "Ignoring stale gameplay PID $old_pid (belongs to another process)"
+    fi
   fi
   rm -f "$GAMEPLAY_PID_FILE"
 }
@@ -160,7 +216,7 @@ run_gameplay() {
   stop_previous_gameplay
 
   log "Launching gameplay-only AI"
-  log "Close this window or press Ctrl+C to stop the AI. The Minecraft server stays running."
+  log "Close this terminal or press Ctrl+C to stop the AI. The Minecraft server stays running."
 
   echo "$$" > "$GAMEPLAY_PID_FILE"
   trap 'rm -f "$GAMEPLAY_PID_FILE"' EXIT INT TERM
