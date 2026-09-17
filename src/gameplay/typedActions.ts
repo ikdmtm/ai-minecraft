@@ -34,7 +34,7 @@ export interface TypedGameplayDecision {
   direction?: CompassDirection;
   confidence: number;
   reason?: string;
-  source: 'jev' | 'safety' | 'fallback';
+  source: 'jev' | 'openai' | 'safety' | 'fallback';
 }
 
 export interface SkillSnapshot {
