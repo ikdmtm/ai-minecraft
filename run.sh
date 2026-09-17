@@ -3,9 +3,15 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LOG_DIR="$ROOT_DIR/logs/gameplay"
+DEFAULT_TEST_SEED="${AI_MC_TEST_SEED:-8675309}"
 
 if (( $# == 0 )); then
-  set -- start
+  # Gameplay-development default: every run starts from the same fresh world
+  # so before/after behavior can be compared from spawn.
+  set -- reset "$DEFAULT_TEST_SEED"
+elif [[ "${1:-}" == "continue" ]]; then
+  shift
+  set -- start "$@"
 fi
 
 mkdir -p "$LOG_DIR"
