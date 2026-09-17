@@ -108,8 +108,7 @@ export class CognitiveOrchestrator {
     this.running = true;
 
     const typesafeApiKey = process.env.TYPESAFE_API_KEY?.trim();
-    if (!typesafeApiKey) throw new Error('TYPESAFE_API_KEY is required for Jev gameplay mode');
-    if (!this.config.openaiApiKey) throw new Error('OPENAI_API_KEY is required for strategic planning');
+    if (!this.config.openaiApiKey) throw new Error('OPENAI_API_KEY is required for gameplay policy and strategic planning');
 
     this.bot = mineflayer.createBot({
       host: this.config.mcHost,
@@ -126,10 +125,14 @@ export class CognitiveOrchestrator {
     this.safety = new SafetyKernel(this.bot, this.shared, this.executor);
     this.policy = new JevPolicy({
       apiKey: typesafeApiKey,
+      openaiApiKey: this.config.openaiApiKey,
+      provider: parsePolicyProvider(process.env.POLICY_PROVIDER),
       model: process.env.JEV_MODEL?.trim() || 'jev-latest',
+      openaiModel: process.env.OPENAI_POLICY_MODEL?.trim() || 'gpt-5.6-luna',
       baseUrl: process.env.TYPESAFE_BASE_URL?.trim() || undefined,
       confidenceFloor: parseNumber(process.env.JEV_CONFIDENCE_FLOOR, 0.2),
       timeoutMs: parsePositiveInt(process.env.JEV_TIMEOUT_MS, 3_000),
+      openaiTimeoutMs: parsePositiveInt(process.env.OPENAI_POLICY_TIMEOUT_MS, 8_000),
     });
     this.planner = new StrategicPlanner(
       this.shared,
@@ -145,8 +148,8 @@ export class CognitiveOrchestrator {
     this.policyLoopPromise = this.runPolicyLoop();
 
     this.shared.pushEvent({
-      type: 'jev_runtime_started',
-      detail: `model=${process.env.JEV_MODEL?.trim() || 'jev-latest'} interval_ms=${parsePositiveInt(process.env.JEV_INTERVAL_MS, 400)}`,
+      type: 'policy_runtime_started',
+      detail: `provider=${this.policy.getProvider()} model=${this.policy.getModel()} interval_ms=${parsePositiveInt(process.env.JEV_INTERVAL_MS, 400)}`,
       importance: 'medium',
     });
   }
@@ -199,7 +202,7 @@ export class CognitiveOrchestrator {
       } catch (error) {
         console.log(JSON.stringify({
           ts: new Date().toISOString(),
-          kind: 'jev_loop_error',
+          kind: 'policy_loop_error',
           message: error instanceof Error ? error.message : String(error),
         }));
       }
@@ -262,6 +265,12 @@ function parseNumber(raw: string | undefined, fallback: number): number {
   if (!raw) return fallback;
   const value = Number(raw);
   return Number.isFinite(value) ? value : fallback;
+}
+
+function parsePolicyProvider(raw: string | undefined): 'auto' | 'jev' | 'openai' {
+  const value = raw?.trim().toLowerCase();
+  if (value === 'jev' || value === 'openai') return value;
+  return 'auto';
 }
 
 function delay(ms: number): Promise<void> {
