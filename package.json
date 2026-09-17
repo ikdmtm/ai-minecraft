@@ -6,9 +6,9 @@
   "scripts": {
     "build": "tsc",
     "start": "tsx src/index.ts",
-    "start:gameplay": "tsx src/gameplay/bootstrap.ts",
+    "start:gameplay": "tsx src/gameplay/jevMain.ts",
     "dev": "tsx watch src/index.ts",
-    "dev:gameplay": "tsx watch src/gameplay/bootstrap.ts",
+    "dev:gameplay": "tsx watch src/gameplay/jevMain.ts",
     "mc:setup": "bash scripts/mc-setup-local.sh",
     "mc:start": "bash scripts/mc-start-local.sh",
     "mc:stop": "bash scripts/mc-stop-local.sh",
@@ -22,7 +22,7 @@
     "lint": "tsc --noEmit"
   },
   "engines": {
-    "node": ">=20"
+    "node": ">=22"
   },
   "dependencies": {
     "better-sqlite3": "^12.8.0",
