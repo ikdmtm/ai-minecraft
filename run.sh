@@ -2,4 +2,4 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-exec bash "$ROOT_DIR/scripts/dev-one-touch.sh" start
+exec bash "$ROOT_DIR/scripts/dev-one-touch.sh" "${@:-start}"
