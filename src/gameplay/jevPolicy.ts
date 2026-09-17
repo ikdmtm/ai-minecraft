@@ -20,30 +20,77 @@ interface JevResponse {
   answers?: Record<string, JevChoiceAnswer>;
 }
 
+interface OpenAITypedResponse {
+  action?: string;
+  block_target?: string;
+  entity_target?: string;
+  craft_item?: string;
+  direction?: string;
+  confidence?: number;
+}
+
+export type FastPolicyProvider = 'auto' | 'jev' | 'openai';
+
 export interface JevPolicyConfig {
-  apiKey: string;
+  apiKey?: string;
+  openaiApiKey: string;
+  provider?: FastPolicyProvider;
   model?: string;
+  openaiModel?: string;
   baseUrl?: string;
   confidenceFloor?: number;
   timeoutMs?: number;
+  openaiTimeoutMs?: number;
 }
 
 export class JevPolicy {
-  private readonly apiKey: string;
+  private readonly typesafeApiKey: string | null;
+  private readonly openaiApiKey: string;
+  private readonly provider: 'jev' | 'openai';
   private readonly model: string;
+  private readonly openaiModel: string;
   private readonly baseUrl: string;
   private readonly confidenceFloor: number;
   private readonly timeoutMs: number;
+  private readonly openaiTimeoutMs: number;
 
   constructor(config: JevPolicyConfig) {
-    this.apiKey = config.apiKey;
+    this.typesafeApiKey = normalizeSecret(config.apiKey);
+    this.openaiApiKey = config.openaiApiKey;
     this.model = config.model ?? 'jev-latest';
+    this.openaiModel = config.openaiModel ?? 'gpt-5.6-luna';
     this.baseUrl = (config.baseUrl ?? 'https://api.typesafe.ai').replace(/\/$/, '');
     this.confidenceFloor = config.confidenceFloor ?? 0.2;
     this.timeoutMs = config.timeoutMs ?? 3_000;
+    this.openaiTimeoutMs = config.openaiTimeoutMs ?? 8_000;
+
+    const requested = config.provider ?? 'auto';
+    if (requested === 'jev' && !this.typesafeApiKey) {
+      throw new Error('POLICY_PROVIDER=jev requires TYPESAFE_API_KEY');
+    }
+    this.provider = requested === 'openai'
+      ? 'openai'
+      : requested === 'jev'
+        ? 'jev'
+        : this.typesafeApiKey
+          ? 'jev'
+          : 'openai';
+  }
+
+  getProvider(): 'jev' | 'openai' {
+    return this.provider;
+  }
+
+  getModel(): string {
+    return this.provider === 'jev' ? this.model : this.openaiModel;
   }
 
   async decide(state: JevWorldState): Promise<TypedGameplayDecision> {
+    if (this.provider === 'jev') return this.decideWithJev(state);
+    return this.decideWithOpenAI(state);
+  }
+
+  private async decideWithJev(state: JevWorldState): Promise<TypedGameplayDecision> {
     const started = Date.now();
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), this.timeoutMs);
@@ -53,7 +100,7 @@ export class JevPolicy {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          Authorization: `Bearer ${this.apiKey}`,
+          Authorization: `Bearer ${this.typesafeApiKey}`,
         },
         signal: controller.signal,
         body: JSON.stringify({
@@ -62,15 +109,7 @@ export class JevPolicy {
           questions: {
             action: {
               type: 'choice',
-              instructions: [
-                'Choose the single best immediate Minecraft action for the next few seconds.',
-                'Follow strategy.mainGoal and subGoals, but react to the actual world state.',
-                'Prefer CONTINUE when currentSkill is running and still making sense.',
-                'Use EXPLORE when the desired resource is not currently available as a candidate.',
-                'Never choose MINE unless an appropriate block candidate exists.',
-                'Never choose ATTACK or HUNT_FOOD unless an appropriate entity candidate exists.',
-                'Survival is more important than progress when danger is immediate.',
-              ].join(' '),
+              instructions: policyInstructions(),
               criteria: actionCriteria(),
             },
             block_target: {
@@ -105,67 +144,229 @@ export class JevPolicy {
       const data = (await response.json()) as JevResponse;
       const answers = data.answers ?? {};
       const actionAnswer = answers.action ?? {};
-      const rawAction = actionAnswer.choice ?? 'WAIT';
       const confidence = clampConfidence(actionAnswer.confidence);
-      let action = validateAction(rawAction);
-
-      if (confidence < this.confidenceFloor) {
-        action = state.currentSkill.status === 'running' ? 'CONTINUE' : 'EXPLORE';
-      }
-
-      const blockTargetId = validateCandidateChoice(answers.block_target?.choice, state.blockCandidates);
-      const entityTargetId = validateCandidateChoice(answers.entity_target?.choice, state.entityCandidates);
-      const craftItem = validateCraftItem(answers.craft_item?.choice);
-      const direction = validateDirection(answers.direction?.choice);
-
-      const decision: TypedGameplayDecision = {
-        action,
-        blockTargetId,
-        entityTargetId,
-        craftItem,
-        direction,
+      const decision = normalizeDecision({
+        action: actionAnswer.choice,
+        blockTarget: answers.block_target?.choice,
+        entityTarget: answers.entity_target?.choice,
+        craftItem: answers.craft_item?.choice,
+        direction: answers.direction?.choice,
         confidence,
         source: 'jev',
-      };
+      }, state, this.confidenceFloor);
 
-      console.log(JSON.stringify({
-        ts: new Date().toISOString(),
-        kind: 'jev_decision',
-        latency_ms: Date.now() - started,
+      logDecision({
+        provider: 'jev',
         model: this.model,
-        action: decision.action,
-        confidence,
-        block_target: blockTargetId ?? null,
-        entity_target: entityTargetId ?? null,
-        craft_item: craftItem ?? null,
-        direction: direction ?? null,
-        current_skill: state.currentSkill,
-        strategy_goal: state.strategy.mainGoal,
-        action_probabilities: actionAnswer.probabilities ?? null,
-      }));
-
+        started,
+        decision,
+        state,
+        probabilities: actionAnswer.probabilities ?? null,
+      });
       return decision;
     } catch (error) {
-      const fallback: TypedGameplayDecision = {
-        action: state.currentSkill.status === 'running' ? 'CONTINUE' : 'EXPLORE',
-        direction: 'E',
-        confidence: 0,
-        source: 'fallback',
-        reason: error instanceof Error ? error.message : String(error),
-      };
-
-      console.log(JSON.stringify({
-        ts: new Date().toISOString(),
-        kind: 'jev_error',
-        latency_ms: Date.now() - started,
-        message: fallback.reason,
-        fallback_action: fallback.action,
-      }));
-      return fallback;
+      return this.fallback(state, started, 'jev', error);
     } finally {
       clearTimeout(timer);
     }
   }
+
+  private async decideWithOpenAI(state: JevWorldState): Promise<TypedGameplayDecision> {
+    const started = Date.now();
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), this.openaiTimeoutMs);
+
+    try {
+      const response = await fetch('https://api.openai.com/v1/responses', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${this.openaiApiKey}`,
+        },
+        signal: controller.signal,
+        body: JSON.stringify({
+          model: this.openaiModel,
+          store: false,
+          instructions: [
+            'You are the fast System One action policy for an autonomous Minecraft Hardcore bot.',
+            policyInstructions(),
+            'Return only the structured decision required by the schema.',
+            'Targets are IDs from the supplied candidate lists. Never invent target IDs.',
+          ].join(' '),
+          input: JSON.stringify(state),
+          max_output_tokens: 160,
+          text: {
+            format: {
+              type: 'json_schema',
+              name: 'minecraft_fast_policy',
+              strict: true,
+              schema: openAIDecisionSchema(state),
+            },
+          },
+        }),
+      });
+
+      if (!response.ok) {
+        const body = await response.text();
+        throw new Error(`OpenAI policy API ${response.status}: ${body}`);
+      }
+
+      const data = await response.json() as any;
+      const text = extractOpenAIResponseText(data);
+      const parsed = JSON.parse(text) as OpenAITypedResponse;
+      const decision = normalizeDecision({
+        action: parsed.action,
+        blockTarget: parsed.block_target,
+        entityTarget: parsed.entity_target,
+        craftItem: parsed.craft_item,
+        direction: parsed.direction,
+        confidence: clampConfidence(parsed.confidence),
+        source: 'openai',
+      }, state, this.confidenceFloor);
+
+      logDecision({
+        provider: 'openai',
+        model: this.openaiModel,
+        started,
+        decision,
+        state,
+        probabilities: null,
+      });
+      return decision;
+    } catch (error) {
+      return this.fallback(state, started, 'openai', error);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  private fallback(
+    state: JevWorldState,
+    started: number,
+    provider: 'jev' | 'openai',
+    error: unknown,
+  ): TypedGameplayDecision {
+    const fallback: TypedGameplayDecision = {
+      action: state.currentSkill.status === 'running' ? 'CONTINUE' : 'EXPLORE',
+      direction: 'E',
+      confidence: 0,
+      source: 'fallback',
+      reason: error instanceof Error ? error.message : String(error),
+    };
+
+    console.log(JSON.stringify({
+      ts: new Date().toISOString(),
+      kind: 'policy_error',
+      provider,
+      latency_ms: Date.now() - started,
+      message: fallback.reason,
+      fallback_action: fallback.action,
+    }));
+    return fallback;
+  }
+}
+
+function policyInstructions(): string {
+  return [
+    'Choose the single best immediate Minecraft action for the next few seconds.',
+    'Follow strategy.mainGoal and subGoals, but react to the actual world state.',
+    'Prefer CONTINUE when currentSkill is running, appropriate, and still capable of progress.',
+    'Use EXPLORE when the desired resource is not currently available as a candidate.',
+    'Never choose MINE unless an appropriate block candidate exists.',
+    'Never choose ATTACK or HUNT_FOOD unless an appropriate entity candidate exists.',
+    'Choose CRAFT only when inventory plausibly supports the requested recipe.',
+    'Survival is more important than progress when danger is immediate.',
+  ].join(' ');
+}
+
+function openAIDecisionSchema(state: JevWorldState): Record<string, unknown> {
+  return {
+    type: 'object',
+    additionalProperties: false,
+    properties: {
+      action: { type: 'string', enum: GAMEPLAY_ACTIONS },
+      block_target: {
+        type: 'string',
+        enum: ['none', ...state.blockCandidates.map(candidate => candidate.id)],
+      },
+      entity_target: {
+        type: 'string',
+        enum: ['none', ...state.entityCandidates.map(candidate => candidate.id)],
+      },
+      craft_item: { type: 'string', enum: CRAFT_ITEMS },
+      direction: { type: 'string', enum: COMPASS_DIRECTIONS },
+      confidence: { type: 'number', minimum: 0, maximum: 1 },
+    },
+    required: ['action', 'block_target', 'entity_target', 'craft_item', 'direction', 'confidence'],
+  };
+}
+
+function extractOpenAIResponseText(data: any): string {
+  if (typeof data?.output_text === 'string' && data.output_text.trim()) return data.output_text.trim();
+  const parts: string[] = [];
+  for (const item of Array.isArray(data?.output) ? data.output : []) {
+    for (const content of Array.isArray(item?.content) ? item.content : []) {
+      if (content?.type === 'output_text' && typeof content.text === 'string') parts.push(content.text);
+    }
+  }
+  const text = parts.join('\n').trim();
+  if (!text) throw new Error('OpenAI policy returned no output_text');
+  return text;
+}
+
+function normalizeDecision(
+  raw: {
+    action?: string;
+    blockTarget?: string;
+    entityTarget?: string;
+    craftItem?: string;
+    direction?: string;
+    confidence: number;
+    source: 'jev' | 'openai';
+  },
+  state: JevWorldState,
+  confidenceFloor: number,
+): TypedGameplayDecision {
+  let action = validateAction(raw.action ?? 'WAIT');
+  if (raw.confidence < confidenceFloor) {
+    action = state.currentSkill.status === 'running' ? 'CONTINUE' : 'EXPLORE';
+  }
+
+  return {
+    action,
+    blockTargetId: validateCandidateChoice(raw.blockTarget, state.blockCandidates),
+    entityTargetId: validateCandidateChoice(raw.entityTarget, state.entityCandidates),
+    craftItem: validateCraftItem(raw.craftItem),
+    direction: validateDirection(raw.direction),
+    confidence: raw.confidence,
+    source: raw.source,
+  };
+}
+
+function logDecision(args: {
+  provider: 'jev' | 'openai';
+  model: string;
+  started: number;
+  decision: TypedGameplayDecision;
+  state: JevWorldState;
+  probabilities: Record<string, number> | null;
+}): void {
+  console.log(JSON.stringify({
+    ts: new Date().toISOString(),
+    kind: 'policy_decision',
+    provider: args.provider,
+    latency_ms: Date.now() - args.started,
+    model: args.model,
+    action: args.decision.action,
+    confidence: args.decision.confidence,
+    block_target: args.decision.blockTargetId ?? null,
+    entity_target: args.decision.entityTargetId ?? null,
+    craft_item: args.decision.craftItem ?? null,
+    direction: args.decision.direction ?? null,
+    current_skill: args.state.currentSkill,
+    strategy_goal: args.state.strategy.mainGoal,
+    action_probabilities: args.probabilities,
+  }));
 }
 
 function actionCriteria(): Record<GameplayActionType, string> {
@@ -239,4 +440,10 @@ function validateCandidateChoice(value: string | undefined, candidates: WorldCan
 function clampConfidence(value: number | undefined): number {
   if (!Number.isFinite(value)) return 0.5;
   return Math.max(0, Math.min(1, value as number));
+}
+
+function normalizeSecret(value: string | undefined): string | null {
+  const trimmed = value?.trim() ?? '';
+  if (!trimmed || trimmed === 'replace-me' || trimmed === 'changeme') return null;
+  return trimmed;
 }
