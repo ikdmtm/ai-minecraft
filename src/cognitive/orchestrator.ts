@@ -76,6 +76,10 @@ export class CognitiveOrchestrator {
     return this.skillLibrary;
   }
 
+  getBotForDebug() {
+    return this.reflexLayer.getBot();
+  }
+
   isRunning(): boolean {
     return this.running;
   }
