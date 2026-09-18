@@ -11,6 +11,7 @@ import type {
   WorldCandidate,
 } from './typedActions.js';
 import { isFoodAnimal } from './worldSensor.js';
+import type { WorldProvenance } from './worldProvenance.js';
 
 const FOOD_ITEMS = new Set([
   'bread', 'cooked_beef', 'cooked_porkchop', 'cooked_chicken', 'cooked_mutton',
@@ -47,6 +48,7 @@ export class SkillExecutor {
   constructor(
     private readonly bot: mineflayer.Bot,
     private readonly shared: SharedStateBus,
+    private readonly provenance?: WorldProvenance,
   ) {}
 
   snapshot(): SkillSnapshot {
@@ -392,6 +394,7 @@ export class SkillExecutor {
       () => this.bot.stopDigging(),
     );
     this.assertActive(token);
+    this.provenance?.forget(fresh.position);
     this.shared.pushEvent({ type: 'mined', detail: `${fresh.name} with ${held}`, importance: 'low' });
 
     await delay(250);
@@ -539,6 +542,7 @@ export class SkillExecutor {
       () => this.bot.stopDigging(),
     );
     this.assertActive(token);
+    this.provenance?.forget(block.position);
     this.shared.pushEvent({
       type: 'mined',
       detail: `${block.name} with ${held} staircase`,
@@ -681,8 +685,10 @@ export class SkillExecutor {
       if (!ground || ground.name === 'air' || (target && target.name !== 'air')) continue;
       try {
         await this.bot.placeBlock(ground, new Vec3(0, 1, 0));
+        const placedPos = base.offset(dx, 0, dz);
+        this.provenance?.markPlaced(placedPos, 'workstation');
         await delay(150);
-        return this.bot.blockAt(base.offset(dx, 0, dz));
+        return this.bot.blockAt(placedPos);
       } catch {
         // Try another adjacent location.
       }
@@ -729,6 +735,7 @@ export class SkillExecutor {
         }
 
         await this.bot.placeBlock(reference, new Vec3(0, 1, 0));
+        this.provenance?.markPlaced(targetPos, 'structure');
         placed++;
         await delay(80);
       }
@@ -746,6 +753,7 @@ export class SkillExecutor {
       const eastWallTop = this.bot.blockAt(base.offset(1, 1, 0));
       if (!eastWallTop || eastWallTop.name === 'air') throw new Error('shelter_roof_anchor_reference_missing');
       await this.bot.placeBlock(eastWallTop, new Vec3(0, 1, 0));
+      this.provenance?.markPlaced(eastRoofAnchorPos, 'structure');
       await delay(100);
       eastRoofAnchor = this.bot.blockAt(eastRoofAnchorPos);
       if (!eastRoofAnchor || eastRoofAnchor.name === 'air') throw new Error('shelter_roof_anchor_failed');
@@ -760,6 +768,7 @@ export class SkillExecutor {
       await this.bot.equip(item, 'hand');
       if (!eastRoofAnchor || eastRoofAnchor.name === 'air') throw new Error('shelter_roof_reference_missing');
       await this.bot.placeBlock(eastRoofAnchor, new Vec3(-1, 0, 0));
+      this.provenance?.markPlaced(roofPos, 'structure');
       await delay(100);
       const placedRoof = this.bot.blockAt(roofPos);
       if (!placedRoof || placedRoof.name === 'air') throw new Error('shelter_roof_failed');
