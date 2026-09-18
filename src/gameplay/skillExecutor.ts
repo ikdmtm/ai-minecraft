@@ -313,6 +313,140 @@ export class SkillExecutor {
     }
   }
 
+  private normalMovements(): Movements {
+    const movements = new Movements(this.bot);
+    movements.allowSprinting = true;
+    movements.liquidCost = NORMAL_LIQUID_COST;
+    return movements;
+  }
+
+  private async equipAppropriateTool(block: any, token: number): Promise<void> {
+    let order: string[] = [];
+    const name = block?.name ?? '';
+    if (name.endsWith('_log') || name.endsWith('_wood') || name === 'crafting_table') {
+      order = AXE_ORDER;
+    } else if (
+      name === 'stone' || name === 'cobblestone' || name === 'furnace' ||
+      name.endsWith('_ore') || name.startsWith('deepslate_')
+    ) {
+      order = PICKAXE_ORDER;
+    } else if (
+      name === 'dirt' || name === 'grass_block' || name === 'gravel' ||
+      name === 'sand' || name.endsWith('_sand')
+    ) {
+      order = SHOVEL_ORDER;
+    }
+
+    const tool = order
+      .map(toolName => this.bot.inventory.items().find(item => item.name === toolName))
+      .find(Boolean);
+
+    if (tool) {
+      await this.bot.equip(tool, 'hand');
+      this.assertActive(token);
+      return;
+    }
+
+    if (requiresHarvestTool(block)) {
+      throw new Error(`missing_harvest_tool:${name}`);
+    }
+
+    // Using a log/stick/plank as a "tool" is valid to Minecraft but looks
+    // nonsensical and can be slower. Empty hand is the intended fallback.
+    if (this.bot.heldItem) {
+      try { await this.bot.unequip('hand'); } catch { /* best effort */ }
+      this.assertActive(token);
+    }
+  }
+
+  private async digStaircase(direction: CompassDirection, token: number): Promise<void> {
+    const ground = this.bot.blockAt(this.bot.entity.position.offset(0, -1, 0));
+    if (!isSolidGround(ground)) throw new Error('staircase_requires_solid_ground');
+
+    const [rawDx, rawDz] = directionVector(direction);
+    const [dx, dz] = dominantCardinal(rawDx, rawDz);
+    let anchor = this.bot.entity.position.floored();
+    const startingCobble = this.inventoryCount('cobblestone');
+
+    this.updateDetail(`digging_safe_staircase ${direction}`);
+    for (let step = 0; step < 8; step++) {
+      this.assertActive(token);
+      const next = anchor.offset(dx, -1, dz);
+      const headPos = new Vec3(next.x, next.y + 1, next.z);
+      const feetPos = new Vec3(next.x, next.y, next.z);
+      const supportPos = new Vec3(next.x, next.y - 1, next.z);
+      const support = this.bot.blockAt(supportPos);
+
+      if (!isSolidGround(support) || isHazardBlock(support)) {
+        throw new Error('staircase_drop_or_liquid_risk');
+      }
+
+      await this.digAdjacentBlock(headPos, token);
+      await this.digAdjacentBlock(feetPos, token);
+
+      const movements = this.normalMovements();
+      movements.canDig = false;
+      this.bot.pathfinder.setMovements(movements);
+      await withTimeout(
+        this.bot.pathfinder.goto(new goals.GoalBlock(next.x, next.y, next.z)),
+        6_000,
+        'staircase_move_timeout',
+        () => this.bot.pathfinder.stop(),
+      );
+      this.assertActive(token);
+      anchor = next;
+
+      if (this.inventoryCount('cobblestone') - startingCobble >= 6) {
+        this.shared.pushEvent({
+          type: 'staircase_reached_stone',
+          detail: `cobblestone_gained=${this.inventoryCount('cobblestone') - startingCobble}`,
+          importance: 'medium',
+        });
+        return;
+      }
+    }
+
+    const gained = this.inventoryCount('cobblestone') - startingCobble;
+    if (gained <= 0) throw new Error('staircase_no_stone_reached');
+    this.shared.pushEvent({
+      type: 'staircase_reached_stone',
+      detail: `cobblestone_gained=${gained}`,
+      importance: 'medium',
+    });
+  }
+
+  private async digAdjacentBlock(pos: Vec3, token: number): Promise<void> {
+    const block = this.bot.blockAt(pos);
+    if (!block || block.name === 'air') return;
+    if (isHazardBlock(block) || block.name === 'water') throw new Error(`staircase_hazard:${block.name}`);
+    if (!this.bot.canDigBlock(block)) throw new Error(`staircase_cannot_dig:${block.name}`);
+
+    await this.bot.lookAt(block.position.offset(0.5, 0.5, 0.5), true);
+    this.assertActive(token);
+    await this.equipAppropriateTool(block, token);
+
+    const held = this.bot.heldItem?.name ?? 'hand';
+    const expectedDigMs = Math.max(0, Number(this.bot.digTime(block)) || 0);
+    await withTimeout(
+      this.bot.dig(block),
+      Math.min(20_000, Math.max(5_000, expectedDigMs * 3 + 2_000)),
+      `staircase_dig_timeout:${block.name}:${held}`,
+      () => this.bot.stopDigging(),
+    );
+    this.assertActive(token);
+    this.shared.pushEvent({
+      type: 'mined',
+      detail: `${block.name} with ${held} staircase`,
+      importance: 'low',
+    });
+  }
+
+  private inventoryCount(name: string): number {
+    return this.bot.inventory.items()
+      .filter(item => item.name === name)
+      .reduce((total, item) => total + item.count, 0);
+  }
+
   private async craft(item: CraftItem, token: number): Promise<void> {
     if (item === 'none') throw new Error('no_craft_item_selected');
     this.updateDetail(`crafting ${item}`);
