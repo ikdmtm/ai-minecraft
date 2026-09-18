@@ -74,6 +74,21 @@ export class SkillExecutor {
   ): Promise<SkillSnapshot> {
     const beforeId = this.current.id;
     this.dispatch(decision, world, priority);
+
+    const immediate = this.snapshot();
+    if (
+      decision.action !== 'CONTINUE' &&
+      decision.action !== 'WAIT' &&
+      immediate.id === beforeId &&
+      immediate.status !== 'running'
+    ) {
+      return {
+        ...immediate,
+        status: 'failed',
+        detail: `skill_not_started:${decision.action}`,
+      };
+    }
+
     const started = Date.now();
 
     while (Date.now() - started < timeoutMs) {
@@ -427,22 +442,22 @@ export class SkillExecutor {
       return;
     }
 
-    // Let pathfinder/minecraft-data resolve less obvious tool-gated blocks
-    // (diorite, granite, andesite, tuff, etc.) instead of maintaining a
-    // brittle block-name allowlist here.
-    const harvestTool = this.bot.pathfinder.bestHarvestTool(block);
-    if (harvestTool) {
-      await this.bot.equip(harvestTool, 'hand');
-      this.assertActive(token);
-      return;
-    }
-
+    // Use minecraft-data/pathfinder only when the block actually requires a
+    // harvest tool. For tool-optional blocks (logs, leaves, dirt) an arbitrary
+    // held item is not a meaningful "best tool"; prefer empty hand unless a
+    // real preferred tool exists above.
     if (requiresHarvestTool(block)) {
+      const harvestTool = this.bot.pathfinder.bestHarvestTool(block);
+      if (harvestTool) {
+        await this.bot.equip(harvestTool, 'hand');
+        this.assertActive(token);
+        return;
+      }
       throw new Error(`missing_harvest_tool:${name}`);
     }
 
-    // Using a log/stick/plank as a "tool" is valid to Minecraft but looks
-    // nonsensical and can be slower. Empty hand is the intended fallback.
+    // Avoid hitting blocks with crafting tables, logs, sticks, or planks just
+    // because they happen to be in hand.
     if (this.bot.heldItem) {
       try { await this.bot.unequip('hand'); } catch { /* best effort */ }
       this.assertActive(token);
@@ -549,9 +564,18 @@ export class SkillExecutor {
       return;
     }
 
-    if (item === 'sticks' || item === 'crafting_table') {
-      await this.ensurePlanks();
-      await this.craftNamed(item === 'sticks' ? 'stick' : 'crafting_table', null);
+    if (item === 'sticks') {
+      await this.ensurePlankCount(2);
+      await this.craftNamed('stick', null);
+      return;
+    }
+
+    if (item === 'crafting_table') {
+      const nearby = this.bot.findBlock({ matching: block => block.name === 'crafting_table', maxDistance: 8 });
+      const inInventory = this.bot.inventory.items().some(entry => entry.name === 'crafting_table');
+      if (nearby || inInventory) return;
+      await this.ensurePlankCount(4);
+      await this.craftNamed('crafting_table', null);
       return;
     }
 
@@ -580,6 +604,9 @@ export class SkillExecutor {
     }
 
     if (item === 'furnace') {
+      const nearby = this.bot.findBlock({ matching: block => block.name === 'furnace', maxDistance: 8 });
+      const inInventory = this.bot.inventory.items().some(entry => entry.name === 'furnace');
+      if (nearby || inInventory) return;
       if (this.inventoryCount('cobblestone') < 8) {
         throw new Error(`insufficient_cobblestone:${this.inventoryCount('cobblestone')}/8`);
       }
@@ -668,8 +695,14 @@ export class SkillExecutor {
     const underPlayer = this.bot.blockAt(base.offset(0, -1, 0));
     if (!isSolidGround(underPlayer)) throw new Error('shelter_requires_solid_ground');
 
-    // Emergency first-night shelter: four 2-high cardinal walls plus one roof
-    // block over the player. Nine blocks is intentionally affordable early-game.
+    // Preflight before consuming anything. The template uses 8 wall blocks,
+    // one high roof anchor, and one center roof block.
+    const requiredMaterials = 10;
+    const availableMaterials = this.buildMaterialCount();
+    if (availableMaterials < requiredMaterials) {
+      throw new Error(`insufficient_build_material:available=${availableMaterials}/${requiredMaterials}`);
+    }
+
     const walls = [[1, 0], [-1, 0], [0, 1], [0, -1]] as const;
     let placed = 0;
 
@@ -685,7 +718,7 @@ export class SkillExecutor {
         if (existing && existing.name !== 'air') continue;
 
         const item = this.nextBuildItem();
-        if (!item) throw new Error(`insufficient_build_material:placed=${placed}/9`);
+        if (!item) throw new Error(`insufficient_build_material:placed=${placed}/10`);
         await this.bot.equip(item, 'hand');
 
         const reference = dy === 0
@@ -701,20 +734,51 @@ export class SkillExecutor {
       }
     }
 
+    // Create one block at roof height on the east wall, then extend inward.
+    // The previous implementation tried to place the roof into the player's
+    // head space (y+1), which the server correctly rejected.
+    const eastRoofAnchorPos = base.offset(1, 2, 0);
+    let eastRoofAnchor = this.bot.blockAt(eastRoofAnchorPos);
+    if (!eastRoofAnchor || eastRoofAnchor.name === 'air') {
+      const item = this.nextBuildItem();
+      if (!item) throw new Error(`insufficient_build_material:placed=${placed}/10`);
+      await this.bot.equip(item, 'hand');
+      const eastWallTop = this.bot.blockAt(base.offset(1, 1, 0));
+      if (!eastWallTop || eastWallTop.name === 'air') throw new Error('shelter_roof_anchor_reference_missing');
+      await this.bot.placeBlock(eastWallTop, new Vec3(0, 1, 0));
+      await delay(100);
+      eastRoofAnchor = this.bot.blockAt(eastRoofAnchorPos);
+      if (!eastRoofAnchor || eastRoofAnchor.name === 'air') throw new Error('shelter_roof_anchor_failed');
+      placed++;
+    }
+
     const roofPos = base.offset(0, 2, 0);
     const roofExisting = this.bot.blockAt(roofPos);
     if (!roofExisting || roofExisting.name === 'air') {
       const item = this.nextBuildItem();
-      if (!item) throw new Error(`insufficient_build_material:placed=${placed}/9`);
+      if (!item) throw new Error(`insufficient_build_material:placed=${placed}/10`);
       await this.bot.equip(item, 'hand');
-      const eastTop = this.bot.blockAt(base.offset(1, 1, 0));
-      if (!eastTop || eastTop.name === 'air') throw new Error('shelter_roof_reference_missing');
-      await this.bot.placeBlock(eastTop, new Vec3(-1, 0, 0));
+      if (!eastRoofAnchor || eastRoofAnchor.name === 'air') throw new Error('shelter_roof_reference_missing');
+      await this.bot.placeBlock(eastRoofAnchor, new Vec3(-1, 0, 0));
+      await delay(100);
+      const placedRoof = this.bot.blockAt(roofPos);
+      if (!placedRoof || placedRoof.name === 'air') throw new Error('shelter_roof_failed');
       placed++;
     }
 
-    if (placed < 8) throw new Error(`shelter_too_incomplete:placed=${placed}`);
+    if (placed < 9) throw new Error(`shelter_too_incomplete:placed=${placed}`);
     this.shared.pushEvent({ type: 'shelter_built', detail: `placed=${placed}`, importance: 'high' });
+  }
+
+  private buildMaterialCount(): number {
+    return this.bot.inventory.items()
+      .filter(item =>
+        item.name === 'dirt' ||
+        item.name === 'cobblestone' ||
+        item.name.endsWith('_planks') ||
+        item.name.endsWith('_log'),
+      )
+      .reduce((sum, item) => sum + item.count, 0);
   }
 
   private nextBuildItem(): any | null {
