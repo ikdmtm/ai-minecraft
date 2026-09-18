@@ -335,16 +335,16 @@ function dedupeById(targets: SemanticTarget[]): SemanticTarget[] {
 }
 
 function semanticFingerprint(state: Omit<ExecutiveWorldState, 'revision'>): string {
-  const position = state.player.position;
   const inventory = Object.entries(state.inventory)
     .sort(([a], [b]) => a.localeCompare(b))
     .map(([name, count]) => `${name}:${count}`)
     .join(',');
 
+  // Do not include ordinary position drift in the revision. Decisions are made
+  // only at task boundaries, and water/current physics can move the bot while
+  // the model is thinking. Revision tracks semantic changes that can invalidate
+  // a decision: safety context, inventory, strategy, or task lifecycle.
   return [
-    Math.floor(position.x * 2) / 2,
-    Math.floor(position.y * 2) / 2,
-    Math.floor(position.z * 2) / 2,
     state.player.inWater ? 1 : 0,
     state.player.onSolidGround ? 1 : 0,
     Math.round(state.player.hp * 2) / 2,
