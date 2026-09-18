@@ -310,6 +310,11 @@ export class SkillExecutor {
       () => this.bot.pathfinder.stop(),
     );
     this.assertActive(token);
+
+    const finalDistance = this.bot.entity.position.distanceTo(new Vec3(target.x, target.y, target.z));
+    if (finalDistance > 2.25) {
+      throw new Error(`navigate_postcondition_failed:${finalDistance.toFixed(1)}m`);
+    }
   }
 
   private async swimToward(
