@@ -160,7 +160,7 @@ export class TaskExecutor {
     startedGoal: string,
   ): Promise<string> {
     const initial = countLogs(inventoryMap(this.bot));
-    const targetTotal = initial + Math.max(1, requestedAmount);
+    const targetTotal = Math.max(initial, Math.max(1, requestedAmount));
     const triedClusters = new Set<string>();
 
     for (let step = 0; step < 24; step++) {
@@ -235,7 +235,7 @@ export class TaskExecutor {
     if (!hasPickaxe(inventoryMap(this.bot))) throw new Error('stone_requires_pickaxe');
 
     const initial = inventoryMap(this.bot).cobblestone ?? 0;
-    const targetTotal = initial + Math.max(3, requestedAmount);
+    const targetTotal = Math.max(initial, Math.max(3, requestedAmount));
 
     for (let step = 0; step < 24; step++) {
       const current = inventoryMap(this.bot).cobblestone ?? 0;
@@ -291,7 +291,7 @@ export class TaskExecutor {
     startedGoal: string,
   ): Promise<string> {
     const initial = countRawFood(inventoryMap(this.bot));
-    const targetTotal = initial + Math.max(1, requestedAmount);
+    const targetTotal = Math.max(initial, Math.max(1, requestedAmount));
 
     for (let step = 0; step < 8; step++) {
       const current = countRawFood(inventoryMap(this.bot));
