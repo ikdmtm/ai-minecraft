@@ -85,11 +85,77 @@ export class SemanticWorldModel {
 
   private buildTargets(): SemanticTarget[] {
     return [
+      ...this.findShelterSites(),
       ...this.findLandTargets(),
       ...this.findTreeClusters(),
       ...this.findStoneSources(),
       ...this.findFoodSources(),
     ].sort((a, b) => b.score - a.score).slice(0, 24);
+  }
+
+  private findShelterSites(): SemanticTarget[] {
+    const origin = this.bot.entity.position;
+    const candidates: SemanticTarget[] = [];
+    const originY = Math.floor(origin.y);
+
+    for (let radius = 2; radius <= 32; radius += 2) {
+      const samples = Math.max(12, Math.ceil(Math.PI * radius));
+      for (let i = 0; i < samples; i++) {
+        const angle = (Math.PI * 2 * i) / samples;
+        const x = Math.floor(origin.x + Math.cos(angle) * radius);
+        const z = Math.floor(origin.z + Math.sin(angle) * radius);
+        const stand = this.findSurfaceStandableColumn(x, z, originY + 32, originY - 4);
+        if (!stand || !this.isFlatShelterPatch(stand)) continue;
+
+        const distance = distance3(origin, stand);
+        candidates.push({
+          id: `shelter_site:${stand.x}:${stand.y}:${stand.z}`,
+          kind: 'shelter_site',
+          position: stand,
+          distance: round1(distance),
+          score: 180 - distance * 3 - Math.abs(stand.y - origin.y),
+          risk: distance <= 20 ? 'low' : 'medium',
+          metadata: {
+            flat3x3: true,
+            surfaceCandidate: true,
+          },
+        });
+      }
+      if (candidates.length >= 5 && radius >= 12) break;
+    }
+
+    return dedupeById(candidates)
+      .sort((a, b) => b.score - a.score)
+      .slice(0, 5);
+  }
+
+  private findSurfaceStandableColumn(
+    x: number,
+    z: number,
+    topY: number,
+    bottomY: number,
+  ): SemanticPosition | null {
+    for (let y = topY; y >= bottomY; y--) {
+      const floor = this.bot.blockAt(new Vec3(x, y - 1, z));
+      const feet = this.bot.blockAt(new Vec3(x, y, z));
+      const head = this.bot.blockAt(new Vec3(x, y + 1, z));
+      if (!isSolidStand(floor)) continue;
+      if (!isPassable(feet) || !isPassable(head)) continue;
+      return { x, y, z };
+    }
+    return null;
+  }
+
+  private isFlatShelterPatch(center: SemanticPosition): boolean {
+    for (let dx = -1; dx <= 1; dx++) {
+      for (let dz = -1; dz <= 1; dz++) {
+        const floor = this.bot.blockAt(new Vec3(center.x + dx, center.y - 1, center.z + dz));
+        const feet = this.bot.blockAt(new Vec3(center.x + dx, center.y, center.z + dz));
+        const head = this.bot.blockAt(new Vec3(center.x + dx, center.y + 1, center.z + dz));
+        if (!isSolidStand(floor) || !isPassable(feet) || !isPassable(head)) return false;
+      }
+    }
+    return true;
   }
 
   private findLandTargets(): SemanticTarget[] {
