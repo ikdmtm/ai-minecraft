@@ -147,7 +147,7 @@ export class ExecutivePolicy {
         confidence: number;
       };
 
-      const decision: ExecutiveDecision = {
+      const decision = normalizeDecisionParameters(state, {
         task: validateTask(parsed.task),
         targetId: validateTargetId(parsed.target_id, state.targets),
         resource: validateResource(parsed.resource),
@@ -157,7 +157,7 @@ export class ExecutivePolicy {
         confidence: clampConfidence(parsed.confidence),
         source: 'openai',
         basedOnRevision: state.revision,
-      };
+      });
       logDecision(started, this.provider, this.openaiModel, state, decision);
       return decision;
     } catch (error) {
@@ -222,7 +222,7 @@ export class ExecutivePolicy {
 
       const data = (await response.json()) as JevResponse;
       const answers = data.answers ?? {};
-      const decision: ExecutiveDecision = {
+      const decision = normalizeDecisionParameters(state, {
         task: validateTask(answers.task?.choice ?? 'WAIT'),
         targetId: validateTargetId(answers.target?.choice, state.targets),
         resource: validateResource(answers.resource?.choice),
@@ -232,7 +232,7 @@ export class ExecutivePolicy {
         confidence: clampConfidence(answers.task?.confidence),
         source: 'jev',
         basedOnRevision: state.revision,
-      };
+      });
       logDecision(started, this.provider, this.jevModel, state, decision);
       return decision;
     } catch (error) {
@@ -275,7 +275,11 @@ function executiveInstructions(): string {
     'The capabilities listed in capability_reference describe what the body can currently attempt; they are NOT a prescribed progression order.',
     'Do not follow a fixed wood->stone->shelter script unless the actual situation and strategy make that the best choice.',
     'Choose one task and its parameters. The task executor handles low-level pathfinding, repeated mining, collection, and crafting mechanics.',
+    'For GATHER_RESOURCE, amount means the desired TOTAL amount of that resource in inventory when the task finishes, not an additional amount.',
     'Use semantic target IDs when a location or entity target matters. Never invent coordinates or target IDs.',
+    'For logs use a tree_cluster target; for food use a food_source; for cobblestone prefer a visible stone_source or otherwise an excavation_site.',
+    'For BUILD_STRUCTURE(shelter), use a shelter_site target.',
+    'Reuse nearby facilities shown in state.facilities; do not craft duplicate workstations unless there is a concrete reason.',
     'If a previous task failed, use its error in recentEvents to choose a different approach instead of blindly repeating it.',
     'Prefer coherent purposeful behavior over frequent task switching.',
     'Safety emergencies are handled by a separate deterministic kernel; you still should avoid obviously unreasonable risks.',
@@ -285,7 +289,7 @@ function executiveInstructions(): string {
 function capabilityReference(): Record<string, string> {
   return {
     NAVIGATE_TARGET: 'Move to one supplied semantic target such as land, a tree cluster, a stone source, food source, or shelter site.',
-    GATHER_RESOURCE: 'Acquire an amount of a resource. Supported resource abstractions today: logs, cobblestone, food.',
+    GATHER_RESOURCE: 'Reach a desired total inventory amount of a resource. Supported resource abstractions today: logs, cobblestone, food.',
     CRAFT_ITEM: 'Craft one concrete supported item. Recipe prerequisites and crafting-table placement are handled by the body where possible.',
     BUILD_STRUCTURE: 'Build one supported structure at an appropriate semantic target. Supported structure today: shelter.',
     CONTINUE_TASK: 'Continue a currently running task when it remains appropriate.',
@@ -375,6 +379,34 @@ function defaultAmount(): number {
 function clampConfidence(value: number | undefined): number {
   if (!Number.isFinite(value)) return 0.5;
   return Math.max(0, Math.min(1, value as number));
+}
+
+function normalizeDecisionParameters(
+  state: ExecutiveWorldState,
+  decision: ExecutiveDecision,
+): ExecutiveDecision {
+  let targetId = decision.targetId;
+  const target = targetId ? state.targets.find(candidate => candidate.id === targetId) : undefined;
+
+  if (decision.task === 'GATHER_RESOURCE') {
+    const compatibleKinds: Record<ExecutiveResource, SemanticTarget['kind'][]> = {
+      none: [],
+      logs: ['tree_cluster'],
+      cobblestone: ['stone_source', 'excavation_site'],
+      food: ['food_source'],
+    };
+    if (target && !compatibleKinds[decision.resource ?? 'none'].includes(target.kind)) {
+      targetId = undefined;
+    }
+  } else if (
+    decision.task === 'BUILD_STRUCTURE' &&
+    decision.structure === 'shelter' &&
+    target?.kind !== 'shelter_site'
+  ) {
+    targetId = undefined;
+  }
+
+  return { ...decision, targetId };
 }
 
 function normalizeSecret(value: string | undefined): string | null {
