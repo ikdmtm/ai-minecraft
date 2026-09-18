@@ -194,7 +194,8 @@ export class JevPolicy {
             'Targets are IDs from the supplied candidate lists. Never invent target IDs.',
           ].join(' '),
           input: JSON.stringify(state),
-          max_output_tokens: 160,
+          reasoning: { effort: 'none' },
+          max_output_tokens: 512,
           text: {
             format: {
               type: 'json_schema',
@@ -212,6 +213,10 @@ export class JevPolicy {
       }
 
       const data = await response.json() as any;
+      if (data?.status === 'incomplete') {
+        const reason = data?.incomplete_details?.reason ?? 'unknown';
+        throw new Error(`OpenAI policy incomplete:${reason}`);
+      }
       const text = extractOpenAIResponseText(data);
       const parsed = JSON.parse(text) as OpenAITypedResponse;
       const decision = normalizeDecision({
