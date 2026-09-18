@@ -184,13 +184,13 @@ export class SkillExecutor {
           await this.mine(this.findBlockCandidate(world, decision.blockTargetId), token);
           break;
         case 'DIG_STAIRCASE':
-          await this.digStaircase(decision.direction ?? 'E', token);
+          await this.digStaircase(decision.direction ?? 'E', token, decision.targetPosition);
           break;
         case 'CRAFT':
           await this.craft(decision.craftItem ?? 'planks', token);
           break;
         case 'BUILD_SHELTER':
-          await this.buildShelter(token);
+          await this.buildShelter(token, decision.targetPosition);
           break;
         case 'HUNT_FOOD':
           await this.huntFood(this.findEntityCandidate(world, decision.entityTargetId), token);
@@ -411,6 +411,53 @@ export class SkillExecutor {
     }
   }
 
+  private async moveToExactAnchor(
+    target: { x: number; y: number; z: number },
+    token: number,
+  ): Promise<void> {
+    const exact = new Vec3(Math.floor(target.x), Math.floor(target.y), Math.floor(target.z));
+    const current = this.bot.entity.position.floored();
+    if (current.x === exact.x && current.y === exact.y && current.z === exact.z) return;
+
+    const movements = this.normalMovements();
+    movements.canDig = false;
+    this.bot.pathfinder.setMovements(movements);
+    await withTimeout(
+      this.bot.pathfinder.goto(new goals.GoalBlock(exact.x, exact.y, exact.z)),
+      6_000,
+      'anchor_position_timeout',
+      () => this.bot.pathfinder.stop(),
+    );
+    this.assertActive(token);
+  }
+
+  private async collectNearbyDrops(token: number, maxDistance: number): Promise<void> {
+    for (let attempt = 0; attempt < 4; attempt++) {
+      this.assertActive(token);
+      const item = this.bot.nearestEntity(entity =>
+        entity.name === 'item' &&
+        Boolean(entity.position) &&
+        this.bot.entity.position.distanceTo(entity.position) <= maxDistance,
+      );
+      if (!item?.position) return;
+
+      const movements = this.normalMovements();
+      movements.canDig = false;
+      this.bot.pathfinder.setMovements(movements);
+      try {
+        await withTimeout(
+          this.bot.pathfinder.goto(new goals.GoalNear(item.position.x, item.position.y, item.position.z, 1)),
+          2_500,
+          'drop_collect_timeout',
+          () => this.bot.pathfinder.stop(),
+        );
+      } catch {
+        return;
+      }
+      await delay(120);
+    }
+  }
+
   private normalMovements(): Movements {
     const movements = new Movements(this.bot);
     movements.allowSprinting = true;
@@ -467,17 +514,24 @@ export class SkillExecutor {
     }
   }
 
-  private async digStaircase(direction: CompassDirection, token: number): Promise<void> {
+  private async digStaircase(
+    direction: CompassDirection,
+    token: number,
+    targetPosition?: { x: number; y: number; z: number },
+  ): Promise<void> {
+    if (targetPosition) await this.moveToExactAnchor(targetPosition, token);
     const ground = this.bot.blockAt(this.bot.entity.position.offset(0, -1, 0));
     if (!isSolidGround(ground)) throw new Error('staircase_requires_solid_ground');
 
     const [rawDx, rawDz] = directionVector(direction);
     const [dx, dz] = dominantCardinal(rawDx, rawDz);
-    let anchor = this.bot.entity.position.floored();
+    let anchor = targetPosition
+      ? new Vec3(Math.floor(targetPosition.x), Math.floor(targetPosition.y), Math.floor(targetPosition.z))
+      : this.bot.entity.position.floored();
     const startingCobble = this.inventoryCount('cobblestone');
 
     this.updateDetail(`digging_safe_staircase ${direction}`);
-    for (let step = 0; step < 8; step++) {
+    for (let step = 0; step < 4; step++) {
       this.assertActive(token);
       const next = anchor.offset(dx, -1, dz);
       const headPos = new Vec3(next.x, next.y + 1, next.z);
@@ -503,6 +557,7 @@ export class SkillExecutor {
       );
       this.assertActive(token);
       anchor = next;
+      await this.collectNearbyDrops(token, 3.5);
 
       if (this.inventoryCount('cobblestone') - startingCobble >= 6) {
         this.shared.pushEvent({
@@ -527,10 +582,10 @@ export class SkillExecutor {
     const block = this.bot.blockAt(pos);
     if (!block || block.name === 'air') return;
     if (isHazardBlock(block) || block.name === 'water') throw new Error(`staircase_hazard:${block.name}`);
-    if (!this.bot.canDigBlock(block)) throw new Error(`staircase_cannot_dig:${block.name}`);
 
     await this.bot.lookAt(block.position.offset(0.5, 0.5, 0.5), true);
     this.assertActive(token);
+    if (!this.bot.canDigBlock(block)) throw new Error(`staircase_cannot_dig:${block.name}`);
     await this.equipAppropriateTool(block, token);
 
     const held = this.bot.heldItem?.name ?? 'hand';
@@ -696,8 +751,14 @@ export class SkillExecutor {
     return null;
   }
 
-  private async buildShelter(token: number): Promise<void> {
-    const base = this.bot.entity.position.floored();
+  private async buildShelter(
+    token: number,
+    targetPosition?: { x: number; y: number; z: number },
+  ): Promise<void> {
+    if (targetPosition) await this.moveToExactAnchor(targetPosition, token);
+    const base = targetPosition
+      ? new Vec3(Math.floor(targetPosition.x), Math.floor(targetPosition.y), Math.floor(targetPosition.z))
+      : this.bot.entity.position.floored();
     const underPlayer = this.bot.blockAt(base.offset(0, -1, 0));
     if (!isSolidGround(underPlayer)) throw new Error('shelter_requires_solid_ground');
 
@@ -776,6 +837,7 @@ export class SkillExecutor {
     }
 
     if (placed < 9) throw new Error(`shelter_too_incomplete:placed=${placed}`);
+    this.provenance?.markStructure('shelter', base);
     this.shared.pushEvent({ type: 'shelter_built', detail: `placed=${placed}`, importance: 'high' });
   }
 
