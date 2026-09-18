@@ -7,6 +7,7 @@ import type {
   SemanticPosition,
   SemanticTarget,
 } from './executiveTypes.js';
+import type { WorldProvenance } from './worldProvenance.js';
 
 const LOG_NAMES = new Set([
   'oak_log', 'birch_log', 'spruce_log', 'jungle_log', 'acacia_log',
@@ -31,6 +32,7 @@ export class SemanticWorldModel {
   constructor(
     private readonly bot: mineflayer.Bot,
     private readonly shared: SharedStateBus,
+    private readonly provenance?: WorldProvenance,
   ) {}
 
   capture(activeTask: ExecutiveTaskSnapshot): ExecutiveWorldState {
@@ -312,7 +314,8 @@ export class SemanticWorldModel {
 
     const logs = positions
       .map(pos => this.bot.blockAt(pos))
-      .filter((block): block is NonNullable<typeof block> => Boolean(block && LOG_NAMES.has(block.name)));
+      .filter((block): block is NonNullable<typeof block> => Boolean(block && LOG_NAMES.has(block.name)))
+      .filter(block => !this.provenance?.isPlayerPlaced(block.position));
 
     const groups: Array<{ blocks: typeof logs; cx: number; cz: number }> = [];
     for (const block of logs) {
