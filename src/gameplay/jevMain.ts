@@ -116,6 +116,8 @@ function attachDiagnostics(): void {
   add(bot, 'health', () => logEvent('health_changed', { hp: bot.health, hunger: bot.food }));
   add(bot.pathfinder, 'goal_reached', () => logEvent('path_goal_reached', {
     position: positionOf(bot),
+    task: orchestrator.getExecutiveWorldState()?.activeTask ?? null,
+    task: orchestrator.getExecutiveWorldState()?.activeTask ?? null,
     skill: orchestrator.getJevWorldState()?.currentSkill ?? null,
   }));
   add(bot.pathfinder, 'path_reset', (reason: unknown) => logEvent('path_reset', {
@@ -176,6 +178,7 @@ function startStatusLogging(): void {
     const state = shared.get();
     const runtime = orchestrator.getGameplaySnapshot();
     const jevState = orchestrator.getJevWorldState();
+    const executiveState = orchestrator.getExecutiveWorldState();
 
     if (runtime) {
       const alert = progressMonitor.observe(runtime);
@@ -187,6 +190,7 @@ function startStatusLogging(): void {
           reflex_state: alert.reflexState,
           position: runtime.position,
           inventory: runtime.inventory,
+          current_task: executiveState?.activeTask ?? null,
           current_skill: jevState?.currentSkill ?? null,
         });
       }
@@ -202,7 +206,10 @@ function startStatusLogging(): void {
       survival_seconds: Math.round(shared.getSurvivalMinutes() * 60),
       strategy_goal: state.currentGoal || null,
       sub_goals: state.subGoals,
+      task: executiveState?.activeTask ?? null,
       skill: jevState?.currentSkill ?? null,
+      semantic_revision: executiveState?.revision ?? null,
+      semantic_targets: executiveState?.targets.slice(0, 10) ?? [],
       threat_level: state.threatLevel,
       hp: runtime?.hp ?? null,
       hunger: runtime?.hunger ?? null,
@@ -217,7 +224,7 @@ function startStatusLogging(): void {
 
 async function main(): Promise<void> {
   logEvent('startup', {
-    mode: 'gameplay-typed-policy',
+    mode: 'gameplay-architecture-v2',
     run_log: process.env.AI_MC_RUN_LOG ?? null,
     minecraft_host: process.env.MINECRAFT_HOST?.trim() || 'localhost',
     minecraft_port: parsePositiveInt(process.env.MINECRAFT_PORT, 25565),
@@ -225,7 +232,7 @@ async function main(): Promise<void> {
     policy_provider: process.env.POLICY_PROVIDER?.trim() || 'auto',
     jev_model: process.env.JEV_MODEL?.trim() || 'jev-latest',
     openai_policy_model: process.env.OPENAI_POLICY_MODEL?.trim() || 'gpt-5.6-luna',
-    policy_interval_ms: parsePositiveInt(process.env.JEV_INTERVAL_MS, 400),
+    policy_mode: 'event_driven_task_boundaries',
     strategic_model: process.env.STRATEGIC_MODEL?.trim() || DEFAULT_STRATEGIC_MODEL,
   });
 
@@ -244,7 +251,7 @@ async function main(): Promise<void> {
   attachDiagnostics();
   startViewer();
   startStatusLogging();
-  logEvent('ready', { message: 'Typed policy runtime active. Safety is deterministic; normal action selection uses Jev when available, otherwise OpenAI Structured Outputs.' });
+  logEvent('ready', { message: 'Gameplay Architecture v2 active: semantic world model, event-driven executive tasks, deterministic safety, and stateful skills.' });
 }
 
 process.once('SIGINT', () => shutdown('SIGINT'));
