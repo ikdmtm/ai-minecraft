@@ -100,7 +100,7 @@ export class CognitiveOrchestrator {
 
   getJevWorldState(): JevWorldState | null {
     if (!this.sensor || !this.executor) return null;
-    return this.sensor.capture(this.executor.snapshot());
+    return this.captureWorldState();
   }
 
   async start(events: CognitiveEvents): Promise<void> {
@@ -138,7 +138,7 @@ export class CognitiveOrchestrator {
       this.shared,
       this.config.openaiApiKey,
       this.config.strategicModel,
-      () => this.sensor!.capture(this.executor!.snapshot()),
+      () => this.captureWorldState(),
       goal => events.onGoalChanged(goal),
     );
 
@@ -194,7 +194,7 @@ export class CognitiveOrchestrator {
       const started = Date.now();
       try {
         if (!this.sensor || !this.executor || !this.policy) break;
-        const state = this.sensor.capture(this.executor.snapshot());
+        const state = this.captureWorldState();
         const decision = await this.policy.decide(state);
         if (!this.running) break;
         this.shared.markTacticalUpdate();
@@ -209,6 +209,18 @@ export class CognitiveOrchestrator {
       const elapsed = Date.now() - started;
       await delay(Math.max(25, intervalMs - elapsed));
     }
+  }
+
+  private captureWorldState(): JevWorldState {
+    if (!this.sensor || !this.executor) throw new Error('Gameplay runtime not initialized');
+    const state = this.sensor.capture(this.executor.snapshot());
+    state.blockCandidates = state.blockCandidates.filter(candidate =>
+      !this.executor!.isTargetTemporarilyBlocked(candidate.id),
+    );
+    state.entityCandidates = state.entityCandidates.filter(candidate =>
+      !this.executor!.isTargetTemporarilyBlocked(candidate.id),
+    );
+    return state;
   }
 
   private setupBotEvents(events: CognitiveEvents): void {
