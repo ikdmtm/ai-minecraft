@@ -73,9 +73,11 @@ export class SkillExecutor {
     const targetId = decision.blockTargetId ?? decision.entityTargetId ?? null;
     if (
       this.current.status === 'running' &&
-      this.current.action === decision.action &&
-      this.current.targetId === targetId
+      this.current.action === decision.action
     ) {
+      // Commit to a skill once started. Fast policies may see a slightly newer
+      // candidate list on every call; switching from one MINE target to another
+      // mid-route creates thrashing instead of human-like follow-through.
       return;
     }
 
@@ -236,25 +238,54 @@ export class SkillExecutor {
     const block = this.bot.blockAt(pos);
     if (!block || block.name === 'air') throw new Error(`target_block_missing:${candidate.id}`);
 
-    this.updateDetail(`moving_to ${block.name} ${block.position.x},${block.position.y},${block.position.z}`);
+    this.updateDetail(`moving_to_visible_face ${block.name} ${block.position.x},${block.position.y},${block.position.z}`);
     const movements = new Movements(this.bot);
     movements.allowSprinting = true;
     this.bot.pathfinder.setMovements(movements);
-    await this.bot.pathfinder.goto(new goals.GoalNear(block.position.x, block.position.y, block.position.z, 2));
+
+    await withTimeout(
+      this.bot.pathfinder.goto(new goals.GoalLookAtBlock(block.position, this.bot.world, { reach: 4.2 })),
+      12_000,
+      `mine_path_timeout:${block.name}`,
+      () => this.bot.pathfinder.stop(),
+    );
     this.assertActive(token);
 
     const fresh = this.bot.blockAt(pos);
     if (!fresh || fresh.name === 'air') return;
+    if (!this.bot.canSeeBlock(fresh)) throw new Error(`target_not_visible:${fresh.name}`);
     if (!this.bot.canDigBlock(fresh)) throw new Error(`cannot_dig:${fresh.name}`);
-    this.updateDetail(`digging ${fresh.name}`);
-    await this.bot.dig(fresh);
+
+    const tool = this.bot.pathfinder.bestHarvestTool(fresh);
+    if (tool) {
+      await this.bot.equip(tool, 'hand');
+      this.assertActive(token);
+    } else if (requiresHarvestTool(fresh)) {
+      throw new Error(`missing_harvest_tool:${fresh.name}`);
+    }
+
+    const held = this.bot.heldItem?.name ?? 'hand';
+    this.updateDetail(`digging ${fresh.name} with ${held}`);
+    const expectedDigMs = Math.max(0, Number(this.bot.digTime(fresh)) || 0);
+    const digTimeoutMs = Math.min(30_000, Math.max(5_000, expectedDigMs * 3 + 2_000));
+    await withTimeout(
+      this.bot.dig(fresh),
+      digTimeoutMs,
+      `dig_timeout:${fresh.name}:${held}`,
+      () => this.bot.stopDigging(),
+    );
     this.assertActive(token);
-    this.shared.pushEvent({ type: 'mined', detail: fresh.name, importance: 'low' });
+    this.shared.pushEvent({ type: 'mined', detail: `${fresh.name} with ${held}`, importance: 'low' });
 
     await delay(250);
     this.assertActive(token);
     try {
-      await this.bot.pathfinder.goto(new goals.GoalNear(pos.x, pos.y, pos.z, 1));
+      await withTimeout(
+        this.bot.pathfinder.goto(new goals.GoalNear(pos.x, pos.y, pos.z, 1)),
+        4_000,
+        'pickup_path_timeout',
+        () => this.bot.pathfinder.stop(),
+      );
     } catch {
       // Picking up the drop is best effort; mining already succeeded.
     }
@@ -536,4 +567,42 @@ function isDangerous(name: string): boolean {
 
 function delay(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+
+function requiresHarvestTool(block: any): boolean {
+  const tools = block?.harvestTools;
+  return Boolean(tools && typeof tools === 'object' && Object.keys(tools).length > 0);
+}
+
+function withTimeout<T>(
+  promise: Promise<T>,
+  timeoutMs: number,
+  message: string,
+  onTimeout?: () => void,
+): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    let settled = false;
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      try { onTimeout?.(); } catch { /* best effort */ }
+      reject(new Error(message));
+    }, timeoutMs);
+
+    promise.then(
+      value => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        resolve(value);
+      },
+      error => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        reject(error);
+      },
+    );
+  });
 }
