@@ -33,7 +33,7 @@ export class WorldSensor {
       player: {
         hp: this.bot.health,
         hunger: this.bot.food,
-        oxygen: this.bot.oxygenLevel ?? 300,
+        oxygen: isHeadSubmerged(this.bot) ? (this.bot.oxygenLevel ?? 20) : 20,
         onFire: Boolean((this.bot.entity as any).isOnFire),
         position: { x: position.x, y: position.y, z: position.z },
         heldItem: this.bot.heldItem?.name ?? null,
@@ -79,6 +79,13 @@ export class WorldSensor {
       const block = this.bot.blockAt(pos);
       if (!block || !TRACKED_BLOCKS.has(block.name)) continue;
       const distance = origin.distanceTo(block.position);
+
+      // Underground stone/ore that has no visible face is not an immediately
+      // executable mining target. Keep logs available because leaves can
+      // surround a reachable trunk, but require mineral/workstation blocks
+      // to be visible from the current player position.
+      if (!block.name.endsWith('_log') && !this.bot.canSeeBlock(block)) continue;
+
       result.push({
         id: `block:${block.name}:${block.position.x}:${block.position.y}:${block.position.z}`,
         kind: 'block',
@@ -137,4 +144,10 @@ export function isHostileMob(name: string): boolean {
 
 export function isFoodAnimal(name: string): boolean {
   return FOOD_ANIMALS.has(name);
+}
+
+
+function isHeadSubmerged(bot: mineflayer.Bot): boolean {
+  const head = bot.blockAt(bot.entity.position.offset(0, 1.62, 0))?.name ?? '';
+  return head === 'water' || head === 'bubble_column';
 }
