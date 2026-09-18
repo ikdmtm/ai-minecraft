@@ -2,6 +2,7 @@ export type GameplayActionType =
   | 'CONTINUE'
   | 'EXPLORE'
   | 'MINE'
+  | 'DIG_STAIRCASE'
   | 'CRAFT'
   | 'BUILD_SHELTER'
   | 'HUNT_FOOD'
@@ -89,6 +90,7 @@ export const GAMEPLAY_ACTIONS: GameplayActionType[] = [
   'CONTINUE',
   'EXPLORE',
   'MINE',
+  'DIG_STAIRCASE',
   'CRAFT',
   'BUILD_SHELTER',
   'HUNT_FOOD',
