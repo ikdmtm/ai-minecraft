@@ -68,6 +68,7 @@ export interface ExecutiveWorldState {
     craftingTableNearby: boolean;
     furnaceNearby: boolean;
     bedNearby: boolean;
+    shelterNearby: boolean;
   };
   strategy: {
     mainGoal: string;
