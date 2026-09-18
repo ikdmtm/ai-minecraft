@@ -82,11 +82,14 @@ export class TaskExecutor {
         case 'ACQUIRE_STONE':
           detail = await this.acquireStone(decision.amount ?? 12, startedGoal);
           break;
+        case 'UPGRADE_STONE_TOOLS':
+          detail = await this.upgradeStoneTools(startedGoal);
+          break;
         case 'GATHER_FOOD':
           detail = await this.gatherFood(decision.amount ?? 4, decision.targetId, startedGoal);
           break;
         case 'ESTABLISH_SHELTER':
-          detail = await this.establishShelter(startedGoal);
+          detail = await this.establishShelter(decision.targetId, startedGoal);
           break;
         case 'WAIT':
           await delay(500);
@@ -285,6 +288,46 @@ export class TaskExecutor {
     throw new Error('stone_task_step_limit');
   }
 
+  private async upgradeStoneTools(startedGoal: string): Promise<string> {
+    const crafted: string[] = [];
+
+    const craftIfMissing = async (item: 'stone_pickaxe' | 'stone_axe' | 'stone_sword' | 'furnace') => {
+      if (this.bot.inventory.items().some(entry => entry.name === item)) return;
+      const result = await this.runPrimitive({
+        action: 'CRAFT',
+        craftItem: item,
+        confidence: 1,
+        source: 'task',
+        reason: 'stone_tool_upgrade_chain',
+      }, 25_000);
+      if (result.status !== 'succeeded') throw new Error(`stone_upgrade_failed:${item}:${result.detail}`);
+      crafted.push(item);
+      this.safeCheckpoint(startedGoal, `crafted_${item}`);
+    };
+
+    if (!this.bot.inventory.items().some(entry => entry.name === 'stone_pickaxe')) {
+      if ((inventoryMap(this.bot).cobblestone ?? 0) < 3) {
+        throw new Error('need_more_cobblestone_for_stone_pickaxe');
+      }
+      await craftIfMissing('stone_pickaxe');
+    }
+
+    if ((inventoryMap(this.bot).cobblestone ?? 0) >= 3) {
+      await craftIfMissing('stone_axe');
+    }
+    if ((inventoryMap(this.bot).cobblestone ?? 0) >= 2) {
+      await craftIfMissing('stone_sword');
+    }
+    if ((inventoryMap(this.bot).cobblestone ?? 0) >= 8) {
+      await craftIfMissing('furnace');
+    }
+
+    if (!this.bot.inventory.items().some(entry => entry.name === 'stone_pickaxe')) {
+      throw new Error('stone_pickaxe_missing_after_upgrade');
+    }
+    return crafted.length > 0 ? `crafted:${crafted.join(',')}` : 'stone_tools_already_ready';
+  }
+
   private async gatherFood(
     requestedAmount: number,
     targetId: string | undefined,
@@ -342,21 +385,80 @@ export class TaskExecutor {
     throw new Error('food_task_step_limit');
   }
 
-  private async establishShelter(startedGoal: string): Promise<string> {
-    const state = this.semantic.capture(this.snapshot());
-    if (state.player.inWater || !state.player.onSolidGround) {
-      throw new Error('shelter_requires_land');
+  private async establishShelter(
+    targetId: string | undefined,
+    startedGoal: string,
+  ): Promise<string> {
+    const tried = new Set<string>();
+
+    for (let attempt = 0; attempt < 4; attempt++) {
+      const state = this.semantic.capture(this.snapshot());
+      const sites = state.targets
+        .filter(target => target.kind === 'shelter_site' && !tried.has(target.id))
+        .sort((a, b) => {
+          if (a.id === targetId) return -1;
+          if (b.id === targetId) return 1;
+          return b.score - a.score;
+        });
+      const site = sites[0];
+      if (!site) throw new Error('no_buildable_shelter_site');
+      tried.add(site.id);
+
+      this.update('establishing_shelter', {
+        stage: 'navigating',
+        site: site.id,
+        attempt: attempt + 1,
+      });
+
+      const distance = Math.hypot(
+        this.bot.entity.position.x - site.position.x,
+        this.bot.entity.position.y - site.position.y,
+        this.bot.entity.position.z - site.position.z,
+      );
+      if (distance > 1.5) {
+        const nav = await this.runPrimitive({
+          action: 'NAVIGATE',
+          targetPosition: site.position,
+          confidence: 1,
+          source: 'task',
+          reason: 'navigate_buildable_shelter_site',
+        }, 30_000);
+        if (nav.status === 'interrupted') {
+          throw new Error('task_replan:shelter_navigation_interrupted');
+        }
+        if (nav.status !== 'succeeded') continue;
+      }
+
+      const arrived = this.semantic.capture(this.snapshot());
+      if (arrived.player.inWater || !arrived.player.onSolidGround) continue;
+
+      this.update('establishing_shelter', {
+        stage: 'building',
+        site: site.id,
+        attempt: attempt + 1,
+      });
+      const result = await this.runPrimitive({
+        action: 'BUILD_SHELTER',
+        confidence: 1,
+        source: 'task',
+        reason: 'semantic_first_night_shelter',
+      }, 30_000);
+
+      if (result.status === 'succeeded') {
+        this.safeCheckpoint(startedGoal, 'shelter_built');
+        return `shelter_built:${site.id}`;
+      }
+      if (result.status === 'interrupted') {
+        throw new Error('task_replan:shelter_build_interrupted');
+      }
+      if (result.detail.includes('insufficient_build_material')) {
+        throw new Error(`shelter_failed:${result.detail}`);
+      }
+
+      this.safeCheckpoint(startedGoal, 'shelter_site_rejected');
     }
-    this.update('establishing_shelter', { stage: 'building' });
-    const result = await this.runPrimitive({
-      action: 'BUILD_SHELTER',
-      confidence: 1,
-      source: 'task',
-      reason: 'semantic_first_night_shelter',
-    }, 30_000);
-    if (result.status !== 'succeeded') throw new Error(`shelter_failed:${result.detail}`);
-    this.safeCheckpoint(startedGoal, 'shelter_built');
-    return 'shelter_built';
+
+    throw new Error('shelter_failed:no_viable_site_after_retries');
   }
 
   private async runPrimitive(
