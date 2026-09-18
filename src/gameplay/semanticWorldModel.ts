@@ -401,7 +401,12 @@ export class SemanticWorldModel {
         const floor = this.bot.blockAt(new Vec3(x + dx, standY - 1, z + dz));
         const feet = this.bot.blockAt(new Vec3(x + dx, standY, z + dz));
         const head = this.bot.blockAt(new Vec3(x + dx, standY + 1, z + dz));
-        if (isSolidStand(floor) && isPassable(feet) && isPassable(head)) {
+        if (
+          isSolidStand(floor) &&
+          isStableTreeApproachGround(floor) &&
+          isPassable(feet) &&
+          isPassable(head)
+        ) {
           return { x: x + dx, y: standY, z: z + dz };
         }
       }
@@ -590,4 +595,13 @@ function isExcavatableVolume(block: any | null): boolean {
   if (block.name === 'air' || block.boundingBox === 'empty') return true;
   if (WATERLIKE.has(block.name) || block.name === 'lava') return false;
   return isExcavationMaterial(block);
+}
+
+
+function isStableTreeApproachGround(block: any | null): boolean {
+  if (!block) return false;
+  const name = block.name ?? '';
+  if (name.endsWith('_leaves') || name.endsWith('_log') || name.endsWith('_wood')) return false;
+  if (name === 'scaffolding' || name === 'vine' || name === 'ladder') return false;
+  return true;
 }
