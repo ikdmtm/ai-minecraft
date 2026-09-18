@@ -730,7 +730,7 @@ export class SkillExecutor {
   private async sleepInBed(token: number): Promise<void> {
     const bed = this.bot.findBlock({ matching: block => block.name.includes('bed'), maxDistance: 32 });
     if (!bed) throw new Error('no_bed_nearby');
-    const movements = new Movements(this.bot);
+    const movements = this.normalMovements();
     this.bot.pathfinder.setMovements(movements);
     await this.bot.pathfinder.goto(new goals.GoalNear(bed.position.x, bed.position.y, bed.position.z, 2));
     this.assertActive(token);
