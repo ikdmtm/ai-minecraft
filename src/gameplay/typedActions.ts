@@ -1,5 +1,6 @@
 export type GameplayActionType =
   | 'CONTINUE'
+  | 'NAVIGATE'
   | 'EXPLORE'
   | 'MINE'
   | 'DIG_STAIRCASE'
@@ -33,9 +34,10 @@ export interface TypedGameplayDecision {
   entityTargetId?: string;
   craftItem?: CraftItem;
   direction?: CompassDirection;
+  targetPosition?: { x: number; y: number; z: number };
   confidence: number;
   reason?: string;
-  source: 'jev' | 'openai' | 'safety' | 'fallback';
+  source: 'jev' | 'openai' | 'safety' | 'fallback' | 'task';
 }
 
 export interface SkillSnapshot {
@@ -88,6 +90,7 @@ export interface JevWorldState {
 
 export const GAMEPLAY_ACTIONS: GameplayActionType[] = [
   'CONTINUE',
+  'NAVIGATE',
   'EXPLORE',
   'MINE',
   'DIG_STAIRCASE',
