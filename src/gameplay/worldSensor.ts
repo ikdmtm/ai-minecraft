@@ -80,11 +80,10 @@ export class WorldSensor {
       if (!block || !TRACKED_BLOCKS.has(block.name)) continue;
       const distance = origin.distanceTo(block.position);
 
-      // Underground stone/ore that has no visible face is not an immediately
-      // executable mining target. Keep logs available because leaves can
-      // surround a reachable trunk, but require mineral/workstation blocks
-      // to be visible from the current player position.
-      if (!block.name.endsWith('_log') && !this.bot.canSeeBlock(block)) continue;
+      // Only expose targets the bot can currently see. The policy should choose
+      // among executable affordances, not hidden blocks inside a canopy or underground.
+      // Hidden resources are reached through EXPLORE / DIG_STAIRCASE first.
+      if (!this.bot.canSeeBlock(block)) continue;
 
       result.push({
         id: `block:${block.name}:${block.position.x}:${block.position.y}:${block.position.z}`,
