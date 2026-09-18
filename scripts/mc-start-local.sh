@@ -32,7 +32,11 @@ fi
 cd "$MC_DIR"
 : > "$LOG_FILE"
 
-nohup java "-Xms$XMS" "-Xmx$XMX" -jar server.jar nogui >> "$LOG_FILE" 2>&1 &
+# Fully detach the Java server from the one-touch launcher.
+# Redirect stdin as well as stdout/stderr and create a new session so npm/bash
+# cannot keep the reset command alive through the server process.
+nohup setsid java "-Xms$XMS" "-Xmx$XMX" -jar server.jar nogui \
+  </dev/null >> "$LOG_FILE" 2>&1 &
 PID=$!
 echo "$PID" > "$PID_FILE"
 
