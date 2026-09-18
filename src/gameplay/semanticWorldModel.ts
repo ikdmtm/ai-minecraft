@@ -97,7 +97,7 @@ export class SemanticWorldModel {
 
     // Sample nearby columns instead of asking the policy for compass directions.
     // This turns "find shore" into concrete, geolocated affordances.
-    for (let radius = 2; radius <= 24; radius += 2) {
+    for (let radius = 2; radius <= 48; radius += 2) {
       const samples = Math.max(12, Math.ceil(Math.PI * radius));
       for (let i = 0; i < samples; i++) {
         const angle = (Math.PI * 2 * i) / samples;
@@ -130,7 +130,7 @@ export class SemanticWorldModel {
 
   private findStandableColumn(x: number, z: number): SemanticPosition | null {
     const originY = Math.floor(this.bot.entity.position.y);
-    for (let y = originY + 6; y >= originY - 10; y--) {
+    for (let y = originY + 8; y >= originY - 14; y--) {
       const floor = this.bot.blockAt({ x, y: y - 1, z } as any);
       const feet = this.bot.blockAt({ x, y, z } as any);
       const head = this.bot.blockAt({ x, y: y + 1, z } as any);
