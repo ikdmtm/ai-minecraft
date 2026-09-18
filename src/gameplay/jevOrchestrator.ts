@@ -157,7 +157,7 @@ export class CognitiveOrchestrator {
       this.shared,
       this.config.openaiApiKey,
       this.config.strategicModel,
-      () => this.sensor!.capture(this.primitive!.snapshot()),
+      () => this.semantic!.capture(this.taskExecutor!.snapshot()),
       goal => events.onGoalChanged(goal),
     );
 
