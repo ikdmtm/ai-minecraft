@@ -379,6 +379,7 @@ function logDecision(args: {
 function actionCriteria(): Record<GameplayActionType, string> {
   return {
     CONTINUE: 'Continue the currently running skill because it remains appropriate and is making or can make progress.',
+    NAVIGATE: 'Move to an explicit semantic target position selected by the task layer.',
     EXPLORE: 'Move through the world to discover a needed resource, safer terrain, or a better route.',
     MINE: 'Move to and break a specific visible block candidate such as a log, stone, coal, or iron ore.',
     DIG_STAIRCASE: 'Dig a short safe descending staircase to expose stone when stone progression is needed but no visible stone target exists.',
