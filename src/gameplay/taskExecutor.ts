@@ -651,10 +651,16 @@ export class TaskExecutor {
       strategy_goal: this.shared.get().currentGoal,
     });
 
-    const taskAge = this.current.startedAt ? Date.now() - this.current.startedAt : 0;
     const latestGoal = this.shared.get().currentGoal;
-    if (taskAge >= 10_000 && startedGoal && latestGoal && latestGoal !== startedGoal) {
-      throw new Error('task_replan:strategy_changed_at_safe_checkpoint');
+    if (startedGoal && latestGoal && latestGoal !== startedGoal) {
+      this.log('task_strategy_updated', {
+        task_id: this.current.id,
+        task: this.current.task,
+        checkpoint: label,
+        previous_goal: startedGoal,
+        latest_goal: latestGoal,
+        handling: 'defer_until_task_boundary',
+      });
     }
   }
 
