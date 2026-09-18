@@ -18,6 +18,12 @@ const WATERLIKE = new Set([
   'water', 'bubble_column', 'seagrass', 'tall_seagrass', 'kelp', 'kelp_plant',
 ]);
 
+const EXCAVATION_BLOCKS = new Set([
+  'grass_block', 'dirt', 'coarse_dirt', 'podzol', 'mycelium',
+  'stone', 'andesite', 'diorite', 'granite', 'tuff', 'calcite',
+  'deepslate',
+]);
+
 export class SemanticWorldModel {
   private revision = 0;
   private lastFingerprint = '';
@@ -54,6 +60,11 @@ export class SemanticWorldModel {
         raining: this.bot.isRaining,
       },
       inventory,
+      facilities: {
+        craftingTableNearby: Boolean(this.bot.findBlock({ matching: block => block.name === 'crafting_table', maxDistance: 8 })),
+        furnaceNearby: Boolean(this.bot.findBlock({ matching: block => block.name === 'furnace', maxDistance: 8 })),
+        bedNearby: Boolean(this.bot.findBlock({ matching: block => block.name.endsWith('_bed'), maxDistance: 16 })),
+      },
       strategy: {
         mainGoal: this.shared.get().currentGoal || 'Survive and make normal Minecraft progress.',
         subGoals: [...this.shared.get().subGoals],
@@ -86,11 +97,90 @@ export class SemanticWorldModel {
   private buildTargets(): SemanticTarget[] {
     return [
       ...this.findShelterSites(),
+      ...this.findExcavationSites(),
       ...this.findLandTargets(),
       ...this.findTreeClusters(),
       ...this.findStoneSources(),
       ...this.findFoodSources(),
     ].sort((a, b) => b.score - a.score).slice(0, 24);
+  }
+
+  private findExcavationSites(): SemanticTarget[] {
+    const origin = this.bot.entity.position;
+    const candidates: SemanticTarget[] = [];
+    const originY = Math.floor(origin.y);
+
+    for (let radius = 2; radius <= 28; radius += 2) {
+      const samples = Math.max(12, Math.ceil(Math.PI * radius));
+      for (let i = 0; i < samples; i++) {
+        const angle = (Math.PI * 2 * i) / samples;
+        const x = Math.floor(origin.x + Math.cos(angle) * radius);
+        const z = Math.floor(origin.z + Math.sin(angle) * radius);
+        const stand = this.findSurfaceStandableColumn(x, z, originY + 12, originY - 8);
+        if (!stand) continue;
+
+        const floor = this.bot.blockAt(new Vec3(stand.x, stand.y - 1, stand.z));
+        if (!isExcavationMaterial(floor)) continue;
+
+        const direction = this.findSafeExcavationDirection(stand);
+        if (!direction) continue;
+
+        const distance = distance3(origin, stand);
+        candidates.push({
+          id: `excavation_site:${stand.x}:${stand.y}:${stand.z}:${direction}`,
+          kind: 'excavation_site',
+          position: stand,
+          distance: round1(distance),
+          score: 165 - distance * 3 - Math.abs(stand.y - origin.y),
+          risk: distance <= 18 ? 'low' : 'medium',
+          metadata: {
+            direction,
+            floor: floor?.name ?? null,
+            safeSteps: 4,
+          },
+        });
+      }
+      if (candidates.length >= 5 && radius >= 12) break;
+    }
+
+    return dedupeById(candidates)
+      .sort((a, b) => b.score - a.score)
+      .slice(0, 5);
+  }
+
+  private findSafeExcavationDirection(
+    stand: SemanticPosition,
+  ): 'N' | 'E' | 'S' | 'W' | null {
+    const directions = [
+      ['N', 0, -1],
+      ['E', 1, 0],
+      ['S', 0, 1],
+      ['W', -1, 0],
+    ] as const;
+
+    for (const [name, dx, dz] of directions) {
+      let safe = true;
+      for (let step = 1; step <= 4; step++) {
+        const next = new Vec3(
+          stand.x + dx * step,
+          stand.y - step,
+          stand.z + dz * step,
+        );
+        const support = this.bot.blockAt(next.offset(0, -1, 0));
+        const feet = this.bot.blockAt(next);
+        const head = this.bot.blockAt(next.offset(0, 1, 0));
+        if (!isExcavationMaterial(support)) {
+          safe = false;
+          break;
+        }
+        if (!isExcavatableVolume(feet) || !isExcavatableVolume(head)) {
+          safe = false;
+          break;
+        }
+      }
+      if (safe) return name;
+    }
+    return null;
   }
 
   private findShelterSites(): SemanticTarget[] {
@@ -417,8 +507,27 @@ function semanticFingerprint(state: Omit<ExecutiveWorldState, 'revision'>): stri
     Math.round(state.player.hp * 2) / 2,
     state.player.hunger,
     inventory,
+    state.facilities.craftingTableNearby ? 1 : 0,
+    state.facilities.furnaceNearby ? 1 : 0,
+    state.facilities.bedNearby ? 1 : 0,
     state.strategy.mainGoal,
     state.activeTask.id,
     state.activeTask.status,
   ].join('|');
+}
+
+
+function isExcavationMaterial(block: any | null): boolean {
+  if (!block) return false;
+  const name = block.name ?? '';
+  return EXCAVATION_BLOCKS.has(name) ||
+    name.endsWith('_ore') ||
+    name.startsWith('deepslate_');
+}
+
+function isExcavatableVolume(block: any | null): boolean {
+  if (!block) return false;
+  if (block.name === 'air' || block.boundingBox === 'empty') return true;
+  if (WATERLIKE.has(block.name) || block.name === 'lava') return false;
+  return isExcavationMaterial(block);
 }
