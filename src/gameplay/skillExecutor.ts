@@ -417,12 +417,22 @@ export class SkillExecutor {
       order = SHOVEL_ORDER;
     }
 
-    const tool = order
+    const preferredTool = order
       .map(toolName => this.bot.inventory.items().find(item => item.name === toolName))
       .find(Boolean);
 
-    if (tool) {
-      await this.bot.equip(tool, 'hand');
+    if (preferredTool) {
+      await this.bot.equip(preferredTool, 'hand');
+      this.assertActive(token);
+      return;
+    }
+
+    // Let pathfinder/minecraft-data resolve less obvious tool-gated blocks
+    // (diorite, granite, andesite, tuff, etc.) instead of maintaining a
+    // brittle block-name allowlist here.
+    const harvestTool = this.bot.pathfinder.bestHarvestTool(block);
+    if (harvestTool) {
+      await this.bot.equip(harvestTool, 'hand');
       this.assertActive(token);
       return;
     }
