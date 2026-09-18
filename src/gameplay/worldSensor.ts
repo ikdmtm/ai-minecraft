@@ -1,6 +1,7 @@
 import type mineflayer from 'mineflayer';
 import type { SharedStateBus } from '../cognitive/sharedState.js';
 import type { JevWorldState, SkillSnapshot, WorldCandidate } from './typedActions.js';
+import type { WorldProvenance } from './worldProvenance.js';
 
 const TRACKED_BLOCKS = new Set([
   'oak_log', 'birch_log', 'spruce_log', 'jungle_log', 'acacia_log', 'dark_oak_log', 'cherry_log', 'mangrove_log',
@@ -19,6 +20,7 @@ export class WorldSensor {
   constructor(
     private readonly bot: mineflayer.Bot,
     private readonly shared: SharedStateBus,
+    private readonly provenance?: WorldProvenance,
   ) {}
 
   capture(currentSkill: SkillSnapshot): JevWorldState {
@@ -78,6 +80,7 @@ export class WorldSensor {
     for (const pos of positions) {
       const block = this.bot.blockAt(pos);
       if (!block || !TRACKED_BLOCKS.has(block.name)) continue;
+      if (block.name.endsWith('_log') && this.provenance?.isPlayerPlaced(block.position)) continue;
       const distance = origin.distanceTo(block.position);
 
       // Only expose targets the bot can currently see. The policy should choose
