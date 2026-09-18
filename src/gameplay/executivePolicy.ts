@@ -1,10 +1,18 @@
 import {
+  EXECUTIVE_RESOURCES,
+  EXECUTIVE_STRUCTURES,
   EXECUTIVE_TASKS,
   type ExecutiveDecision,
+  type ExecutiveResource,
+  type ExecutiveStructure,
   type ExecutiveTaskType,
   type ExecutiveWorldState,
   type SemanticTarget,
 } from './executiveTypes.js';
+import {
+  CRAFT_ITEMS,
+  type CraftItem,
+} from './typedActions.js';
 
 interface ExecutivePolicyConfig {
   typesafeApiKey?: string;
@@ -16,11 +24,13 @@ interface ExecutivePolicyConfig {
   timeoutMs?: number;
 }
 
+interface JevChoiceAnswer {
+  choice?: string;
+  confidence?: number;
+}
+
 interface JevResponse {
-  answers?: Record<string, {
-    choice?: string;
-    confidence?: number;
-  }>;
+  answers?: Record<string, JevChoiceAnswer>;
 }
 
 export class ExecutivePolicy {
@@ -82,8 +92,11 @@ export class ExecutivePolicy {
           store: false,
           reasoning: { effort: 'none' },
           instructions: executiveInstructions(),
-          input: JSON.stringify(state),
-          max_output_tokens: 384,
+          input: JSON.stringify({
+            ...state,
+            capability_reference: capabilityReference(),
+          }),
+          max_output_tokens: 512,
           text: {
             format: {
               type: 'json_schema',
@@ -95,10 +108,21 @@ export class ExecutivePolicy {
                 properties: {
                   task: { type: 'string', enum: EXECUTIVE_TASKS },
                   target_id: { type: 'string', enum: targetIds },
+                  resource: { type: 'string', enum: EXECUTIVE_RESOURCES },
+                  craft_item: { type: 'string', enum: CRAFT_ITEMS },
+                  structure: { type: 'string', enum: EXECUTIVE_STRUCTURES },
                   amount: { type: 'integer', minimum: 1, maximum: 32 },
                   confidence: { type: 'number', minimum: 0, maximum: 1 },
                 },
-                required: ['task', 'target_id', 'amount', 'confidence'],
+                required: [
+                  'task',
+                  'target_id',
+                  'resource',
+                  'craft_item',
+                  'structure',
+                  'amount',
+                  'confidence',
+                ],
               },
             },
           },
@@ -116,19 +140,24 @@ export class ExecutivePolicy {
       const parsed = JSON.parse(extractOpenAIResponseText(data)) as {
         task: string;
         target_id: string;
+        resource: string;
+        craft_item: string;
+        structure: string;
         amount: number;
         confidence: number;
       };
 
-      const task = validateTask(parsed.task);
-      const decision = enforceTaskGates(state, {
-        task,
+      const decision: ExecutiveDecision = {
+        task: validateTask(parsed.task),
         targetId: validateTargetId(parsed.target_id, state.targets),
-        amount: normalizeTaskAmount(task, parsed.amount),
+        resource: validateResource(parsed.resource),
+        craftItem: validateCraftItem(parsed.craft_item),
+        structure: validateStructure(parsed.structure),
+        amount: clampAmount(parsed.amount),
         confidence: clampConfidence(parsed.confidence),
         source: 'openai',
         basedOnRevision: state.revision,
-      });
+      };
       logDecision(started, this.provider, this.openaiModel, state, decision);
       return decision;
     } catch (error) {
@@ -153,7 +182,10 @@ export class ExecutivePolicy {
         signal: controller.signal,
         body: JSON.stringify({
           model: this.jevModel,
-          state,
+          state: {
+            ...state,
+            capability_reference: capabilityReference(),
+          },
           questions: {
             task: {
               type: 'choice',
@@ -162,8 +194,23 @@ export class ExecutivePolicy {
             },
             target: {
               type: 'choice',
-              instructions: 'Choose a concrete semantic target for the task. Choose none if the task does not require one.',
+              instructions: 'Choose a semantic target only when it is useful for the selected task. Otherwise choose none.',
               criteria: targetCriteria(state.targets),
+            },
+            resource: {
+              type: 'choice',
+              instructions: 'Choose the resource for GATHER_RESOURCE, otherwise none.',
+              criteria: resourceCriteria(),
+            },
+            craft_item: {
+              type: 'choice',
+              instructions: 'Choose the concrete item for CRAFT_ITEM, otherwise none.',
+              criteria: craftCriteria(),
+            },
+            structure: {
+              type: 'choice',
+              instructions: 'Choose the structure for BUILD_STRUCTURE, otherwise none.',
+              criteria: structureCriteria(),
             },
           },
         }),
@@ -175,15 +222,17 @@ export class ExecutivePolicy {
 
       const data = (await response.json()) as JevResponse;
       const answers = data.answers ?? {};
-      const selectedTask = validateTask(answers.task?.choice ?? 'WAIT');
-      const decision = enforceTaskGates(state, {
-        task: selectedTask,
+      const decision: ExecutiveDecision = {
+        task: validateTask(answers.task?.choice ?? 'WAIT'),
         targetId: validateTargetId(answers.target?.choice, state.targets),
-        amount: defaultAmountForTask(selectedTask),
+        resource: validateResource(answers.resource?.choice),
+        craftItem: validateCraftItem(answers.craft_item?.choice),
+        structure: validateStructure(answers.structure?.choice),
+        amount: defaultAmount(),
         confidence: clampConfidence(answers.task?.confidence),
         source: 'jev',
         basedOnRevision: state.revision,
-      });
+      };
       logDecision(started, this.provider, this.jevModel, state, decision);
       return decision;
     } catch (error) {
@@ -194,35 +243,17 @@ export class ExecutivePolicy {
   }
 
   private fallback(state: ExecutiveWorldState, started: number, error: unknown): ExecutiveDecision {
-    const nearestLand = bestTarget(state.targets, 'land');
-    const bestTree = bestTarget(state.targets, 'tree_cluster');
-    let task: ExecutiveTaskType = 'WAIT';
-    let targetId: string | undefined;
-
-    if (state.player.inWater && nearestLand) {
-      task = 'REACH_LAND';
-      targetId = nearestLand.id;
-    } else if (totalLogs(state.inventory) < 6 && bestTree) {
-      task = 'GATHER_WOOD';
-      targetId = bestTree.id;
-    } else if (!hasPickaxe(state.inventory) && totalLogs(state.inventory) > 0) {
-      task = 'PREPARE_STARTER_TOOLS';
-    } else if (hasPickaxe(state.inventory) && (state.inventory.cobblestone ?? 0) >= 3 && !hasStonePickaxe(state.inventory)) {
-      task = 'UPGRADE_STONE_TOOLS';
-    } else if (hasPickaxe(state.inventory)) {
-      task = 'ACQUIRE_STONE';
-      targetId = bestTarget(state.targets, 'stone_source')?.id;
-    }
-
-    const decision = enforceTaskGates(state, {
-      task,
-      targetId,
-      amount: defaultAmountForTask(task),
+    const decision: ExecutiveDecision = {
+      task: 'WAIT',
+      resource: 'none',
+      craftItem: 'none',
+      structure: 'none',
+      amount: 1,
       confidence: 0,
       source: 'fallback',
       basedOnRevision: state.revision,
       reason: error instanceof Error ? error.message : String(error),
-    });
+    };
 
     console.log(JSON.stringify({
       ts: new Date().toISOString(),
@@ -239,39 +270,43 @@ export class ExecutivePolicy {
 
 function executiveInstructions(): string {
   return [
-    'You are the executive controller for an autonomous Minecraft Hardcore player.',
-    'Choose ONE meaningful task, not a low-level movement.',
-    'The task executor will handle navigation, retries, mining, collecting drops, and recipe prerequisites.',
-    'Use the semantic targets instead of inventing coordinates.',
-    'If player.inWater is true, choose REACH_LAND with the best low-risk land target before resource work.',
-    'Use GATHER_WOOD until there is a practical early-game wood buffer (normally 6-10 logs).',
-    'Use PREPARE_STARTER_TOOLS when wood exists but no wooden-or-better pickaxe exists.',
-    'Use ACQUIRE_STONE once a pickaxe exists and the cobblestone buffer is still insufficient.',
-    'Use UPGRADE_STONE_TOOLS once at least 3 cobblestone exists and stone-tier tools are not ready.',
-    'Use GATHER_FOOD when food is needed and a safe food_source exists.',
-    'Use ESTABLISH_SHELTER only with a shelter_site target; shelter_site means the world model found a flat buildable surface patch.',
-    'CONTINUE_TASK is only appropriate when activeTask.status is running.',
-    'Do not micromanage compass directions or individual block hits.',
+    'You are the executive controller of an autonomous Minecraft Hardcore player.',
+    'Decide what the player should do next from the current world state, inventory, strategy, recent failures, time, threats, and semantic targets.',
+    'The capabilities listed in capability_reference describe what the body can currently attempt; they are NOT a prescribed progression order.',
+    'Do not follow a fixed wood->stone->shelter script unless the actual situation and strategy make that the best choice.',
+    'Choose one task and its parameters. The task executor handles low-level pathfinding, repeated mining, collection, and crafting mechanics.',
+    'Use semantic target IDs when a location or entity target matters. Never invent coordinates or target IDs.',
+    'If a previous task failed, use its error in recentEvents to choose a different approach instead of blindly repeating it.',
+    'Prefer coherent purposeful behavior over frequent task switching.',
+    'Safety emergencies are handled by a separate deterministic kernel; you still should avoid obviously unreasonable risks.',
   ].join(' ');
+}
+
+function capabilityReference(): Record<string, string> {
+  return {
+    NAVIGATE_TARGET: 'Move to one supplied semantic target such as land, a tree cluster, a stone source, food source, or shelter site.',
+    GATHER_RESOURCE: 'Acquire an amount of a resource. Supported resource abstractions today: logs, cobblestone, food.',
+    CRAFT_ITEM: 'Craft one concrete supported item. Recipe prerequisites and crafting-table placement are handled by the body where possible.',
+    BUILD_STRUCTURE: 'Build one supported structure at an appropriate semantic target. Supported structure today: shelter.',
+    CONTINUE_TASK: 'Continue a currently running task when it remains appropriate.',
+    WAIT: 'Do nothing briefly when no useful executable action is appropriate.',
+  };
 }
 
 function taskCriteria(): Record<ExecutiveTaskType, string> {
   return {
-    CONTINUE_TASK: 'Keep the currently running semantic task.',
-    REACH_LAND: 'Reach a concrete safe land target, especially when in water.',
-    GATHER_WOOD: 'Acquire a requested buffer of logs from a nearby tree cluster.',
-    PREPARE_STARTER_TOOLS: 'Craft prerequisites and a wooden pickaxe / starter tooling.',
-    ACQUIRE_STONE: 'Obtain cobblestone using exposed stone or a safe descending staircase.',
-    UPGRADE_STONE_TOOLS: 'Turn available cobblestone into stone pickaxe/axe/sword and a furnace when materials permit.',
-    GATHER_FOOD: 'Obtain raw food from a nearby passive animal source.',
-    ESTABLISH_SHELTER: 'Navigate to a shelter_site semantic target and build a compact first-night shelter there.',
-    WAIT: 'Briefly wait because no useful safe task is currently executable.',
+    CONTINUE_TASK: 'Keep the currently running task.',
+    NAVIGATE_TARGET: 'Move to a selected semantic target for positioning, retreat, approach, or relocation.',
+    GATHER_RESOURCE: 'Acquire a selected resource in a selected amount.',
+    CRAFT_ITEM: 'Craft a selected concrete item because it is useful for the chosen plan.',
+    BUILD_STRUCTURE: 'Build a selected structure at a suitable semantic target.',
+    WAIT: 'Briefly wait when acting would not improve the situation.',
   };
 }
 
 function targetCriteria(targets: SemanticTarget[]): Record<string, string> {
   const result: Record<string, string> = {
-    none: 'This task does not require a semantic target.',
+    none: 'No semantic target is needed.',
   };
   for (const target of targets) {
     result[target.id] = [
@@ -285,15 +320,42 @@ function targetCriteria(targets: SemanticTarget[]): Record<string, string> {
   return result;
 }
 
-function bestTarget(
-  targets: SemanticTarget[],
-  kind: SemanticTarget['kind'],
-): SemanticTarget | undefined {
-  return targets.filter(target => target.kind === kind).sort((a, b) => b.score - a.score)[0];
+function resourceCriteria(): Record<ExecutiveResource, string> {
+  return {
+    none: 'No resource parameter.',
+    logs: 'Wood logs.',
+    cobblestone: 'Cobblestone for tools/building/furnace.',
+    food: 'Raw edible animal drops.',
+  };
+}
+
+function craftCriteria(): Record<CraftItem, string> {
+  return Object.fromEntries(
+    CRAFT_ITEMS.map(item => [item, item === 'none' ? 'No craft item.' : `Craft ${item}.`]),
+  ) as Record<CraftItem, string>;
+}
+
+function structureCriteria(): Record<ExecutiveStructure, string> {
+  return {
+    none: 'No structure parameter.',
+    shelter: 'Compact enclosed emergency/first-night shelter.',
+  };
 }
 
 function validateTask(value: string): ExecutiveTaskType {
   return (EXECUTIVE_TASKS as string[]).includes(value) ? value as ExecutiveTaskType : 'WAIT';
+}
+
+function validateResource(value: string | undefined): ExecutiveResource {
+  return (EXECUTIVE_RESOURCES as string[]).includes(value ?? '') ? value as ExecutiveResource : 'none';
+}
+
+function validateCraftItem(value: string | undefined): CraftItem {
+  return (CRAFT_ITEMS as string[]).includes(value ?? '') ? value as CraftItem : 'none';
+}
+
+function validateStructure(value: string | undefined): ExecutiveStructure {
+  return (EXECUTIVE_STRUCTURES as string[]).includes(value ?? '') ? value as ExecutiveStructure : 'none';
 }
 
 function validateTargetId(value: string | undefined, targets: SemanticTarget[]): string | undefined {
@@ -301,149 +363,18 @@ function validateTargetId(value: string | undefined, targets: SemanticTarget[]):
   return targets.some(target => target.id === value) ? value : undefined;
 }
 
-function normalizeTaskAmount(task: ExecutiveTaskType, value: number | undefined): number {
-  const raw = Number.isFinite(value) ? Math.round(value as number) : defaultAmountForTask(task);
-  switch (task) {
-    case 'GATHER_WOOD': return Math.max(8, Math.min(12, raw));
-    case 'ACQUIRE_STONE': return Math.max(12, Math.min(20, raw));
-    case 'GATHER_FOOD': return Math.max(2, Math.min(8, raw));
-    default: return 1;
-  }
+function clampAmount(value: number | undefined): number {
+  if (!Number.isFinite(value)) return defaultAmount();
+  return Math.max(1, Math.min(32, Math.round(value as number)));
+}
+
+function defaultAmount(): number {
+  return 4;
 }
 
 function clampConfidence(value: number | undefined): number {
   if (!Number.isFinite(value)) return 0.5;
   return Math.max(0, Math.min(1, value as number));
-}
-
-function defaultAmountForTask(task: ExecutiveTaskType): number {
-  switch (task) {
-    case 'GATHER_WOOD': return 8;
-    case 'ACQUIRE_STONE': return 12;
-    case 'GATHER_FOOD': return 4;
-    case 'UPGRADE_STONE_TOOLS': return 1;
-    default: return 1;
-  }
-}
-
-function totalLogs(inventory: Record<string, number>): number {
-  return Object.entries(inventory)
-    .filter(([name]) => name.endsWith('_log'))
-    .reduce((sum, [, count]) => sum + count, 0);
-}
-
-function hasPickaxe(inventory: Record<string, number>): boolean {
-  return Object.keys(inventory).some(name => name.endsWith('_pickaxe'));
-}
-
-function hasStonePickaxe(inventory: Record<string, number>): boolean {
-  return (inventory.stone_pickaxe ?? 0) > 0 ||
-    (inventory.iron_pickaxe ?? 0) > 0 ||
-    (inventory.diamond_pickaxe ?? 0) > 0 ||
-    (inventory.netherite_pickaxe ?? 0) > 0;
-}
-
-function stoneUpgradeComplete(inventory: Record<string, number>): boolean {
-  return hasStonePickaxe(inventory) &&
-    (inventory.stone_axe ?? inventory.iron_axe ?? inventory.diamond_axe ?? inventory.netherite_axe ?? 0) > 0 &&
-    (inventory.stone_sword ?? inventory.iron_sword ?? inventory.diamond_sword ?? inventory.netherite_sword ?? 0) > 0;
-}
-
-function rawFoodCount(inventory: Record<string, number>): number {
-  return ['beef', 'porkchop', 'chicken', 'mutton', 'rabbit', 'salmon', 'cod']
-    .reduce((sum, name) => sum + (inventory[name] ?? 0), 0);
-}
-
-function nextAfterCompletedResourceTask(state: ExecutiveWorldState): ExecutiveDecision {
-  const cobble = state.inventory.cobblestone ?? 0;
-  if (!hasPickaxe(state.inventory) && totalLogs(state.inventory) > 0) {
-    return baseDecision(state, 'PREPARE_STARTER_TOOLS');
-  }
-  if (hasPickaxe(state.inventory) && cobble < 12) {
-    return baseDecision(state, 'ACQUIRE_STONE', bestTarget(state.targets, 'stone_source')?.id, 12);
-  }
-  if (!stoneUpgradeComplete(state.inventory) && cobble >= 3) {
-    return baseDecision(state, 'UPGRADE_STONE_TOOLS');
-  }
-  const shelterSite = bestTarget(state.targets, 'shelter_site');
-  if (shelterSite && (state.world.isNight || state.world.timeOfDay >= 7000 || /shelter|base/i.test(state.strategy.mainGoal))) {
-    return baseDecision(state, 'ESTABLISH_SHELTER', shelterSite.id);
-  }
-  const food = bestTarget(state.targets, 'food_source');
-  if (food && rawFoodCount(state.inventory) < 3) {
-    return baseDecision(state, 'GATHER_FOOD', food.id, 3);
-  }
-  return baseDecision(state, 'WAIT');
-}
-
-function baseDecision(
-  state: ExecutiveWorldState,
-  task: ExecutiveTaskType,
-  targetId?: string,
-  amount = defaultAmountForTask(task),
-): ExecutiveDecision {
-  return {
-    task,
-    targetId,
-    amount,
-    confidence: 1,
-    source: 'fallback',
-    basedOnRevision: state.revision,
-  };
-}
-
-function enforceTaskGates(
-  state: ExecutiveWorldState,
-  decision: ExecutiveDecision,
-): ExecutiveDecision {
-  const logs = totalLogs(state.inventory);
-  const cobble = state.inventory.cobblestone ?? 0;
-  const land = bestTarget(state.targets, 'land');
-  const shelterSite = bestTarget(state.targets, 'shelter_site');
-
-  if (state.player.inWater && land) {
-    return { ...decision, task: 'REACH_LAND', targetId: land.id, amount: 1 };
-  }
-
-  if (!hasPickaxe(state.inventory) && logs > 0) {
-    return { ...decision, task: 'PREPARE_STARTER_TOOLS', targetId: undefined, amount: 1 };
-  }
-
-  if (decision.task === 'GATHER_WOOD' && logs >= (decision.amount ?? 8)) {
-    return { ...nextAfterCompletedResourceTask(state), source: decision.source, confidence: decision.confidence };
-  }
-
-  if (decision.task === 'PREPARE_STARTER_TOOLS' && hasPickaxe(state.inventory)) {
-    const next = nextAfterCompletedResourceTask(state);
-    return { ...next, source: decision.source, confidence: decision.confidence };
-  }
-
-  if (decision.task === 'ACQUIRE_STONE' && cobble >= (decision.amount ?? 12)) {
-    const next = nextAfterCompletedResourceTask(state);
-    return { ...next, source: decision.source, confidence: decision.confidence };
-  }
-
-  if (decision.task === 'UPGRADE_STONE_TOOLS') {
-    if (cobble < 3 && !hasStonePickaxe(state.inventory)) {
-      return { ...decision, task: 'ACQUIRE_STONE', targetId: bestTarget(state.targets, 'stone_source')?.id, amount: 12 };
-    }
-    if (stoneUpgradeComplete(state.inventory)) {
-      const next = nextAfterCompletedResourceTask(state);
-      return { ...next, source: decision.source, confidence: decision.confidence };
-    }
-  }
-
-  if (decision.task === 'ESTABLISH_SHELTER') {
-    if (!shelterSite) {
-      const next = nextAfterCompletedResourceTask(state);
-      return { ...next, source: decision.source, confidence: decision.confidence };
-    }
-    if (!decision.targetId || !state.targets.some(target => target.id === decision.targetId && target.kind === 'shelter_site')) {
-      return { ...decision, targetId: shelterSite.id };
-    }
-  }
-
-  return decision;
 }
 
 function normalizeSecret(value: string | undefined): string | null {
@@ -481,6 +412,9 @@ function logDecision(
     state_revision: state.revision,
     task: decision.task,
     target_id: decision.targetId ?? null,
+    resource: decision.resource ?? null,
+    craft_item: decision.craftItem ?? null,
+    structure: decision.structure ?? null,
     amount: decision.amount ?? null,
     confidence: decision.confidence,
     active_task: state.activeTask,
