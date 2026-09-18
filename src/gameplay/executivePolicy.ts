@@ -278,8 +278,10 @@ function executiveInstructions(): string {
     'For GATHER_RESOURCE, amount means the desired TOTAL amount of that resource in inventory when the task finishes, not an additional amount.',
     'Use semantic target IDs when a location or entity target matters. Never invent coordinates or target IDs.',
     'For logs use a tree_cluster target; for food use a food_source; for cobblestone prefer a visible stone_source or otherwise an excavation_site.',
+    'item_drop targets are recoverable dropped resources; use NAVIGATE_TARGET when collecting nearby drops is important.',
     'For BUILD_STRUCTURE(shelter), use a shelter_site target.',
     'Reuse nearby facilities shown in state.facilities; do not craft duplicate workstations unless there is a concrete reason.',
+    'If state.facilities.shelterNearby is true, treat an existing completed shelter as available and do not build another one unless relocation is genuinely needed.',
     'If a previous task failed, use its error in recentEvents to choose a different approach instead of blindly repeating it.',
     'Prefer coherent purposeful behavior over frequent task switching.',
     'Safety emergencies are handled by a separate deterministic kernel; you still should avoid obviously unreasonable risks.',
@@ -288,7 +290,7 @@ function executiveInstructions(): string {
 
 function capabilityReference(): Record<string, string> {
   return {
-    NAVIGATE_TARGET: 'Move to one supplied semantic target such as land, a tree cluster, a stone source, food source, or shelter site.',
+    NAVIGATE_TARGET: 'Move to one supplied semantic target such as land, a tree cluster, stone source, food source, dropped item, or shelter site.',
     GATHER_RESOURCE: 'Reach a desired total inventory amount of a resource. Supported resource abstractions today: logs, cobblestone, food.',
     CRAFT_ITEM: 'Craft one concrete supported item. Recipe prerequisites and crafting-table placement are handled by the body where possible.',
     BUILD_STRUCTURE: 'Build one supported structure at an appropriate semantic target. Supported structure today: shelter.',
