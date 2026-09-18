@@ -316,7 +316,7 @@ export class SkillExecutor {
   private normalMovements(): Movements {
     const movements = new Movements(this.bot);
     movements.allowSprinting = true;
-    movements.liquidCost = NORMAL_LIQUID_COST;
+    (movements as any).liquidCost = NORMAL_LIQUID_COST;
     return movements;
   }
 
