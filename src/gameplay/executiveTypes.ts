@@ -1,15 +1,22 @@
+import type { CraftItem } from './typedActions.js';
+
 export type ExecutiveTaskType =
   | 'CONTINUE_TASK'
-  | 'REACH_LAND'
-  | 'GATHER_WOOD'
-  | 'PREPARE_STARTER_TOOLS'
-  | 'ACQUIRE_STONE'
-  | 'UPGRADE_STONE_TOOLS'
-  | 'GATHER_FOOD'
-  | 'ESTABLISH_SHELTER'
+  | 'NAVIGATE_TARGET'
+  | 'GATHER_RESOURCE'
+  | 'CRAFT_ITEM'
+  | 'BUILD_STRUCTURE'
   | 'WAIT';
 
-export type SemanticTargetKind = 'land' | 'shelter_site' | 'tree_cluster' | 'stone_source' | 'food_source';
+export type ExecutiveResource = 'none' | 'logs' | 'cobblestone' | 'food';
+export type ExecutiveStructure = 'none' | 'shelter';
+
+export type SemanticTargetKind =
+  | 'land'
+  | 'shelter_site'
+  | 'tree_cluster'
+  | 'stone_source'
+  | 'food_source';
 
 export interface SemanticPosition {
   x: number;
@@ -68,6 +75,9 @@ export interface ExecutiveWorldState {
 export interface ExecutiveDecision {
   task: ExecutiveTaskType;
   targetId?: string;
+  resource?: ExecutiveResource;
+  craftItem?: CraftItem;
+  structure?: ExecutiveStructure;
   amount?: number;
   confidence: number;
   source: 'jev' | 'openai' | 'fallback';
@@ -82,12 +92,21 @@ export interface TaskExecutionResult {
 
 export const EXECUTIVE_TASKS: ExecutiveTaskType[] = [
   'CONTINUE_TASK',
-  'REACH_LAND',
-  'GATHER_WOOD',
-  'PREPARE_STARTER_TOOLS',
-  'ACQUIRE_STONE',
-  'UPGRADE_STONE_TOOLS',
-  'GATHER_FOOD',
-  'ESTABLISH_SHELTER',
+  'NAVIGATE_TARGET',
+  'GATHER_RESOURCE',
+  'CRAFT_ITEM',
+  'BUILD_STRUCTURE',
   'WAIT',
+];
+
+export const EXECUTIVE_RESOURCES: ExecutiveResource[] = [
+  'none',
+  'logs',
+  'cobblestone',
+  'food',
+];
+
+export const EXECUTIVE_STRUCTURES: ExecutiveStructure[] = [
+  'none',
+  'shelter',
 ];
