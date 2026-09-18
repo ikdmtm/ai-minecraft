@@ -612,7 +612,12 @@ export class SkillExecutor {
     await this.bot.consume();
   }
 
-  private async flee(direction: CompassDirection, token: number): Promise<void> {
+  private async flee(direction: CompassDirection, token: number, reason?: string): Promise<void> {
+    if (reason?.startsWith('low_oxygen')) {
+      await this.escapeWater(token);
+      return;
+    }
+
     const hostile = this.bot.nearestEntity(entity => Boolean(entity.name && isDangerous(entity.name)));
     let dx: number;
     let dz: number;
@@ -628,11 +633,31 @@ export class SkillExecutor {
     const start = this.bot.entity.position;
     const tx = start.x + dx * 18;
     const tz = start.z + dz * 18;
-    const movements = new Movements(this.bot);
-    movements.allowSprinting = true;
+    const movements = this.normalMovements();
     this.bot.pathfinder.setMovements(movements);
-    await this.bot.pathfinder.goto(new goals.GoalXZ(tx, tz));
+    await withTimeout(
+      this.bot.pathfinder.goto(new goals.GoalXZ(tx, tz)),
+      12_000,
+      'flee_path_timeout',
+      () => this.bot.pathfinder.stop(),
+    );
     this.assertActive(token);
+  }
+
+  private async escapeWater(token: number): Promise<void> {
+    this.updateDetail('swimming_to_surface');
+    try { this.bot.pathfinder.stop(); } catch { /* best effort */ }
+    this.bot.setControlState('jump', true);
+    try {
+      for (let i = 0; i < 60; i++) {
+        this.assertActive(token);
+        if (!isHeadSubmerged(this.bot)) return;
+        await delay(100);
+      }
+      throw new Error('water_escape_timeout');
+    } finally {
+      this.bot.setControlState('jump', false);
+    }
   }
 
   private async sleepInBed(token: number): Promise<void> {
@@ -688,7 +713,8 @@ export class SkillExecutor {
 function actionToReflexState(action: TypedGameplayDecision['action']): ReflexState {
   switch (action) {
     case 'EXPLORE': return 'exploring';
-    case 'MINE': return 'mining';
+    case 'MINE':
+    case 'DIG_STAIRCASE': return 'mining';
     case 'CRAFT':
     case 'BUILD_SHELTER': return 'crafting';
     case 'HUNT_FOOD': return 'gathering';
@@ -773,4 +799,25 @@ function shouldBlockFailedTarget(message: string): boolean {
     'dig_timeout',
     'Digging aborted',
   ].some(reason => message.includes(reason));
+}
+
+
+function dominantCardinal(dx: number, dz: number): [number, number] {
+  if (Math.abs(dx) >= Math.abs(dz)) return [dx >= 0 ? 1 : -1, 0];
+  return [0, dz >= 0 ? 1 : -1];
+}
+
+function isSolidGround(block: any | null): boolean {
+  if (!block || isHazardBlock(block)) return false;
+  return block.boundingBox === 'block';
+}
+
+function isHazardBlock(block: any | null): boolean {
+  const name = block?.name ?? '';
+  return name === 'lava' || name === 'water' || name === 'bubble_column';
+}
+
+function isHeadSubmerged(bot: mineflayer.Bot): boolean {
+  const head = bot.blockAt(bot.entity.position.offset(0, 1.62, 0))?.name ?? '';
+  return head === 'water' || head === 'bubble_column';
 }
