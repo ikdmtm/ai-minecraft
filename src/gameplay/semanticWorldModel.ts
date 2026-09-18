@@ -99,6 +99,7 @@ export class SemanticWorldModel {
 
   private buildTargets(): SemanticTarget[] {
     return [
+      ...this.findKnownStructures(),
       ...this.findShelterSites(),
       ...this.findExcavationSites(),
       ...this.findLandTargets(),
@@ -107,6 +108,31 @@ export class SemanticWorldModel {
       ...this.findFoodSources(),
       ...this.findItemDrops(),
     ].sort((a, b) => b.score - a.score).slice(0, 24);
+  }
+
+  private findKnownStructures(): SemanticTarget[] {
+    const origin = this.bot.entity.position;
+    const structures = this.provenance?.listStructures() ?? [];
+
+    return structures
+      .map(entry => {
+        const distance = distance3(origin, entry.position);
+        return {
+          id: `known_structure:${entry.kind}:${entry.position.x}:${entry.position.y}:${entry.position.z}`,
+          kind: 'known_structure' as const,
+          position: { ...entry.position },
+          distance: round1(distance),
+          score: 230 - distance * 1.5,
+          risk: distance <= 48 ? 'low' as const : 'medium' as const,
+          metadata: {
+            structureKind: entry.kind,
+            completed: true,
+            completedAt: entry.completedAt,
+          },
+        };
+      })
+      .sort((a, b) => b.score - a.score)
+      .slice(0, 8);
   }
 
   private findExcavationSites(): SemanticTarget[] {
