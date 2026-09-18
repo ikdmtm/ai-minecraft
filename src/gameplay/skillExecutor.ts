@@ -113,9 +113,17 @@ export class SkillExecutor {
     if (priority === 'safety') this.safetyOverrideUntil = Date.now() + 1_500;
 
     // Normal policy decisions never pre-empt an in-flight embodied skill.
-    // Safety is the only layer allowed to interrupt. This avoids oscillating
-    // between plausible actions while pathfinding/digging/building is underway.
+    // Safety may interrupt normal work, but must not continuously restart the
+    // same reflex. Re-triggering FLEE every oxygen tick resets swimming controls
+    // and can turn a recoverable drowning event into a death loop.
     if (priority === 'normal' && this.current.status === 'running') return;
+    if (
+      priority === 'safety' &&
+      this.current.status === 'running' &&
+      this.current.action === decision.action
+    ) {
+      if (decision.action !== 'FLEE' || this.current.detail === 'swimming_to_surface') return;
+    }
 
     if (decision.action === 'CONTINUE') {
       if (this.current.status === 'running') return;
