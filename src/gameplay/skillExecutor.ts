@@ -465,9 +465,41 @@ export class SkillExecutor {
       return;
     }
 
-    const actualName = item;
+    if (item.startsWith('wooden_')) {
+      const tableAlreadyAvailable = Boolean(
+        this.bot.findBlock({ matching: block => block.name === 'crafting_table', maxDistance: 8 }) ||
+        this.bot.inventory.items().some(entry => entry.name === 'crafting_table'),
+      );
+      await this.ensurePlankCount(tableAlreadyAvailable ? 5 : 9);
+      const table = await this.ensureCraftingTable(token);
+      await this.ensureStickCount(2);
+      await this.ensurePlankCount(item === 'wooden_sword' ? 2 : 3);
+      await this.craftNamed(item, table);
+      return;
+    }
+
+    if (item.startsWith('stone_')) {
+      const neededStone = item === 'stone_sword' ? 2 : 3;
+      if (this.inventoryCount('cobblestone') < neededStone) {
+        throw new Error(`insufficient_cobblestone:${this.inventoryCount('cobblestone')}/${neededStone}`);
+      }
+      const table = await this.ensureCraftingTable(token);
+      await this.ensureStickCount(2);
+      await this.craftNamed(item, table);
+      return;
+    }
+
+    if (item === 'furnace') {
+      if (this.inventoryCount('cobblestone') < 8) {
+        throw new Error(`insufficient_cobblestone:${this.inventoryCount('cobblestone')}/8`);
+      }
+      const table = await this.ensureCraftingTable(token);
+      await this.craftNamed('furnace', table);
+      return;
+    }
+
     const table = await this.ensureCraftingTable(token);
-    await this.craftNamed(actualName, table);
+    await this.craftNamed(item, table);
   }
 
   private async craftNamed(itemName: string, table: any | null): Promise<void> {
@@ -480,10 +512,28 @@ export class SkillExecutor {
   }
 
   private async ensurePlanks(): Promise<void> {
-    if (this.bot.inventory.items().some(item => item.name.endsWith('_planks'))) return;
-    const log = this.bot.inventory.items().find(item => item.name.endsWith('_log'));
-    if (!log) throw new Error('no_logs_for_planks');
-    await this.craftNamed(`${log.name.slice(0, -4)}_planks`, null);
+    await this.ensurePlankCount(1);
+  }
+
+  private async ensurePlankCount(minimum: number): Promise<void> {
+    while (this.plankCount() < minimum) {
+      const log = this.bot.inventory.items().find(item => item.name.endsWith('_log'));
+      if (!log) throw new Error(`insufficient_planks:${this.plankCount()}/${minimum}`);
+      await this.craftNamed(`${log.name.slice(0, -4)}_planks`, null);
+    }
+  }
+
+  private async ensureStickCount(minimum: number): Promise<void> {
+    while (this.inventoryCount('stick') < minimum) {
+      await this.ensurePlankCount(2);
+      await this.craftNamed('stick', null);
+    }
+  }
+
+  private plankCount(): number {
+    return this.bot.inventory.items()
+      .filter(item => item.name.endsWith('_planks'))
+      .reduce((total, item) => total + item.count, 0);
   }
 
   private async ensureCraftingTable(token: number): Promise<any> {
@@ -492,7 +542,7 @@ export class SkillExecutor {
 
     let item = this.bot.inventory.items().find(entry => entry.name === 'crafting_table');
     if (!item) {
-      await this.ensurePlanks();
+      await this.ensurePlankCount(4);
       await this.craftNamed('crafting_table', null);
       item = this.bot.inventory.items().find(entry => entry.name === 'crafting_table');
     }
