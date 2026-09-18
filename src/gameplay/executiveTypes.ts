@@ -64,6 +64,11 @@ export interface ExecutiveWorldState {
     raining: boolean;
   };
   inventory: Record<string, number>;
+  facilities: {
+    craftingTableNearby: boolean;
+    furnaceNearby: boolean;
+    bedNearby: boolean;
+  };
   strategy: {
     mainGoal: string;
     subGoals: string[];
