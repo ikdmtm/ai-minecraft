@@ -305,8 +305,27 @@ export class SkillExecutor {
       this.assertActive(token);
     }
 
-    const distance = this.bot.entity.position.distanceTo(new Vec3(target.x, target.y, target.z));
+    const targetVec = new Vec3(target.x, target.y, target.z);
+    let distance = this.bot.entity.position.distanceTo(targetVec);
     if (distance <= 1.8 && !isBodyInWater(this.bot)) return;
+
+    const shelters = this.provenance?.listStructures('shelter') ?? [];
+    const currentShelter = shelters.find(entry =>
+      this.bot.entity.position.distanceTo(
+        new Vec3(entry.position.x, entry.position.y, entry.position.z),
+      ) <= 1.6,
+    );
+    const targetShelter = shelters.find(entry =>
+      targetVec.distanceTo(new Vec3(entry.position.x, entry.position.y, entry.position.z)) <= 1.2,
+    );
+
+    if (currentShelter && !targetShelter) {
+      await this.passShelterDoor(currentShelter.position, 'out', token);
+    } else if (targetShelter && !currentShelter) {
+      await this.passShelterDoor(targetShelter.position, 'in', token);
+      distance = this.bot.entity.position.distanceTo(targetVec);
+      if (distance <= 1.8) return;
+    }
 
     const movements = this.normalMovements();
     movements.canDig = false;
@@ -319,9 +338,79 @@ export class SkillExecutor {
     );
     this.assertActive(token);
 
-    const finalDistance = this.bot.entity.position.distanceTo(new Vec3(target.x, target.y, target.z));
+    const finalDistance = this.bot.entity.position.distanceTo(targetVec);
     if (finalDistance > 2.25) {
       throw new Error(`navigate_postcondition_failed:${finalDistance.toFixed(1)}m`);
+    }
+  }
+
+  private async passShelterDoor(
+    center: { x: number; y: number; z: number },
+    direction: 'in' | 'out',
+    token: number,
+  ): Promise<void> {
+    const base = new Vec3(center.x, center.y, center.z);
+    const outside = base.offset(0, 0, 2);
+    const doorPos = base.offset(0, 0, 1);
+
+    if (direction === 'in') {
+      const movements = this.normalMovements();
+      movements.canDig = false;
+      this.bot.pathfinder.setMovements(movements);
+      await withTimeout(
+        this.bot.pathfinder.goto(new goals.GoalNear(outside.x, outside.y, outside.z, 1)),
+        8_000,
+        'shelter_approach_timeout',
+        () => this.bot.pathfinder.stop(),
+      );
+      this.assertActive(token);
+    }
+
+    await this.setShelterDoorOpen(doorPos, true, token);
+
+    const destination = direction === 'in' ? base : outside;
+    const movements = this.normalMovements();
+    movements.canDig = false;
+    this.bot.pathfinder.setMovements(movements);
+    await withTimeout(
+      this.bot.pathfinder.goto(new goals.GoalBlock(destination.x, destination.y, destination.z)),
+      6_000,
+      `shelter_door_${direction}_timeout`,
+      () => this.bot.pathfinder.stop(),
+    );
+    this.assertActive(token);
+
+    await this.setShelterDoorOpen(doorPos, false, token);
+  }
+
+  private async setShelterDoorOpen(
+    position: Vec3,
+    desiredOpen: boolean,
+    token: number,
+  ): Promise<void> {
+    const door = this.bot.blockAt(position);
+    if (!door || !door.name.endsWith('_door')) {
+      throw new Error('known_shelter_door_missing');
+    }
+
+    const properties = typeof (door as any).getProperties === 'function'
+      ? (door as any).getProperties()
+      : {};
+    const isOpen = Boolean(properties.open);
+    if (isOpen === desiredOpen) return;
+
+    await this.bot.lookAt(door.position.offset(0.5, 0.5, 0.5), true);
+    this.assertActive(token);
+    await this.bot.activateBlock(door);
+    await delay(120);
+    this.assertActive(token);
+
+    const refreshed = this.bot.blockAt(position);
+    const refreshedProperties = refreshed && typeof (refreshed as any).getProperties === 'function'
+      ? (refreshed as any).getProperties()
+      : {};
+    if (Boolean(refreshedProperties.open) !== desiredOpen) {
+      throw new Error(`shelter_door_state_failed:${desiredOpen ? 'open' : 'closed'}`);
     }
   }
 
