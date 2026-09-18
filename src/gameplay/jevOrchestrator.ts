@@ -5,9 +5,12 @@ import type { RecentEvent } from '../types/gameState.js';
 import { WorldSensor } from './worldSensor.js';
 import { SkillExecutor } from './skillExecutor.js';
 import { SafetyKernel } from './safetyKernel.js';
-import { JevPolicy } from './jevPolicy.js';
 import { StrategicPlanner } from './strategicPlanner.js';
+import { SemanticWorldModel } from './semanticWorldModel.js';
+import { ExecutivePolicy } from './executivePolicy.js';
+import { TaskExecutor } from './taskExecutor.js';
 import type { JevWorldState } from './typedActions.js';
+import type { ExecutiveWorldState } from './executiveTypes.js';
 
 export type LLMProvider = 'anthropic' | 'openai';
 
@@ -48,11 +51,13 @@ export class CognitiveOrchestrator {
   private readonly shared = new SharedStateBus();
   private bot: mineflayer.Bot | null = null;
   private sensor: WorldSensor | null = null;
-  private executor: SkillExecutor | null = null;
+  private primitive: SkillExecutor | null = null;
+  private semantic: SemanticWorldModel | null = null;
+  private taskExecutor: TaskExecutor | null = null;
   private safety: SafetyKernel | null = null;
-  private policy: JevPolicy | null = null;
+  private executivePolicy: ExecutivePolicy | null = null;
   private planner: StrategicPlanner | null = null;
-  private policyLoopPromise: Promise<void> | null = null;
+  private executiveLoopPromise: Promise<void> | null = null;
   private running = false;
   private generation = 1;
 
@@ -99,8 +104,13 @@ export class CognitiveOrchestrator {
   }
 
   getJevWorldState(): JevWorldState | null {
-    if (!this.sensor || !this.executor) return null;
-    return this.captureWorldState();
+    if (!this.sensor || !this.primitive) return null;
+    return this.sensor.capture(this.primitive.snapshot());
+  }
+
+  getExecutiveWorldState(): ExecutiveWorldState | null {
+    if (!this.semantic || !this.taskExecutor) return null;
+    return this.semantic.capture(this.taskExecutor.snapshot());
   }
 
   async start(events: CognitiveEvents): Promise<void> {
@@ -108,7 +118,9 @@ export class CognitiveOrchestrator {
     this.running = true;
 
     const typesafeApiKey = process.env.TYPESAFE_API_KEY?.trim();
-    if (!this.config.openaiApiKey) throw new Error('OPENAI_API_KEY is required for gameplay policy and strategic planning');
+    if (!this.config.openaiApiKey) {
+      throw new Error('OPENAI_API_KEY is required for executive policy and strategic planning');
+    }
 
     this.bot = mineflayer.createBot({
       host: this.config.mcHost,
@@ -117,39 +129,44 @@ export class CognitiveOrchestrator {
       hideErrors: false,
     });
     this.bot.loadPlugin(pathfinder);
-
     await waitForSpawn(this.bot);
 
-    this.executor = new SkillExecutor(this.bot, this.shared);
+    this.primitive = new SkillExecutor(this.bot, this.shared);
     this.sensor = new WorldSensor(this.bot, this.shared);
-    this.safety = new SafetyKernel(this.bot, this.shared, this.executor);
-    this.policy = new JevPolicy({
-      apiKey: typesafeApiKey,
+    this.semantic = new SemanticWorldModel(this.bot, this.shared);
+    this.taskExecutor = new TaskExecutor(
+      this.bot,
+      this.shared,
+      this.primitive,
+      this.sensor,
+      this.semantic,
+    );
+    this.safety = new SafetyKernel(this.bot, this.shared, this.primitive);
+    this.executivePolicy = new ExecutivePolicy({
+      typesafeApiKey,
       openaiApiKey: this.config.openaiApiKey,
       provider: parsePolicyProvider(process.env.POLICY_PROVIDER),
-      model: process.env.JEV_MODEL?.trim() || 'jev-latest',
+      jevModel: process.env.JEV_MODEL?.trim() || 'jev-latest',
       openaiModel: process.env.OPENAI_POLICY_MODEL?.trim() || 'gpt-5.6-luna',
-      baseUrl: process.env.TYPESAFE_BASE_URL?.trim() || undefined,
-      confidenceFloor: parseNumber(process.env.JEV_CONFIDENCE_FLOOR, 0.2),
-      timeoutMs: parsePositiveInt(process.env.JEV_TIMEOUT_MS, 3_000),
-      openaiTimeoutMs: parsePositiveInt(process.env.OPENAI_POLICY_TIMEOUT_MS, 8_000),
+      typesafeBaseUrl: process.env.TYPESAFE_BASE_URL?.trim() || undefined,
+      timeoutMs: parsePositiveInt(process.env.OPENAI_POLICY_TIMEOUT_MS, 8_000),
     });
     this.planner = new StrategicPlanner(
       this.shared,
       this.config.openaiApiKey,
       this.config.strategicModel,
-      () => this.captureWorldState(),
+      () => this.sensor!.capture(this.primitive!.snapshot()),
       goal => events.onGoalChanged(goal),
     );
 
     this.setupBotEvents(events);
     this.safety.start();
     this.planner.start();
-    this.policyLoopPromise = this.runPolicyLoop();
+    this.executiveLoopPromise = this.runExecutiveLoop();
 
     this.shared.pushEvent({
-      type: 'policy_runtime_started',
-      detail: `provider=${this.policy.getProvider()} model=${this.policy.getModel()} interval_ms=${parsePositiveInt(process.env.JEV_INTERVAL_MS, 400)}`,
+      type: 'executive_runtime_started',
+      detail: `provider=${this.executivePolicy.getProvider()} model=${this.executivePolicy.getModel()} mode=event_driven`,
       importance: 'medium',
     });
   }
@@ -159,16 +176,19 @@ export class CognitiveOrchestrator {
     this.running = false;
     this.safety?.stop();
     this.planner?.stop();
-    this.executor?.stop();
+    this.taskExecutor?.stop();
+    this.primitive?.stop();
     try { this.bot?.pathfinder.stop(); } catch { /* best effort */ }
     try { this.bot?.quit(); } catch { /* best effort */ }
     this.bot = null;
     this.sensor = null;
-    this.executor = null;
+    this.primitive = null;
+    this.semantic = null;
+    this.taskExecutor = null;
     this.safety = null;
-    this.policy = null;
+    this.executivePolicy = null;
     this.planner = null;
-    this.policyLoopPromise = null;
+    this.executiveLoopPromise = null;
   }
 
   destroy(): void {
@@ -188,39 +208,54 @@ export class CognitiveOrchestrator {
     });
   }
 
-  private async runPolicyLoop(): Promise<void> {
-    const intervalMs = parsePositiveInt(process.env.JEV_INTERVAL_MS, 400);
+  private async runExecutiveLoop(): Promise<void> {
     while (this.running) {
-      const started = Date.now();
       try {
-        if (!this.sensor || !this.executor || !this.policy) break;
-        const state = this.captureWorldState();
-        const decision = await this.policy.decide(state);
+        if (!this.semantic || !this.taskExecutor || !this.executivePolicy) break;
+
+        // Policy is invoked only at task boundaries. This is intentionally
+        // event-driven: no 400ms micromanagement while a task is in flight.
+        const before = this.semantic.capture(this.taskExecutor.snapshot());
+        const decision = await this.executivePolicy.decide(before);
         if (!this.running) break;
+
+        // Re-capture meaningful state before executing. If inventory, safety
+        // context, strategy, or task state changed while the model was thinking,
+        // discard the stale answer instead of acting on an old world.
+        const afterThink = this.semantic.capture(this.taskExecutor.snapshot());
+        if (decision.basedOnRevision !== afterThink.revision) {
+          console.log(JSON.stringify({
+            ts: new Date().toISOString(),
+            kind: 'executive_stale_decision',
+            based_on_revision: decision.basedOnRevision,
+            current_revision: afterThink.revision,
+            task: decision.task,
+            target_id: decision.targetId ?? null,
+          }));
+          await delay(50);
+          continue;
+        }
+
         this.shared.markTacticalUpdate();
-        this.executor.dispatch(decision, state, 'normal');
+        const result = await this.taskExecutor.execute(decision);
+        console.log(JSON.stringify({
+          ts: new Date().toISOString(),
+          kind: 'executive_task_result',
+          task: decision.task,
+          target_id: decision.targetId ?? null,
+          status: result.status,
+          detail: result.detail,
+        }));
       } catch (error) {
         console.log(JSON.stringify({
           ts: new Date().toISOString(),
-          kind: 'policy_loop_error',
+          kind: 'executive_loop_error',
           message: error instanceof Error ? error.message : String(error),
         }));
       }
-      const elapsed = Date.now() - started;
-      await delay(Math.max(25, intervalMs - elapsed));
-    }
-  }
 
-  private captureWorldState(): JevWorldState {
-    if (!this.sensor || !this.executor) throw new Error('Gameplay runtime not initialized');
-    const state = this.sensor.capture(this.executor.snapshot());
-    state.blockCandidates = state.blockCandidates.filter(candidate =>
-      !this.executor!.isTargetTemporarilyBlocked(candidate.id),
-    );
-    state.entityCandidates = state.entityCandidates.filter(candidate =>
-      !this.executor!.isTargetTemporarilyBlocked(candidate.id),
-    );
-    return state;
+      await delay(100);
+    }
   }
 
   private setupBotEvents(events: CognitiveEvents): void {
@@ -271,12 +306,6 @@ function parsePositiveInt(raw: string | undefined, fallback: number): number {
   if (!raw) return fallback;
   const value = Number.parseInt(raw, 10);
   return Number.isFinite(value) && value > 0 ? value : fallback;
-}
-
-function parseNumber(raw: string | undefined, fallback: number): number {
-  if (!raw) return fallback;
-  const value = Number(raw);
-  return Number.isFinite(value) ? value : fallback;
 }
 
 function parsePolicyProvider(raw: string | undefined): 'auto' | 'jev' | 'openai' {
