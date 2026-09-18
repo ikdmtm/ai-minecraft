@@ -66,6 +66,7 @@ export class SemanticWorldModel {
         craftingTableNearby: Boolean(this.bot.findBlock({ matching: block => block.name === 'crafting_table', maxDistance: 8 })),
         furnaceNearby: Boolean(this.bot.findBlock({ matching: block => block.name === 'furnace', maxDistance: 8 })),
         bedNearby: Boolean(this.bot.findBlock({ matching: block => block.name.endsWith('_bed'), maxDistance: 16 })),
+        shelterNearby: Boolean(this.provenance?.hasStructureNearby('shelter', position, 24)),
       },
       strategy: {
         mainGoal: this.shared.get().currentGoal || 'Survive and make normal Minecraft progress.',
@@ -104,6 +105,7 @@ export class SemanticWorldModel {
       ...this.findTreeClusters(),
       ...this.findStoneSources(),
       ...this.findFoodSources(),
+      ...this.findItemDrops(),
     ].sort((a, b) => b.score - a.score).slice(0, 24);
   }
 
@@ -418,6 +420,34 @@ export class SemanticWorldModel {
       .slice(0, 5);
   }
 
+  private findItemDrops(): SemanticTarget[] {
+    const origin = this.bot.entity.position;
+    return Object.values(this.bot.entities)
+      .filter(entity => Boolean(entity && entity.name === 'item' && entity.position))
+      .map(entity => {
+        const distance = origin.distanceTo(entity.position);
+        return {
+          id: `item_drop:${entity.id}`,
+          kind: 'item_drop' as const,
+          position: {
+            x: entity.position.x,
+            y: entity.position.y,
+            z: entity.position.z,
+          },
+          distance: round1(distance),
+          score: 170 - distance * 3,
+          risk: distance <= 8 ? 'low' as const : 'medium' as const,
+          metadata: {
+            entityId: entity.id,
+            collectible: true,
+          },
+        };
+      })
+      .filter(target => target.distance <= 20)
+      .sort((a, b) => b.score - a.score)
+      .slice(0, 8);
+  }
+
   private findFoodSources(): SemanticTarget[] {
     const origin = this.bot.entity.position;
     return Object.values(this.bot.entities)
@@ -513,6 +543,7 @@ function semanticFingerprint(state: Omit<ExecutiveWorldState, 'revision'>): stri
     state.facilities.craftingTableNearby ? 1 : 0,
     state.facilities.furnaceNearby ? 1 : 0,
     state.facilities.bedNearby ? 1 : 0,
+    state.facilities.shelterNearby ? 1 : 0,
     state.strategy.mainGoal,
     state.activeTask.id,
     state.activeTask.status,
