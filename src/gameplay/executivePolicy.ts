@@ -304,8 +304,8 @@ function validateTargetId(value: string | undefined, targets: SemanticTarget[]):
 function normalizeTaskAmount(task: ExecutiveTaskType, value: number | undefined): number {
   const raw = Number.isFinite(value) ? Math.round(value as number) : defaultAmountForTask(task);
   switch (task) {
-    case 'GATHER_WOOD': return Math.max(4, Math.min(10, raw));
-    case 'ACQUIRE_STONE': return Math.max(6, Math.min(20, raw));
+    case 'GATHER_WOOD': return Math.max(8, Math.min(12, raw));
+    case 'ACQUIRE_STONE': return Math.max(12, Math.min(20, raw));
     case 'GATHER_FOOD': return Math.max(2, Math.min(8, raw));
     default: return 1;
   }
