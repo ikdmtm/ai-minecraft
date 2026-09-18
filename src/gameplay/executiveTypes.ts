@@ -17,7 +17,8 @@ export type SemanticTargetKind =
   | 'excavation_site'
   | 'tree_cluster'
   | 'stone_source'
-  | 'food_source';
+  | 'food_source'
+  | 'item_drop';
 
 export interface SemanticPosition {
   x: number;
