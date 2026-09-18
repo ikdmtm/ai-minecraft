@@ -117,12 +117,12 @@ function attachDiagnostics(): void {
   add(bot.pathfinder, 'goal_reached', () => logEvent('path_goal_reached', {
     position: positionOf(bot),
     task: orchestrator.getExecutiveWorldState()?.activeTask ?? null,
-    task: orchestrator.getExecutiveWorldState()?.activeTask ?? null,
     skill: orchestrator.getJevWorldState()?.currentSkill ?? null,
   }));
   add(bot.pathfinder, 'path_reset', (reason: unknown) => logEvent('path_reset', {
     reason: stringify(reason),
     position: positionOf(bot),
+    task: orchestrator.getExecutiveWorldState()?.activeTask ?? null,
     skill: orchestrator.getJevWorldState()?.currentSkill ?? null,
   }));
   add(bot.pathfinder, 'path_update', (result: any) => logEvent('path_update', {
