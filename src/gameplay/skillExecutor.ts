@@ -24,6 +24,11 @@ const WEAPON_ORDER = [
   'netherite_axe', 'diamond_axe', 'iron_axe', 'stone_axe', 'wooden_axe',
 ];
 
+const PICKAXE_ORDER = ['netherite_pickaxe', 'diamond_pickaxe', 'iron_pickaxe', 'stone_pickaxe', 'wooden_pickaxe'];
+const AXE_ORDER = ['netherite_axe', 'diamond_axe', 'iron_axe', 'stone_axe', 'wooden_axe'];
+const SHOVEL_ORDER = ['netherite_shovel', 'diamond_shovel', 'iron_shovel', 'stone_shovel', 'wooden_shovel'];
+const NORMAL_LIQUID_COST = 12;
+
 export class SkillExecutor {
   private sequence = 0;
   private cancellationToken = 0;
