@@ -424,6 +424,7 @@ export class TaskExecutor {
       const result = await this.runPrimitive({
         action: 'DIG_STAIRCASE',
         direction,
+        targetPosition: site.position,
         confidence: 1,
         source: 'task',
         reason: `safe_excavation_site:${site.id}`,
@@ -592,6 +593,7 @@ export class TaskExecutor {
       });
       const result = await this.runPrimitive({
         action: 'BUILD_SHELTER',
+        targetPosition: site.position,
         confidence: 1,
         source: 'task',
         reason: 'semantic_first_night_shelter',
