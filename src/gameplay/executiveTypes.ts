@@ -14,6 +14,7 @@ export type ExecutiveStructure = 'none' | 'shelter';
 export type SemanticTargetKind =
   | 'land'
   | 'shelter_site'
+  | 'excavation_site'
   | 'tree_cluster'
   | 'stone_source'
   | 'food_source';
