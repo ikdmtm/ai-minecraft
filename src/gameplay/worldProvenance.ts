@@ -37,6 +37,20 @@ export class WorldProvenance {
     });
   }
 
+  listStructures(kind?: string): Array<{
+    kind: string;
+    position: { x: number; y: number; z: number };
+    completedAt: number;
+  }> {
+    return [...this.structures.values()]
+      .filter(entry => !kind || entry.kind === kind)
+      .map(entry => ({
+        kind: entry.kind,
+        position: { ...entry.position },
+        completedAt: entry.completedAt,
+      }));
+  }
+
   hasStructureNearby(
     kind: string,
     position: { x: number; y: number; z: number },
