@@ -186,7 +186,7 @@ ensure_minecraft_server() {
 }
 
 stop_previous_gameplay() {
-  [[ -f "$GAMEPLAY_PID_FILE" ]] || return
+  [[ -f "$GAMEPLAY_PID_FILE" ]] || return 0
   local old_pid
   old_pid="$(cat "$GAMEPLAY_PID_FILE" 2>/dev/null || true)"
   if [[ -n "$old_pid" ]] && kill -0 "$old_pid" 2>/dev/null; then
