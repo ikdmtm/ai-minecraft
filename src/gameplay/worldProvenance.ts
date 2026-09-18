@@ -7,6 +7,11 @@ export class WorldProvenance {
     role: PlacedBlockRole;
     placedAt: number;
   }>();
+  private readonly structures = new Map<string, {
+    kind: string;
+    position: { x: number; y: number; z: number };
+    completedAt: number;
+  }>();
 
   markPlaced(position: { x: number; y: number; z: number }, role: PlacedBlockRole): void {
     this.placed.set(key(position), { role, placedAt: Date.now() });
@@ -22,6 +27,31 @@ export class WorldProvenance {
 
   roleOf(position: { x: number; y: number; z: number }): PlacedBlockRole | null {
     return this.placed.get(key(position))?.role ?? null;
+  }
+
+  markStructure(kind: string, position: { x: number; y: number; z: number }): void {
+    this.structures.set(`${kind}:${key(position)}`, {
+      kind,
+      position: { x: Math.floor(position.x), y: Math.floor(position.y), z: Math.floor(position.z) },
+      completedAt: Date.now(),
+    });
+  }
+
+  hasStructureNearby(
+    kind: string,
+    position: { x: number; y: number; z: number },
+    maxDistance: number,
+  ): boolean {
+    for (const entry of this.structures.values()) {
+      if (entry.kind !== kind) continue;
+      const distance = Math.hypot(
+        entry.position.x - position.x,
+        entry.position.y - position.y,
+        entry.position.z - position.z,
+      );
+      if (distance <= maxDistance) return true;
+    }
+    return false;
   }
 
   pruneMissing(blockAt: (pos: Vec3) => any | null): void {
