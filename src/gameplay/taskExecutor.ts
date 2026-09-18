@@ -5,8 +5,9 @@ import { SkillExecutor } from './skillExecutor.js';
 import type { WorldSensor } from './worldSensor.js';
 import type {
   ExecutiveDecision,
+  ExecutiveResource,
+  ExecutiveStructure,
   ExecutiveTaskSnapshot,
-  ExecutiveTaskType,
   ExecutiveWorldState,
   SemanticTarget,
   TaskExecutionResult,
@@ -62,6 +63,9 @@ export class TaskExecutor {
       task: decision.task,
       target_id: decision.targetId ?? null,
       amount: decision.amount ?? null,
+      resource: decision.resource ?? null,
+      craft_item: decision.craftItem ?? null,
+      structure: decision.structure ?? null,
       source: decision.source,
       confidence: decision.confidence,
       based_on_revision: decision.basedOnRevision,
@@ -70,26 +74,26 @@ export class TaskExecutor {
     try {
       let detail = '';
       switch (decision.task) {
-        case 'REACH_LAND':
-          detail = await this.reachLand(decision.targetId, startedGoal);
+        case 'NAVIGATE_TARGET':
+          detail = await this.navigateTarget(decision.targetId, startedGoal);
           break;
-        case 'GATHER_WOOD':
-          detail = await this.gatherWood(decision.amount ?? 8, decision.targetId, startedGoal);
+        case 'GATHER_RESOURCE':
+          detail = await this.gatherResource(
+            decision.resource ?? 'none',
+            decision.amount ?? 1,
+            decision.targetId,
+            startedGoal,
+          );
           break;
-        case 'PREPARE_STARTER_TOOLS':
-          detail = await this.prepareStarterTools(startedGoal);
+        case 'CRAFT_ITEM':
+          detail = await this.craftExecutiveItem(decision.craftItem ?? 'none', startedGoal);
           break;
-        case 'ACQUIRE_STONE':
-          detail = await this.acquireStone(decision.amount ?? 12, startedGoal);
-          break;
-        case 'UPGRADE_STONE_TOOLS':
-          detail = await this.upgradeStoneTools(startedGoal);
-          break;
-        case 'GATHER_FOOD':
-          detail = await this.gatherFood(decision.amount ?? 4, decision.targetId, startedGoal);
-          break;
-        case 'ESTABLISH_SHELTER':
-          detail = await this.establishShelter(decision.targetId, startedGoal);
+        case 'BUILD_STRUCTURE':
+          detail = await this.buildStructure(
+            decision.structure ?? 'none',
+            decision.targetId,
+            startedGoal,
+          );
           break;
         case 'WAIT':
           await delay(500);
@@ -113,6 +117,85 @@ export class TaskExecutor {
   stop(): void {
     if (this.current.status === 'running') {
       this.finish('interrupted', 'runtime_stop');
+    }
+  }
+
+  private async navigateTarget(
+    targetId: string | undefined,
+    startedGoal: string,
+  ): Promise<string> {
+    const state = this.semantic.capture(this.snapshot());
+    const target = state.targets.find(candidate => candidate.id === targetId);
+    if (!target) throw new Error('navigate_semantic_target_missing');
+
+    this.update('navigating_target', {
+      target: target.id,
+      kind: target.kind,
+      distance: target.distance,
+    });
+    const result = await this.runPrimitive({
+      action: 'NAVIGATE',
+      targetPosition: target.position,
+      confidence: 1,
+      source: 'task',
+      reason: `executive_navigate:${target.kind}`,
+    }, 30_000);
+    if (result.status !== 'succeeded') {
+      throw new Error(`navigate_target_failed:${result.detail}`);
+    }
+    this.safeCheckpoint(startedGoal, 'target_reached');
+    return `reached:${target.id}`;
+  }
+
+  private async gatherResource(
+    resource: ExecutiveResource,
+    amount: number,
+    targetId: string | undefined,
+    startedGoal: string,
+  ): Promise<string> {
+    switch (resource) {
+      case 'logs':
+        return this.gatherWood(amount, targetId, startedGoal);
+      case 'cobblestone':
+        return this.acquireStone(amount, startedGoal);
+      case 'food':
+        return this.gatherFood(amount, targetId, startedGoal);
+      default:
+        throw new Error('gather_resource_missing_resource');
+    }
+  }
+
+  private async craftExecutiveItem(
+    item: TypedGameplayDecision['craftItem'],
+    startedGoal: string,
+  ): Promise<string> {
+    if (!item || item === 'none') throw new Error('craft_item_missing_item');
+
+    this.update('crafting_item', { item });
+    const result = await this.runPrimitive({
+      action: 'CRAFT',
+      craftItem: item,
+      confidence: 1,
+      source: 'task',
+      reason: 'executive_craft_item',
+    }, 30_000);
+    if (result.status !== 'succeeded') {
+      throw new Error(`craft_item_failed:${item}:${result.detail}`);
+    }
+    this.safeCheckpoint(startedGoal, `crafted_${item}`);
+    return `crafted:${item}`;
+  }
+
+  private async buildStructure(
+    structure: ExecutiveStructure,
+    targetId: string | undefined,
+    startedGoal: string,
+  ): Promise<string> {
+    switch (structure) {
+      case 'shelter':
+        return this.establishShelter(targetId, startedGoal);
+      default:
+        throw new Error('build_structure_missing_structure');
     }
   }
 
