@@ -66,6 +66,27 @@ export class SkillExecutor {
     this.cancel('runtime_stop');
   }
 
+  async runAndWait(
+    decision: TypedGameplayDecision,
+    world: JevWorldState | null,
+    priority: 'normal' | 'safety' = 'normal',
+    timeoutMs = 35_000,
+  ): Promise<SkillSnapshot> {
+    const beforeId = this.current.id;
+    this.dispatch(decision, world, priority);
+    const started = Date.now();
+
+    while (Date.now() - started < timeoutMs) {
+      const snapshot = this.snapshot();
+      if (snapshot.id !== beforeId && snapshot.status !== 'running') return snapshot;
+      if (snapshot.id === beforeId && snapshot.status !== 'running' && decision.action === 'WAIT') return snapshot;
+      await delay(75);
+    }
+
+    if (this.current.status === 'running') this.cancel(`primitive_wait_timeout:${decision.action}`);
+    return this.snapshot();
+  }
+
   dispatch(
     decision: TypedGameplayDecision,
     world: JevWorldState | null,
@@ -119,6 +140,7 @@ export class SkillExecutor {
       target_id: targetId,
       craft_item: decision.craftItem ?? null,
       direction: decision.direction ?? null,
+      target_position: decision.targetPosition ?? null,
       source: decision.source,
       confidence: decision.confidence,
     });
@@ -134,6 +156,10 @@ export class SkillExecutor {
   ): Promise<void> {
     try {
       switch (decision.action) {
+        case 'NAVIGATE':
+          if (!decision.targetPosition) throw new Error('navigate_target_missing');
+          await this.navigate(decision.targetPosition, token);
+          break;
         case 'EXPLORE':
           await this.explore(decision.direction ?? 'E', token);
           break;
@@ -241,6 +267,60 @@ export class SkillExecutor {
       detail,
     };
     this.shared.setReflexState('idle');
+  }
+
+  private async navigate(
+    target: { x: number; y: number; z: number },
+    token: number,
+  ): Promise<void> {
+    this.updateDetail(`navigating_to ${target.x.toFixed(1)},${target.y.toFixed(1)},${target.z.toFixed(1)}`);
+
+    if (isBodyInWater(this.bot)) {
+      await this.swimToward(target, token, 9_000);
+      this.assertActive(token);
+    }
+
+    const distance = this.bot.entity.position.distanceTo(new Vec3(target.x, target.y, target.z));
+    if (distance <= 1.8 && !isBodyInWater(this.bot)) return;
+
+    const movements = this.normalMovements();
+    movements.canDig = false;
+    this.bot.pathfinder.setMovements(movements);
+    await withTimeout(
+      this.bot.pathfinder.goto(new goals.GoalNear(target.x, target.y, target.z, 1)),
+      14_000,
+      'navigate_path_timeout',
+      () => this.bot.pathfinder.stop(),
+    );
+    this.assertActive(token);
+  }
+
+  private async swimToward(
+    target: { x: number; y: number; z: number },
+    token: number,
+    timeoutMs: number,
+  ): Promise<void> {
+    const started = Date.now();
+    try { this.bot.pathfinder.stop(); } catch { /* best effort */ }
+    this.bot.setControlState('forward', true);
+    this.bot.setControlState('jump', true);
+    this.bot.setControlState('sprint', true);
+
+    try {
+      while (Date.now() - started < timeoutMs) {
+        this.assertActive(token);
+        const position = this.bot.entity.position;
+        await this.bot.lookAt(new Vec3(target.x, Math.max(position.y + 1.2, target.y + 1), target.z), true);
+        if (!isBodyInWater(this.bot)) return;
+        if (Math.hypot(position.x - target.x, position.z - target.z) <= 1.5 && position.y >= target.y - 1) return;
+        await delay(100);
+      }
+      throw new Error('swim_to_land_timeout');
+    } finally {
+      this.bot.setControlState('forward', false);
+      this.bot.setControlState('jump', false);
+      this.bot.setControlState('sprint', false);
+    }
   }
 
   private async explore(direction: CompassDirection, token: number): Promise<void> {
@@ -779,6 +859,7 @@ export class SkillExecutor {
 
 function actionToReflexState(action: TypedGameplayDecision['action']): ReflexState {
   switch (action) {
+    case 'NAVIGATE':
     case 'EXPLORE': return 'exploring';
     case 'MINE':
     case 'DIG_STAIRCASE': return 'mining';
@@ -887,4 +968,16 @@ function isHazardBlock(block: any | null): boolean {
 function isHeadSubmerged(bot: mineflayer.Bot): boolean {
   const head = bot.blockAt(bot.entity.position.offset(0, 1.62, 0))?.name ?? '';
   return head === 'water' || head === 'bubble_column';
+}
+
+
+function isBodyInWater(bot: mineflayer.Bot): boolean {
+  const position = bot.entity.position;
+  const waterlike = new Set(['water', 'bubble_column', 'seagrass', 'tall_seagrass', 'kelp', 'kelp_plant']);
+  const names = [
+    bot.blockAt(position)?.name,
+    bot.blockAt(position.offset(0, 1, 0))?.name,
+    bot.blockAt(position.offset(0, -1, 0))?.name,
+  ].filter(Boolean) as string[];
+  return names.some(name => waterlike.has(name));
 }
