@@ -140,6 +140,9 @@ export class SkillExecutor {
         case 'MINE':
           await this.mine(this.findBlockCandidate(world, decision.blockTargetId), token);
           break;
+        case 'DIG_STAIRCASE':
+          await this.digStaircase(decision.direction ?? 'E', token);
+          break;
         case 'CRAFT':
           await this.craft(decision.craftItem ?? 'planks', token);
           break;
@@ -153,7 +156,7 @@ export class SkillExecutor {
           await this.eat(token);
           break;
         case 'FLEE':
-          await this.flee(decision.direction ?? 'E', token);
+          await this.flee(decision.direction ?? 'E', token, decision.reason);
           break;
         case 'ATTACK':
           await this.attack(this.findEntityCandidate(world, decision.entityTargetId), token);
@@ -247,10 +250,14 @@ export class SkillExecutor {
     const tx = start.x + dx * distance;
     const tz = start.z + dz * distance;
     this.updateDetail(`exploring ${direction} toward ${tx.toFixed(1)},${tz.toFixed(1)}`);
-    const movements = new Movements(this.bot);
-    movements.allowSprinting = true;
+    const movements = this.normalMovements();
     this.bot.pathfinder.setMovements(movements);
-    await this.bot.pathfinder.goto(new goals.GoalXZ(tx, tz));
+    await withTimeout(
+      this.bot.pathfinder.goto(new goals.GoalXZ(tx, tz)),
+      15_000,
+      'explore_path_timeout',
+      () => this.bot.pathfinder.stop(),
+    );
     this.assertActive(token);
   }
 
@@ -261,8 +268,7 @@ export class SkillExecutor {
     if (!block || block.name === 'air') throw new Error(`target_block_missing:${candidate.id}`);
 
     this.updateDetail(`moving_to_visible_face ${block.name} ${block.position.x},${block.position.y},${block.position.z}`);
-    const movements = new Movements(this.bot);
-    movements.allowSprinting = true;
+    const movements = this.normalMovements();
     this.bot.pathfinder.setMovements(movements);
 
     await withTimeout(
@@ -278,13 +284,7 @@ export class SkillExecutor {
     if (!this.bot.canSeeBlock(fresh)) throw new Error(`target_not_visible:${fresh.name}`);
     if (!this.bot.canDigBlock(fresh)) throw new Error(`cannot_dig:${fresh.name}`);
 
-    const tool = this.bot.pathfinder.bestHarvestTool(fresh);
-    if (tool) {
-      await this.bot.equip(tool, 'hand');
-      this.assertActive(token);
-    } else if (requiresHarvestTool(fresh)) {
-      throw new Error(`missing_harvest_tool:${fresh.name}`);
-    }
+    await this.equipAppropriateTool(fresh, token);
 
     const held = this.bot.heldItem?.name ?? 'hand';
     this.updateDetail(`digging ${fresh.name} with ${held}`);
