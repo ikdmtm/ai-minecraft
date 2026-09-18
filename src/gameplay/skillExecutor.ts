@@ -575,38 +575,55 @@ export class SkillExecutor {
 
   private async buildShelter(token: number): Promise<void> {
     const base = this.bot.entity.position.floored();
-    const offsets = [
-      [-1, -1], [0, -1], [1, -1],
-      [-1, 0],           [1, 0],
-      [-1, 1],  [0, 1], [1, 1],
-    ] as const;
+    const underPlayer = this.bot.blockAt(base.offset(0, -1, 0));
+    if (!isSolidGround(underPlayer)) throw new Error('shelter_requires_solid_ground');
+
+    // Emergency first-night shelter: four 2-high cardinal walls plus one roof
+    // block over the player. Nine blocks is intentionally affordable early-game.
+    const walls = [[1, 0], [-1, 0], [0, 1], [0, -1]] as const;
     let placed = 0;
 
-    for (const [dx, dz] of offsets) {
+    for (const [dx, dz] of walls) {
       this.assertActive(token);
-      for (let dy = 1; dy <= 2; dy++) {
+      const ground = this.bot.blockAt(base.offset(dx, -1, dz));
+      if (!isSolidGround(ground)) throw new Error('shelter_uneven_or_liquid_ground');
+
+      for (let dy = 0; dy <= 1; dy++) {
+        this.assertActive(token);
         const targetPos = base.offset(dx, dy, dz);
         const existing = this.bot.blockAt(targetPos);
         if (existing && existing.name !== 'air') continue;
+
         const item = this.nextBuildItem();
-        if (!item) {
-          if (placed >= 6) return;
-          throw new Error(`insufficient_build_material:placed=${placed}`);
-        }
+        if (!item) throw new Error(`insufficient_build_material:placed=${placed}/9`);
         await this.bot.equip(item, 'hand');
-        const reference = this.bot.blockAt(base.offset(dx, dy - 1, dz));
-        if (!reference || reference.name === 'air') continue;
-        try {
-          await this.bot.placeBlock(reference, new Vec3(0, 1, 0));
-          placed++;
-          await delay(70);
-        } catch {
-          // Some faces are not placeable; continue building the rest of the ring.
+
+        const reference = dy === 0
+          ? this.bot.blockAt(base.offset(dx, -1, dz))
+          : this.bot.blockAt(base.offset(dx, 0, dz));
+        if (!reference || reference.name === 'air') {
+          throw new Error(`shelter_missing_reference:${dx},${dy},${dz}`);
         }
+
+        await this.bot.placeBlock(reference, new Vec3(0, 1, 0));
+        placed++;
+        await delay(80);
       }
     }
 
-    if (placed < 6) throw new Error(`shelter_too_incomplete:placed=${placed}`);
+    const roofPos = base.offset(0, 2, 0);
+    const roofExisting = this.bot.blockAt(roofPos);
+    if (!roofExisting || roofExisting.name === 'air') {
+      const item = this.nextBuildItem();
+      if (!item) throw new Error(`insufficient_build_material:placed=${placed}/9`);
+      await this.bot.equip(item, 'hand');
+      const eastTop = this.bot.blockAt(base.offset(1, 1, 0));
+      if (!eastTop || eastTop.name === 'air') throw new Error('shelter_roof_reference_missing');
+      await this.bot.placeBlock(eastTop, new Vec3(-1, 0, 0));
+      placed++;
+    }
+
+    if (placed < 8) throw new Error(`shelter_too_incomplete:placed=${placed}`);
     this.shared.pushEvent({ type: 'shelter_built', detail: `placed=${placed}`, importance: 'high' });
   }
 
