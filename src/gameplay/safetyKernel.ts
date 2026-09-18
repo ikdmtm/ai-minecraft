@@ -6,6 +6,7 @@ import { SkillExecutor } from './skillExecutor.js';
 const SAFETY_TICK_MS = 100;
 const CRITICAL_HP = 4;
 const CREEPER_FLEE_DISTANCE = 5;
+const LOW_OXYGEN_LEVEL = 5;
 
 export class SafetyKernel {
   private timer: ReturnType<typeof setInterval> | null = null;
@@ -58,9 +59,11 @@ export class SafetyKernel {
         return;
       }
 
-      if ((this.bot.oxygenLevel ?? 300) < 60) {
+      const oxygen = this.bot.oxygenLevel ?? 20;
+      if (isHeadSubmerged(this.bot) && oxygen <= LOW_OXYGEN_LEVEL) {
         this.dispatch({
-          action: 'FLEE', confidence: 1, source: 'safety', direction: 'N', reason: 'low_oxygen',
+          action: 'FLEE', confidence: 1, source: 'safety', direction: 'N',
+          reason: `low_oxygen:${oxygen}`,
         });
         return;
       }
@@ -109,4 +112,10 @@ function isHostile(name: string): boolean {
     'zombie', 'skeleton', 'creeper', 'spider', 'cave_spider', 'witch', 'drowned', 'husk',
     'stray', 'pillager', 'vindicator', 'evoker', 'ravager', 'slime', 'phantom', 'blaze', 'ghast',
   ].includes(name);
+}
+
+
+function isHeadSubmerged(bot: mineflayer.Bot): boolean {
+  const head = bot.blockAt(bot.entity.position.offset(0, 1.62, 0))?.name ?? '';
+  return head === 'water' || head === 'bubble_column';
 }
