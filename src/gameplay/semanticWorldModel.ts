@@ -116,7 +116,7 @@ export class SemanticWorldModel {
           score: 180 - distance * 3 - Math.abs(stand.y - origin.y),
           risk: distance <= 20 ? 'low' : 'medium',
           metadata: {
-            flat3x3: true,
+            flat5x5: true,
             surfaceCandidate: true,
           },
         });
@@ -147,8 +147,8 @@ export class SemanticWorldModel {
   }
 
   private isFlatShelterPatch(center: SemanticPosition): boolean {
-    for (let dx = -1; dx <= 1; dx++) {
-      for (let dz = -1; dz <= 1; dz++) {
+    for (let dx = -2; dx <= 2; dx++) {
+      for (let dz = -2; dz <= 2; dz++) {
         const floor = this.bot.blockAt(new Vec3(center.x + dx, center.y - 1, center.z + dz));
         const feet = this.bot.blockAt(new Vec3(center.x + dx, center.y, center.z + dz));
         const head = this.bot.blockAt(new Vec3(center.x + dx, center.y + 1, center.z + dz));
