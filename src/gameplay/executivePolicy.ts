@@ -120,10 +120,11 @@ export class ExecutivePolicy {
         confidence: number;
       };
 
+      const task = validateTask(parsed.task);
       const decision: ExecutiveDecision = {
-        task: validateTask(parsed.task),
+        task,
         targetId: validateTargetId(parsed.target_id, state.targets),
-        amount: clampAmount(parsed.amount),
+        amount: normalizeTaskAmount(task, parsed.amount),
         confidence: clampConfidence(parsed.confidence),
         source: 'openai',
         basedOnRevision: state.revision,
@@ -295,9 +296,14 @@ function validateTargetId(value: string | undefined, targets: SemanticTarget[]):
   return targets.some(target => target.id === value) ? value : undefined;
 }
 
-function clampAmount(value: number | undefined): number {
-  if (!Number.isFinite(value)) return 8;
-  return Math.max(1, Math.min(32, Math.round(value as number)));
+function normalizeTaskAmount(task: ExecutiveTaskType, value: number | undefined): number {
+  const raw = Number.isFinite(value) ? Math.round(value as number) : defaultAmountForTask(task);
+  switch (task) {
+    case 'GATHER_WOOD': return Math.max(4, Math.min(10, raw));
+    case 'ACQUIRE_STONE': return Math.max(6, Math.min(20, raw));
+    case 'GATHER_FOOD': return Math.max(2, Math.min(8, raw));
+    default: return 1;
+  }
 }
 
 function clampConfidence(value: number | undefined): number {
