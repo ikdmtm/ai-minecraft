@@ -4,11 +4,12 @@ export type ExecutiveTaskType =
   | 'GATHER_WOOD'
   | 'PREPARE_STARTER_TOOLS'
   | 'ACQUIRE_STONE'
+  | 'UPGRADE_STONE_TOOLS'
   | 'GATHER_FOOD'
   | 'ESTABLISH_SHELTER'
   | 'WAIT';
 
-export type SemanticTargetKind = 'land' | 'tree_cluster' | 'stone_source' | 'food_source';
+export type SemanticTargetKind = 'land' | 'shelter_site' | 'tree_cluster' | 'stone_source' | 'food_source';
 
 export interface SemanticPosition {
   x: number;
@@ -85,6 +86,7 @@ export const EXECUTIVE_TASKS: ExecutiveTaskType[] = [
   'GATHER_WOOD',
   'PREPARE_STARTER_TOOLS',
   'ACQUIRE_STONE',
+  'UPGRADE_STONE_TOOLS',
   'GATHER_FOOD',
   'ESTABLISH_SHELTER',
   'WAIT',
