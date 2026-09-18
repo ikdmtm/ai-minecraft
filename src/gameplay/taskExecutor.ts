@@ -157,7 +157,7 @@ export class TaskExecutor {
       case 'logs':
         return this.gatherWood(amount, targetId, startedGoal);
       case 'cobblestone':
-        return this.acquireStone(amount, startedGoal);
+        return this.acquireStone(amount, targetId, startedGoal);
       case 'food':
         return this.gatherFood(amount, targetId, startedGoal);
       default:
@@ -259,7 +259,10 @@ export class TaskExecutor {
       if (now >= targetTotal) return `logs_collected:${now - initial}`;
 
       let raw = this.capturePrimitiveWorld();
-      const visibleLog = nearestBlock(raw, block => block.name.endsWith('_log'));
+      const visibleLog = nearestBlock(
+        raw,
+        block => block.name.endsWith('_log') && !this.primitive.isTargetTemporarilyBlocked(block.id),
+      );
       if (visibleLog) {
         const result = await this.runPrimitive({
           action: 'MINE',
@@ -317,11 +320,38 @@ export class TaskExecutor {
     return 'wooden_pickaxe_ready';
   }
 
-  private async acquireStone(requestedAmount: number, startedGoal: string): Promise<string> {
+  private async acquireStone(
+    requestedAmount: number,
+    targetId: string | undefined,
+    startedGoal: string,
+  ): Promise<string> {
     if (!hasPickaxe(inventoryMap(this.bot))) throw new Error('stone_requires_pickaxe');
 
     const initial = inventoryMap(this.bot).cobblestone ?? 0;
     const targetTotal = Math.max(initial, Math.max(3, requestedAmount));
+    const triedExcavationSites = new Set<string>();
+
+    // Respect a compatible Executive target when one was selected, but keep
+    // the body capable of recovering if that target becomes stale.
+    const initialSemantic = this.semantic.capture(this.snapshot());
+    const preferred = initialSemantic.targets.find(target =>
+      target.id === targetId &&
+      (target.kind === 'stone_source' || target.kind === 'excavation_site'),
+    );
+    if (preferred && preferred.distance > 2.5) {
+      const nav = await this.runPrimitive({
+        action: 'NAVIGATE',
+        targetPosition: preferred.position,
+        confidence: 1,
+        source: 'task',
+        reason: `navigate_${preferred.kind}`,
+      }, 30_000);
+      if (nav.status === 'interrupted') throw new Error('task_replan:stone_navigation_interrupted');
+      if (nav.status !== 'succeeded' && preferred.kind === 'excavation_site') {
+        triedExcavationSites.add(preferred.id);
+      }
+      this.safeCheckpoint(startedGoal, 'stone_target_approached');
+    }
 
     for (let step = 0; step < 24; step++) {
       const current = inventoryMap(this.bot).cobblestone ?? 0;
@@ -333,8 +363,11 @@ export class TaskExecutor {
       if (current >= targetTotal) return `cobblestone_collected:${current - initial}`;
 
       const raw = this.capturePrimitiveWorld();
-      const visibleStone = nearestBlock(raw, block =>
-        block.name === 'stone' || block.name === 'cobblestone',
+      const visibleStone = nearestBlock(
+        raw,
+        block =>
+          (block.name === 'stone' || block.name === 'cobblestone') &&
+          !this.primitive.isTargetTemporarilyBlocked(block.id),
       );
 
       if (visibleStone) {
@@ -351,19 +384,56 @@ export class TaskExecutor {
       }
 
       const semanticState = this.semantic.capture(this.snapshot());
-      if (semanticState.player.inWater || !semanticState.player.onSolidGround) {
-        throw new Error('stone_requires_safe_solid_ground');
+      const excavationSites = semanticState.targets
+        .filter(target => target.kind === 'excavation_site' && !triedExcavationSites.has(target.id))
+        .sort((a, b) => {
+          if (a.id === targetId) return -1;
+          if (b.id === targetId) return 1;
+          return b.score - a.score;
+        });
+      const site = excavationSites[0];
+      if (!site) throw new Error('no_safe_excavation_site');
+      triedExcavationSites.add(site.id);
+
+      const distance = Math.hypot(
+        this.bot.entity.position.x - site.position.x,
+        this.bot.entity.position.y - site.position.y,
+        this.bot.entity.position.z - site.position.z,
+      );
+      if (distance > 1.5) {
+        const nav = await this.runPrimitive({
+          action: 'NAVIGATE',
+          targetPosition: site.position,
+          confidence: 1,
+          source: 'task',
+          reason: 'navigate_safe_excavation_site',
+        }, 30_000);
+        if (nav.status === 'interrupted') throw new Error('task_replan:excavation_navigation_interrupted');
+        if (nav.status !== 'succeeded') {
+          this.safeCheckpoint(startedGoal, 'excavation_site_unreachable');
+          continue;
+        }
+      }
+
+      const direction = excavationDirection(site);
+      if (!direction) {
+        this.safeCheckpoint(startedGoal, 'excavation_site_missing_direction');
+        continue;
       }
 
       const result = await this.runPrimitive({
         action: 'DIG_STAIRCASE',
-        direction: chooseStairDirection(semanticState),
+        direction,
         confidence: 1,
         source: 'task',
-        reason: 'no_exposed_stone_safe_staircase',
+        reason: `safe_excavation_site:${site.id}`,
       }, 40_000);
+      if (result.status === 'interrupted') {
+        throw new Error('task_replan:staircase_interrupted');
+      }
       if (result.status !== 'succeeded') {
-        throw new Error(`staircase_failed:${result.detail}`);
+        this.safeCheckpoint(startedGoal, 'excavation_site_failed');
+        continue;
       }
       this.safeCheckpoint(startedGoal, 'staircase_step');
     }
@@ -678,13 +748,11 @@ function nearestBlock(
     .sort((a, b) => a.distance - b.distance)[0] ?? null;
 }
 
-function chooseStairDirection(state: ExecutiveWorldState): 'N' | 'E' | 'S' | 'W' {
-  const food = state.targets.find(target => target.kind === 'food_source');
-  if (!food) return 'E';
-  const dx = food.position.x - state.player.position.x;
-  const dz = food.position.z - state.player.position.z;
-  if (Math.abs(dx) > Math.abs(dz)) return dx >= 0 ? 'W' : 'E';
-  return dz >= 0 ? 'N' : 'S';
+function excavationDirection(target: SemanticTarget): 'N' | 'E' | 'S' | 'W' | null {
+  const value = target.metadata.direction;
+  return value === 'N' || value === 'E' || value === 'S' || value === 'W'
+    ? value
+    : null;
 }
 
 function delay(ms: number): Promise<void> {
