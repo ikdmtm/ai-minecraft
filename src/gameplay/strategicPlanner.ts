@@ -1,5 +1,5 @@
 import type { SharedStateBus } from '../cognitive/sharedState.js';
-import type { JevWorldState } from './typedActions.js';
+import type { ExecutiveWorldState } from './executiveTypes.js';
 
 interface StrategyOutput {
   mainGoal: string;
@@ -15,7 +15,7 @@ export class StrategicPlanner {
     private readonly shared: SharedStateBus,
     private readonly apiKey: string,
     private readonly model: string,
-    private readonly getState: () => JevWorldState,
+    private readonly getState: () => ExecutiveWorldState,
     private readonly onGoalChanged: (goal: string) => void,
   ) {}
 
@@ -65,7 +65,8 @@ export class StrategicPlanner {
           instructions: [
             'You are the long-horizon strategy layer for an autonomous Minecraft Hardcore player.',
             'Choose a useful overall objective and 3-6 concrete milestones.',
-            'Do not issue frame-by-frame movement commands. Jev handles immediate action selection.',
+            'Do not issue frame-by-frame movement commands. The executive/task layers handle immediate action selection and execution.',
+            'Treat known_structure semantic targets and state.facilities as persistent world memory. Do not forget a completed shelter merely because it is no longer nearby.',
             'Priority order: survive immediate danger, establish safety, improve capability, explore/progress, take reasonable challenges.',
             'Do not optimize for hiding forever. Progress through ordinary Minecraft while protecting the single Hardcore life.',
             'Write main_goal, sub_goals, and progress_assessment in concise English so the Jev policy can consume them consistently.',
@@ -75,10 +76,11 @@ export class StrategicPlanner {
             player: state.player,
             world: state.world,
             inventory: state.inventory,
+            facilities: state.facilities,
             current_goal: state.strategy.mainGoal,
-            current_skill: state.currentSkill,
-            nearby_blocks: state.blockCandidates.slice(0, 10),
-            nearby_entities: state.entityCandidates.slice(0, 10),
+            current_sub_goals: state.strategy.subGoals,
+            active_task: state.activeTask,
+            semantic_targets: state.targets.slice(0, 16),
             recent_events: state.recentEvents,
           }),
           max_output_tokens: 600,
