@@ -330,6 +330,14 @@ export class TaskExecutor {
     const initial = inventoryMap(this.bot).cobblestone ?? 0;
     const targetTotal = Math.max(initial, Math.max(3, requestedAmount));
     const triedExcavationSites = new Set<string>();
+    let workspace: {
+      siteId: string;
+      x: number;
+      y: number;
+      z: number;
+      minY: number;
+      radius: number;
+    } | null = null;
 
     // Respect a compatible Executive target when one was selected, but keep
     // the body capable of recovering if that target becomes stale.
@@ -338,6 +346,10 @@ export class TaskExecutor {
       target.id === targetId &&
       (target.kind === 'stone_source' || target.kind === 'excavation_site'),
     );
+    if (preferred?.kind === 'excavation_site') {
+      workspace = excavationWorkspace(preferred);
+    }
+
     if (preferred && preferred.distance > 2.5) {
       const nav = await this.runPrimitive({
         action: 'NAVIGATE',
@@ -362,12 +374,22 @@ export class TaskExecutor {
       });
       if (current >= targetTotal) return `cobblestone_collected:${current - initial}`;
 
+      const semanticNow = this.semantic.capture(this.snapshot());
+      if (semanticNow.player.inWater) {
+        throw new Error('stone_workspace_entered_water');
+      }
+      if (workspace && this.bot.entity.position.y < workspace.minY - 0.75) {
+        throw new Error(`stone_workspace_depth_limit:${this.bot.entity.position.y.toFixed(1)}<${workspace.minY}`);
+      }
+
       const raw = this.capturePrimitiveWorld();
       const visibleStone = nearestBlock(
         raw,
         block =>
           (block.name === 'stone' || block.name === 'cobblestone') &&
-          !this.primitive.isTargetTemporarilyBlocked(block.id),
+          block.distance <= 4.5 &&
+          !this.primitive.isTargetTemporarilyBlocked(block.id) &&
+          isInsideExcavationWorkspace(block.position, workspace),
       );
 
       if (visibleStone) {
@@ -383,6 +405,14 @@ export class TaskExecutor {
         continue;
       }
 
+      // One excavation_site is one certified workspace. Do not silently chain
+      // downward into newly discovered cave sites just because more stone is
+      // visible. If this workspace is exhausted, return control to Executive
+      // so it can deliberately choose a different location.
+      if (workspace && triedExcavationSites.has(workspace.siteId)) {
+        throw new Error('safe_excavation_workspace_exhausted');
+      }
+
       const semanticState = this.semantic.capture(this.snapshot());
       const excavationSites = semanticState.targets
         .filter(target => target.kind === 'excavation_site' && !triedExcavationSites.has(target.id))
@@ -394,6 +424,7 @@ export class TaskExecutor {
       const site = excavationSites[0];
       if (!site) throw new Error('no_safe_excavation_site');
       triedExcavationSites.add(site.id);
+      workspace = excavationWorkspace(site);
 
       const distance = Math.hypot(
         this.bot.entity.position.x - site.position.x,
@@ -754,6 +785,37 @@ function nearestBlock(
   return world.blockCandidates
     .filter(candidate => candidate.kind === 'block' && predicate(candidate))
     .sort((a, b) => a.distance - b.distance)[0] ?? null;
+}
+
+function excavationWorkspace(target: SemanticTarget): {
+  siteId: string;
+  x: number;
+  y: number;
+  z: number;
+  minY: number;
+  radius: number;
+} {
+  const safeSteps = Number(target.metadata.safeSteps ?? 4);
+  const boundedSteps = Number.isFinite(safeSteps) ? Math.max(1, Math.min(8, safeSteps)) : 4;
+  return {
+    siteId: target.id,
+    x: target.position.x,
+    y: target.position.y,
+    z: target.position.z,
+    // Allow the certified staircase plus a small working layer, but never
+    // turn a shallow resource task into an uncontrolled cave descent.
+    minY: target.position.y - boundedSteps - 2,
+    radius: 8,
+  };
+}
+
+function isInsideExcavationWorkspace(
+  position: { x: number; y: number; z: number },
+  workspace: { x: number; y: number; z: number; minY: number; radius: number } | null,
+): boolean {
+  if (!workspace) return true;
+  if (position.y < workspace.minY || position.y > workspace.y + 2) return false;
+  return Math.hypot(position.x - workspace.x, position.z - workspace.z) <= workspace.radius;
 }
 
 function excavationDirection(target: SemanticTarget): 'N' | 'E' | 'S' | 'W' | null {
