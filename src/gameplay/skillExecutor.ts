@@ -28,6 +28,7 @@ export class SkillExecutor {
   private sequence = 0;
   private cancellationToken = 0;
   private safetyOverrideUntil = 0;
+  private readonly blockedTargets = new Map<string, number>();
   private current: SkillSnapshot = {
     id: 0,
     action: 'NONE',
@@ -47,6 +48,15 @@ export class SkillExecutor {
     return { ...this.current };
   }
 
+  isTargetTemporarilyBlocked(id: string): boolean {
+    const until = this.blockedTargets.get(id) ?? 0;
+    if (until <= Date.now()) {
+      this.blockedTargets.delete(id);
+      return false;
+    }
+    return true;
+  }
+
   stop(): void {
     this.cancel('runtime_stop');
   }
@@ -58,6 +68,11 @@ export class SkillExecutor {
   ): void {
     if (priority === 'normal' && Date.now() < this.safetyOverrideUntil) return;
     if (priority === 'safety') this.safetyOverrideUntil = Date.now() + 1_500;
+
+    // Normal policy decisions never pre-empt an in-flight embodied skill.
+    // Safety is the only layer allowed to interrupt. This avoids oscillating
+    // between plausible actions while pathfinding/digging/building is underway.
+    if (priority === 'normal' && this.current.status === 'running') return;
 
     if (decision.action === 'CONTINUE') {
       if (this.current.status === 'running') return;
@@ -71,13 +86,12 @@ export class SkillExecutor {
     }
 
     const targetId = decision.blockTargetId ?? decision.entityTargetId ?? null;
-    if (
-      this.current.status === 'running' &&
-      this.current.action === decision.action
-    ) {
-      // Commit to a skill once started. Fast policies may see a slightly newer
-      // candidate list on every call; switching from one MINE target to another
-      // mid-route creates thrashing instead of human-like follow-through.
+    if (targetId && this.isTargetTemporarilyBlocked(targetId)) {
+      this.log('skill_target_suppressed', {
+        action: decision.action,
+        target_id: targetId,
+        reason: 'recent_failure_cooldown',
+      });
       return;
     }
 
@@ -173,6 +187,9 @@ export class SkillExecutor {
         detail: message,
       };
       try { this.bot.pathfinder.stop(); } catch { /* best effort */ }
+      if (this.current.targetId && shouldBlockFailedTarget(message)) {
+        this.blockedTargets.set(this.current.targetId, Date.now() + 20_000);
+      }
       this.log('skill_failed', {
         skill_id: skillId,
         action: decision.action,
@@ -605,4 +622,16 @@ function withTimeout<T>(
       },
     );
   });
+}
+
+
+function shouldBlockFailedTarget(message: string): boolean {
+  return [
+    'target_not_visible',
+    'target_block_missing',
+    'cannot_dig',
+    'mine_path_timeout',
+    'dig_timeout',
+    'Digging aborted',
+  ].some(reason => message.includes(reason));
 }
