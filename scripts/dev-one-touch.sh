@@ -173,11 +173,16 @@ ensure_minecraft_server() {
   fi
   if [[ "$MODE" == "reset" ]]; then
     log "Resetting Hardcore world with fixed seed $RESET_SEED"
-    npm run mc:reset -- "$RESET_SEED"
+    # Reset and start are deliberately separate. Keeping the Java server out of
+    # the npm reset process prevents a detached server from holding that command open.
+    MC_RESET_NO_START=1 bash "$ROOT_DIR/scripts/mc-reset-local.sh" "$RESET_SEED"
+    bash "$ROOT_DIR/scripts/mc-start-local.sh"
   else
     log "Starting Minecraft server if needed"
-    npm run mc:start
+    bash "$ROOT_DIR/scripts/mc-start-local.sh"
   fi
+
+  log "Minecraft server is ready; continuing to gameplay runtime"
 }
 
 stop_previous_gameplay() {
