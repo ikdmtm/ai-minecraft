@@ -1,5 +1,6 @@
 import type mineflayer from 'mineflayer';
 import type { SharedStateBus } from '../cognitive/sharedState.js';
+import { Vec3 } from 'vec3';
 import type {
   ExecutiveTaskSnapshot,
   ExecutiveWorldState,
@@ -131,9 +132,9 @@ export class SemanticWorldModel {
   private findStandableColumn(x: number, z: number): SemanticPosition | null {
     const originY = Math.floor(this.bot.entity.position.y);
     for (let y = originY + 8; y >= originY - 14; y--) {
-      const floor = this.bot.blockAt({ x, y: y - 1, z } as any);
-      const feet = this.bot.blockAt({ x, y, z } as any);
-      const head = this.bot.blockAt({ x, y: y + 1, z } as any);
+      const floor = this.bot.blockAt(new Vec3(x, y - 1, z));
+      const feet = this.bot.blockAt(new Vec3(x, y, z));
+      const head = this.bot.blockAt(new Vec3(x, y + 1, z));
       if (!isSolidStand(floor)) continue;
       if (!isPassable(feet) || !isPassable(head)) continue;
       return { x, y, z };
@@ -210,9 +211,9 @@ export class SemanticWorldModel {
     for (const [dx, dz] of offsets) {
       for (let dy = 2; dy >= -4; dy--) {
         const standY = y + dy;
-        const floor = this.bot.blockAt({ x: x + dx, y: standY - 1, z: z + dz } as any);
-        const feet = this.bot.blockAt({ x: x + dx, y: standY, z: z + dz } as any);
-        const head = this.bot.blockAt({ x: x + dx, y: standY + 1, z: z + dz } as any);
+        const floor = this.bot.blockAt(new Vec3(x + dx, standY - 1, z + dz));
+        const feet = this.bot.blockAt(new Vec3(x + dx, standY, z + dz));
+        const head = this.bot.blockAt(new Vec3(x + dx, standY + 1, z + dz));
         if (isSolidStand(floor) && isPassable(feet) && isPassable(head)) {
           return { x: x + dx, y: standY, z: z + dz };
         }
