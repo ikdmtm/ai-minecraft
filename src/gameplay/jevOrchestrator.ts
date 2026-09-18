@@ -11,6 +11,7 @@ import { ExecutivePolicy } from './executivePolicy.js';
 import { TaskExecutor } from './taskExecutor.js';
 import type { JevWorldState } from './typedActions.js';
 import type { ExecutiveWorldState } from './executiveTypes.js';
+import { WorldProvenance } from './worldProvenance.js';
 
 export type LLMProvider = 'anthropic' | 'openai';
 
@@ -49,6 +50,7 @@ export interface GameplayRuntimeSnapshot {
 
 export class CognitiveOrchestrator {
   private readonly shared = new SharedStateBus();
+  private readonly provenance = new WorldProvenance();
   private bot: mineflayer.Bot | null = null;
   private sensor: WorldSensor | null = null;
   private primitive: SkillExecutor | null = null;
@@ -131,9 +133,9 @@ export class CognitiveOrchestrator {
     this.bot.loadPlugin(pathfinder);
     await waitForSpawn(this.bot);
 
-    this.primitive = new SkillExecutor(this.bot, this.shared);
-    this.sensor = new WorldSensor(this.bot, this.shared);
-    this.semantic = new SemanticWorldModel(this.bot, this.shared);
+    this.primitive = new SkillExecutor(this.bot, this.shared, this.provenance);
+    this.sensor = new WorldSensor(this.bot, this.shared, this.provenance);
+    this.semantic = new SemanticWorldModel(this.bot, this.shared, this.provenance);
     this.taskExecutor = new TaskExecutor(
       this.bot,
       this.shared,
