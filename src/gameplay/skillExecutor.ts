@@ -775,15 +775,19 @@ export class SkillExecutor {
     const underPlayer = this.bot.blockAt(base.offset(0, -1, 0));
     if (!isSolidGround(underPlayer)) throw new Error('shelter_requires_solid_ground');
 
-    // Preflight before consuming anything. The template uses 8 wall blocks,
-    // one high roof anchor, and one center roof block.
-    const requiredMaterials = 10;
+    // A real shelter needs an exit. Prepare a wooden door before consuming
+    // structural material so a failed build can never leave the bot sealed in.
+    const door = await this.ensureShelterDoor(token, base);
+
+    // Three 2-high walls + two roof blocks = 8 structural blocks.
+    // The south side is the doorway.
+    const requiredMaterials = 8;
     const availableMaterials = this.buildMaterialCount();
     if (availableMaterials < requiredMaterials) {
-      throw new Error(`insufficient_build_material:available=${availableMaterials}/${requiredMaterials}`);
+      throw new Error(`insufficient_build_material:available=${availableMaterials}/${requiredMaterials}_plus_door`);
     }
 
-    const walls = [[1, 0], [-1, 0], [0, 1], [0, -1]] as const;
+    const walls = [[1, 0], [-1, 0], [0, -1]] as const;
     let placed = 0;
 
     for (const [dx, dz] of walls) {
@@ -798,7 +802,7 @@ export class SkillExecutor {
         if (existing && existing.name !== 'air') continue;
 
         const item = this.nextBuildItem();
-        if (!item) throw new Error(`insufficient_build_material:placed=${placed}/10`);
+        if (!item) throw new Error(`insufficient_build_material:placed=${placed}/${requiredMaterials}`);
         await this.bot.equip(item, 'hand');
 
         const reference = dy === 0
@@ -815,14 +819,11 @@ export class SkillExecutor {
       }
     }
 
-    // Create one block at roof height on the east wall, then extend inward.
-    // The previous implementation tried to place the roof into the player's
-    // head space (y+1), which the server correctly rejected.
     const eastRoofAnchorPos = base.offset(1, 2, 0);
     let eastRoofAnchor = this.bot.blockAt(eastRoofAnchorPos);
     if (!eastRoofAnchor || eastRoofAnchor.name === 'air') {
       const item = this.nextBuildItem();
-      if (!item) throw new Error(`insufficient_build_material:placed=${placed}/10`);
+      if (!item) throw new Error(`insufficient_build_material:placed=${placed}/${requiredMaterials}`);
       await this.bot.equip(item, 'hand');
       const eastWallTop = this.bot.blockAt(base.offset(1, 1, 0));
       if (!eastWallTop || eastWallTop.name === 'air') throw new Error('shelter_roof_anchor_reference_missing');
@@ -838,7 +839,7 @@ export class SkillExecutor {
     const roofExisting = this.bot.blockAt(roofPos);
     if (!roofExisting || roofExisting.name === 'air') {
       const item = this.nextBuildItem();
-      if (!item) throw new Error(`insufficient_build_material:placed=${placed}/10`);
+      if (!item) throw new Error(`insufficient_build_material:placed=${placed}/${requiredMaterials}`);
       await this.bot.equip(item, 'hand');
       if (!eastRoofAnchor || eastRoofAnchor.name === 'air') throw new Error('shelter_roof_reference_missing');
       await this.bot.placeBlock(eastRoofAnchor, new Vec3(-1, 0, 0));
@@ -849,9 +850,96 @@ export class SkillExecutor {
       placed++;
     }
 
-    if (placed < 9) throw new Error(`shelter_too_incomplete:placed=${placed}`);
+    const entranceBottom = base.offset(0, 0, 1);
+    const entranceTop = base.offset(0, 1, 1);
+    const entranceGround = this.bot.blockAt(base.offset(0, -1, 1));
+    if (!isSolidGround(entranceGround)) throw new Error('shelter_door_ground_missing');
+    const existingBottom = this.bot.blockAt(entranceBottom);
+    const existingTop = this.bot.blockAt(entranceTop);
+    if ((existingBottom && existingBottom.name !== 'air') || (existingTop && existingTop.name !== 'air')) {
+      throw new Error('shelter_doorway_blocked');
+    }
+
+    await this.bot.equip(door, 'hand');
+    await this.bot.lookAt(base.offset(0, 1, 2), true);
+    await this.bot.placeBlock(entranceGround!, new Vec3(0, 1, 0));
+    await delay(150);
+    const placedDoor = this.bot.blockAt(entranceBottom);
+    if (!placedDoor || !placedDoor.name.endsWith('_door')) {
+      throw new Error('shelter_door_failed');
+    }
+    this.provenance?.markPlaced(entranceBottom, 'structure');
+    this.provenance?.markPlaced(entranceTop, 'structure');
+
+    if (placed < requiredMaterials) throw new Error(`shelter_too_incomplete:placed=${placed}/${requiredMaterials}`);
     this.provenance?.markStructure('shelter', base);
-    this.shared.pushEvent({ type: 'shelter_built', detail: `placed=${placed}`, importance: 'high' });
+    this.shared.pushEvent({
+      type: 'shelter_built',
+      detail: `placed=${placed} door=${placedDoor.name}`,
+      importance: 'high',
+    });
+  }
+
+  private async ensureShelterDoor(token: number, base: Vec3): Promise<any> {
+    const existingDoor = this.bot.inventory.items().find(item =>
+      item.name.endsWith('_door') && item.name !== 'iron_door',
+    );
+    if (existingDoor) return existingDoor;
+
+    const species = this.findDoorWoodSpecies();
+    if (!species) throw new Error('shelter_requires_door_material');
+
+    const plankName = `${species}_planks`;
+    const doorName = `${species}_door`;
+    while (this.inventoryCount(plankName) < 6) {
+      const log = this.bot.inventory.items().find(item => item.name === `${species}_log`);
+      if (!log) throw new Error(`shelter_requires_door_material:${species}`);
+      await this.craftNamed(plankName, null);
+      this.assertActive(token);
+    }
+
+    const table = await this.ensureCraftingTable(token);
+    await this.craftNamed(doorName, table);
+    this.assertActive(token);
+
+    // If we temporarily placed our own table beside the shelter to craft the
+    // door, collect it again before walls are built so it cannot occupy the
+    // doorway or a wall cell.
+    if (
+      table?.position &&
+      this.provenance?.roleOf(table.position) === 'workstation' &&
+      table.position.distanceTo(base) <= 2
+    ) {
+      try {
+        await this.bot.dig(table);
+        this.provenance?.forget(table.position);
+        await delay(150);
+        await this.collectNearbyDrops(token, 2.5);
+      } catch {
+        // A table in a non-door wall cell is still usable as part of the base.
+      }
+    }
+
+    const door = this.bot.inventory.items().find(item => item.name === doorName);
+    if (!door) throw new Error(`shelter_door_not_in_inventory:${doorName}`);
+    return door;
+  }
+
+  private findDoorWoodSpecies(): string | null {
+    const candidates = new Map<string, number>();
+    for (const item of this.bot.inventory.items()) {
+      if (item.name.endsWith('_planks')) {
+        const species = item.name.slice(0, -7);
+        candidates.set(species, (candidates.get(species) ?? 0) + item.count);
+      } else if (item.name.endsWith('_log')) {
+        const species = item.name.slice(0, -4);
+        candidates.set(species, (candidates.get(species) ?? 0) + item.count * 4);
+      }
+    }
+
+    return [...candidates.entries()]
+      .filter(([, potentialPlanks]) => potentialPlanks >= 6)
+      .sort((a, b) => b[1] - a[1])[0]?.[0] ?? null;
   }
 
   private buildMaterialCount(): number {
