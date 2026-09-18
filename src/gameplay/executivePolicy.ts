@@ -121,14 +121,14 @@ export class ExecutivePolicy {
       };
 
       const task = validateTask(parsed.task);
-      const decision: ExecutiveDecision = {
+      const decision = enforceTaskGates(state, {
         task,
         targetId: validateTargetId(parsed.target_id, state.targets),
         amount: normalizeTaskAmount(task, parsed.amount),
         confidence: clampConfidence(parsed.confidence),
         source: 'openai',
         basedOnRevision: state.revision,
-      };
+      });
       logDecision(started, this.provider, this.openaiModel, state, decision);
       return decision;
     } catch (error) {
@@ -175,14 +175,15 @@ export class ExecutivePolicy {
 
       const data = (await response.json()) as JevResponse;
       const answers = data.answers ?? {};
-      const decision: ExecutiveDecision = {
-        task: validateTask(answers.task?.choice ?? 'WAIT'),
+      const selectedTask = validateTask(answers.task?.choice ?? 'WAIT');
+      const decision = enforceTaskGates(state, {
+        task: selectedTask,
         targetId: validateTargetId(answers.target?.choice, state.targets),
-        amount: defaultAmountForTask(validateTask(answers.task?.choice ?? 'WAIT')),
+        amount: defaultAmountForTask(selectedTask),
         confidence: clampConfidence(answers.task?.confidence),
         source: 'jev',
         basedOnRevision: state.revision,
-      };
+      });
       logDecision(started, this.provider, this.jevModel, state, decision);
       return decision;
     } catch (error) {
@@ -206,12 +207,14 @@ export class ExecutivePolicy {
       targetId = bestTree.id;
     } else if (!hasPickaxe(state.inventory) && totalLogs(state.inventory) > 0) {
       task = 'PREPARE_STARTER_TOOLS';
+    } else if (hasPickaxe(state.inventory) && (state.inventory.cobblestone ?? 0) >= 3 && !hasStonePickaxe(state.inventory)) {
+      task = 'UPGRADE_STONE_TOOLS';
     } else if (hasPickaxe(state.inventory)) {
       task = 'ACQUIRE_STONE';
       targetId = bestTarget(state.targets, 'stone_source')?.id;
     }
 
-    const decision: ExecutiveDecision = {
+    const decision = enforceTaskGates(state, {
       task,
       targetId,
       amount: defaultAmountForTask(task),
@@ -219,7 +222,7 @@ export class ExecutivePolicy {
       source: 'fallback',
       basedOnRevision: state.revision,
       reason: error instanceof Error ? error.message : String(error),
-    };
+    });
 
     console.log(JSON.stringify({
       ts: new Date().toISOString(),
@@ -243,9 +246,10 @@ function executiveInstructions(): string {
     'If player.inWater is true, choose REACH_LAND with the best low-risk land target before resource work.',
     'Use GATHER_WOOD until there is a practical early-game wood buffer (normally 6-10 logs).',
     'Use PREPARE_STARTER_TOOLS when wood exists but no wooden-or-better pickaxe exists.',
-    'Use ACQUIRE_STONE once a pickaxe exists. It can dig a safe staircase if no exposed stone target exists.',
+    'Use ACQUIRE_STONE once a pickaxe exists and the cobblestone buffer is still insufficient.',
+    'Use UPGRADE_STONE_TOOLS once at least 3 cobblestone exists and stone-tier tools are not ready.',
     'Use GATHER_FOOD when food is needed and a safe food_source exists.',
-    'Use ESTABLISH_SHELTER when night is approaching or strategy prioritizes shelter and the player is on solid land.',
+    'Use ESTABLISH_SHELTER only with a shelter_site target; shelter_site means the world model found a flat buildable surface patch.',
     'CONTINUE_TASK is only appropriate when activeTask.status is running.',
     'Do not micromanage compass directions or individual block hits.',
   ].join(' ');
@@ -258,8 +262,9 @@ function taskCriteria(): Record<ExecutiveTaskType, string> {
     GATHER_WOOD: 'Acquire a requested buffer of logs from a nearby tree cluster.',
     PREPARE_STARTER_TOOLS: 'Craft prerequisites and a wooden pickaxe / starter tooling.',
     ACQUIRE_STONE: 'Obtain cobblestone using exposed stone or a safe descending staircase.',
+    UPGRADE_STONE_TOOLS: 'Turn available cobblestone into stone pickaxe/axe/sword and a furnace when materials permit.',
     GATHER_FOOD: 'Obtain raw food from a nearby passive animal source.',
-    ESTABLISH_SHELTER: 'Build a compact first-night shelter on solid terrain.',
+    ESTABLISH_SHELTER: 'Navigate to a shelter_site semantic target and build a compact first-night shelter there.',
     WAIT: 'Briefly wait because no useful safe task is currently executable.',
   };
 }
@@ -316,6 +321,7 @@ function defaultAmountForTask(task: ExecutiveTaskType): number {
     case 'GATHER_WOOD': return 8;
     case 'ACQUIRE_STONE': return 12;
     case 'GATHER_FOOD': return 4;
+    case 'UPGRADE_STONE_TOOLS': return 1;
     default: return 1;
   }
 }
@@ -328,6 +334,116 @@ function totalLogs(inventory: Record<string, number>): number {
 
 function hasPickaxe(inventory: Record<string, number>): boolean {
   return Object.keys(inventory).some(name => name.endsWith('_pickaxe'));
+}
+
+function hasStonePickaxe(inventory: Record<string, number>): boolean {
+  return (inventory.stone_pickaxe ?? 0) > 0 ||
+    (inventory.iron_pickaxe ?? 0) > 0 ||
+    (inventory.diamond_pickaxe ?? 0) > 0 ||
+    (inventory.netherite_pickaxe ?? 0) > 0;
+}
+
+function stoneUpgradeComplete(inventory: Record<string, number>): boolean {
+  return hasStonePickaxe(inventory) &&
+    (inventory.stone_axe ?? inventory.iron_axe ?? inventory.diamond_axe ?? inventory.netherite_axe ?? 0) > 0 &&
+    (inventory.stone_sword ?? inventory.iron_sword ?? inventory.diamond_sword ?? inventory.netherite_sword ?? 0) > 0;
+}
+
+function rawFoodCount(inventory: Record<string, number>): number {
+  return ['beef', 'porkchop', 'chicken', 'mutton', 'rabbit', 'salmon', 'cod']
+    .reduce((sum, name) => sum + (inventory[name] ?? 0), 0);
+}
+
+function nextAfterCompletedResourceTask(state: ExecutiveWorldState): ExecutiveDecision {
+  const cobble = state.inventory.cobblestone ?? 0;
+  if (!hasPickaxe(state.inventory) && totalLogs(state.inventory) > 0) {
+    return baseDecision(state, 'PREPARE_STARTER_TOOLS');
+  }
+  if (hasPickaxe(state.inventory) && cobble < 12) {
+    return baseDecision(state, 'ACQUIRE_STONE', bestTarget(state.targets, 'stone_source')?.id, 12);
+  }
+  if (!stoneUpgradeComplete(state.inventory) && cobble >= 3) {
+    return baseDecision(state, 'UPGRADE_STONE_TOOLS');
+  }
+  const shelterSite = bestTarget(state.targets, 'shelter_site');
+  if (shelterSite && (state.world.isNight || state.world.timeOfDay >= 7000 || /shelter|base/i.test(state.strategy.mainGoal))) {
+    return baseDecision(state, 'ESTABLISH_SHELTER', shelterSite.id);
+  }
+  const food = bestTarget(state.targets, 'food_source');
+  if (food && rawFoodCount(state.inventory) < 3) {
+    return baseDecision(state, 'GATHER_FOOD', food.id, 3);
+  }
+  return baseDecision(state, 'WAIT');
+}
+
+function baseDecision(
+  state: ExecutiveWorldState,
+  task: ExecutiveTaskType,
+  targetId?: string,
+  amount = defaultAmountForTask(task),
+): ExecutiveDecision {
+  return {
+    task,
+    targetId,
+    amount,
+    confidence: 1,
+    source: 'fallback',
+    basedOnRevision: state.revision,
+  };
+}
+
+function enforceTaskGates(
+  state: ExecutiveWorldState,
+  decision: ExecutiveDecision,
+): ExecutiveDecision {
+  const logs = totalLogs(state.inventory);
+  const cobble = state.inventory.cobblestone ?? 0;
+  const land = bestTarget(state.targets, 'land');
+  const shelterSite = bestTarget(state.targets, 'shelter_site');
+
+  if (state.player.inWater && land) {
+    return { ...decision, task: 'REACH_LAND', targetId: land.id, amount: 1 };
+  }
+
+  if (!hasPickaxe(state.inventory) && logs > 0) {
+    return { ...decision, task: 'PREPARE_STARTER_TOOLS', targetId: undefined, amount: 1 };
+  }
+
+  if (decision.task === 'GATHER_WOOD' && logs >= (decision.amount ?? 8)) {
+    return { ...nextAfterCompletedResourceTask(state), source: decision.source, confidence: decision.confidence };
+  }
+
+  if (decision.task === 'PREPARE_STARTER_TOOLS' && hasPickaxe(state.inventory)) {
+    const next = nextAfterCompletedResourceTask(state);
+    return { ...next, source: decision.source, confidence: decision.confidence };
+  }
+
+  if (decision.task === 'ACQUIRE_STONE' && cobble >= (decision.amount ?? 12)) {
+    const next = nextAfterCompletedResourceTask(state);
+    return { ...next, source: decision.source, confidence: decision.confidence };
+  }
+
+  if (decision.task === 'UPGRADE_STONE_TOOLS') {
+    if (cobble < 3 && !hasStonePickaxe(state.inventory)) {
+      return { ...decision, task: 'ACQUIRE_STONE', targetId: bestTarget(state.targets, 'stone_source')?.id, amount: 12 };
+    }
+    if (stoneUpgradeComplete(state.inventory)) {
+      const next = nextAfterCompletedResourceTask(state);
+      return { ...next, source: decision.source, confidence: decision.confidence };
+    }
+  }
+
+  if (decision.task === 'ESTABLISH_SHELTER') {
+    if (!shelterSite) {
+      const next = nextAfterCompletedResourceTask(state);
+      return { ...next, source: decision.source, confidence: decision.confidence };
+    }
+    if (!decision.targetId || !state.targets.some(target => target.id === decision.targetId && target.kind === 'shelter_site')) {
+      return { ...decision, targetId: shelterSite.id };
+    }
+  }
+
+  return decision;
 }
 
 function normalizeSecret(value: string | undefined): string | null {
