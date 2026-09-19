@@ -2,13 +2,7 @@ import type { CraftItem } from './typedActions.js';
 
 export type ExecutiveTaskType =
   | 'CONTINUE_TASK'
-  | 'NAVIGATE_TARGET'
-  | 'GATHER_RESOURCE'
-  | 'EXCAVATE_TARGET'
-  | 'ATTACK_TARGET'
-  | 'EXECUTE_CAPABILITY'
-  | 'CRAFT_ITEM'
-  | 'BUILD_STRUCTURE'
+  | 'EXECUTE_AFFORDANCE'
   | 'WAIT';
 
 export type ExecutiveResource = string;
@@ -43,11 +37,15 @@ export interface SemanticTarget {
 }
 
 export type DynamicCapabilityKind =
-  | 'hunt_entity'
-  | 'consume_item'
+  | 'move_to'
+  | 'break_block'
+  | 'attack_entity'
+  | 'collect_drop'
+  | 'use_item'
   | 'place_item'
-  | 'process_item'
-  | 'sleep'
+  | 'craft_recipe'
+  | 'process_recipe'
+  | 'interact_block'
   | 'wait_condition';
 
 export interface ExecutiveActionCapability {
@@ -55,23 +53,26 @@ export interface ExecutiveActionCapability {
   kind: DynamicCapabilityKind;
   description: string;
   targetId?: string;
+  blockTargetId?: string;
+  entityTargetId?: string;
   item?: string;
   outputItem?: string;
   station?: string;
-  role?: string;
-  utilityTags: string[];
+  position?: SemanticPosition;
   preconditions: Record<string, string | number | boolean | null>;
-  expectedEffects: Record<string, string | number | boolean | null>;
+  specification: Record<string, string | number | boolean | null>;
 }
 
 export interface ExecutiveMemoryRecord {
   id: string;
   kind: string;
   label: string;
-  position: SemanticPosition;
+  position?: SemanticPosition;
   confidence: number;
   lastSeenAt: number;
   observations: number;
+  scope: 'world' | 'global' | 'stable';
+  worldId: string | null;
   metadata: Record<string, string | number | boolean | null>;
 }
 
@@ -175,13 +176,7 @@ export interface TaskExecutionResult {
 
 export const EXECUTIVE_TASKS: ExecutiveTaskType[] = [
   'CONTINUE_TASK',
-  'NAVIGATE_TARGET',
-  'GATHER_RESOURCE',
-  'EXCAVATE_TARGET',
-  'ATTACK_TARGET',
-  'EXECUTE_CAPABILITY',
-  'CRAFT_ITEM',
-  'BUILD_STRUCTURE',
+  'EXECUTE_AFFORDANCE',
   'WAIT',
 ];
 
