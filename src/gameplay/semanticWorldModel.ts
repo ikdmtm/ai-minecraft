@@ -228,7 +228,7 @@ export class SemanticWorldModel {
         const x = Math.floor(origin.x + Math.cos(angle) * radius);
         const z = Math.floor(origin.z + Math.sin(angle) * radius);
         const stand = this.findSurfaceStandableColumn(x, z, originY + 32, originY - 4);
-        if (!stand || !this.isFlatShelterPatch(stand)) continue;
+        if (!stand || !this.isShelterFootprintBuildable(stand)) continue;
 
         const distance = distance3(origin, stand);
         candidates.push({
@@ -239,7 +239,7 @@ export class SemanticWorldModel {
           score: 180 - distance * 3 - Math.abs(stand.y - origin.y),
           risk: distance <= 20 ? 'low' : 'medium',
           metadata: {
-            flat5x5: true,
+            buildableFootprint: 'compact_cross',
             surfaceCandidate: true,
           },
         });
@@ -262,23 +262,37 @@ export class SemanticWorldModel {
       const floor = this.bot.blockAt(new Vec3(x, y - 1, z));
       const feet = this.bot.blockAt(new Vec3(x, y, z));
       const head = this.bot.blockAt(new Vec3(x, y + 1, z));
-      if (!isSolidStand(floor)) continue;
+      if (!isStableTerrainSupport(floor)) continue;
       if (!isPassable(feet) || !isPassable(head)) continue;
       return { x, y, z };
     }
     return null;
   }
 
-  private isFlatShelterPatch(center: SemanticPosition): boolean {
-    for (let dx = -2; dx <= 2; dx++) {
-      for (let dz = -2; dz <= 2; dz++) {
-        const floor = this.bot.blockAt(new Vec3(center.x + dx, center.y - 1, center.z + dz));
-        const feet = this.bot.blockAt(new Vec3(center.x + dx, center.y, center.z + dz));
-        const head = this.bot.blockAt(new Vec3(center.x + dx, center.y + 1, center.z + dz));
-        if (!isStableTerrainSupport(floor) || !isPassable(feet) || !isPassable(head)) return false;
-      }
+  private isShelterFootprintBuildable(center: SemanticPosition): boolean {
+    // Match the actual compact shelter primitive instead of demanding an
+    // unrelated 5x5 clearing. The body only needs the center plus north/east/
+    // west wall columns and the south doorway to have stable support and
+    // two-block clearance.
+    const footprint = [
+      [0, 0],
+      [1, 0],
+      [-1, 0],
+      [0, -1],
+      [0, 1],
+    ] as const;
+
+    for (const [dx, dz] of footprint) {
+      const floor = this.bot.blockAt(new Vec3(center.x + dx, center.y - 1, center.z + dz));
+      const feet = this.bot.blockAt(new Vec3(center.x + dx, center.y, center.z + dz));
+      const head = this.bot.blockAt(new Vec3(center.x + dx, center.y + 1, center.z + dz));
+      if (!isStableTerrainSupport(floor) || !isPassable(feet) || !isPassable(head)) return false;
     }
-    return true;
+
+    // The current roof uses the center and east column at y+2.
+    const roofCenter = this.bot.blockAt(new Vec3(center.x, center.y + 2, center.z));
+    const roofEast = this.bot.blockAt(new Vec3(center.x + 1, center.y + 2, center.z));
+    return isPassable(roofCenter) && isPassable(roofEast);
   }
 
   private findLandTargets(): SemanticTarget[] {
@@ -324,7 +338,7 @@ export class SemanticWorldModel {
       const floor = this.bot.blockAt(new Vec3(x, y - 1, z));
       const feet = this.bot.blockAt(new Vec3(x, y, z));
       const head = this.bot.blockAt(new Vec3(x, y + 1, z));
-      if (!isSolidStand(floor)) continue;
+      if (!isStableTerrainSupport(floor)) continue;
       if (!isPassable(feet) || !isPassable(head)) continue;
       return { x, y, z };
     }
