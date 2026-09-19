@@ -4,11 +4,13 @@ export type ExecutiveTaskType =
   | 'CONTINUE_TASK'
   | 'NAVIGATE_TARGET'
   | 'GATHER_RESOURCE'
+  | 'EXCAVATE_TARGET'
+  | 'ATTACK_TARGET'
   | 'CRAFT_ITEM'
   | 'BUILD_STRUCTURE'
   | 'WAIT';
 
-export type ExecutiveResource = 'none' | 'logs' | 'cobblestone' | 'food';
+export type ExecutiveResource = string;
 export type ExecutiveStructure = 'none' | 'shelter';
 
 export type SemanticTargetKind =
@@ -19,6 +21,8 @@ export type SemanticTargetKind =
   | 'stone_source'
   | 'food_source'
   | 'item_drop'
+  | 'resource_source'
+  | 'entity'
   | 'known_structure';
 
 export interface SemanticPosition {
@@ -35,6 +39,26 @@ export interface SemanticTarget {
   score: number;
   risk: 'low' | 'medium' | 'high';
   metadata: Record<string, string | number | boolean | null>;
+}
+
+export interface ExecutiveCapabilitySnapshot {
+  gather: Array<{
+    resource: string;
+    targetIds: string[];
+    sourceBlocks: string[];
+  }>;
+  craft: Array<{
+    item: string;
+    requiresTable: boolean;
+    recipeCount: number;
+  }>;
+  entityActions: Array<{
+    targetId: string;
+    entity: string;
+    hostile: boolean;
+    actions: readonly ['NAVIGATE_TARGET', 'ATTACK_TARGET'];
+  }>;
+  canExcavate: boolean;
 }
 
 export interface ExecutiveTaskSnapshot {
@@ -72,6 +96,7 @@ export interface ExecutiveWorldState {
     bedNearby: boolean;
     shelterNearby: boolean;
   };
+  capabilities: ExecutiveCapabilitySnapshot;
   strategy: {
     mainGoal: string;
     subGoals: string[];
@@ -106,13 +131,6 @@ export const EXECUTIVE_TASKS: ExecutiveTaskType[] = [
   'CRAFT_ITEM',
   'BUILD_STRUCTURE',
   'WAIT',
-];
-
-export const EXECUTIVE_RESOURCES: ExecutiveResource[] = [
-  'none',
-  'logs',
-  'cobblestone',
-  'food',
 ];
 
 export const EXECUTIVE_STRUCTURES: ExecutiveStructure[] = [
