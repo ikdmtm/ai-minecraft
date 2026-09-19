@@ -65,7 +65,7 @@ export function validateMemorySearchRequest(query: unknown, cursor?: unknown): M
 }
 
 /** Read-only keyset search, at most 64 bounded payloads per kind (256 total).
- * Note hits add at most twelve indexed current-revision lookups. This is literal
+ * Note hits add bounded indexed current-revision lookups. This is literal
  * search, not vector similarity or global ranking. Continue to inspect older pages. */
 export function searchExperience(
   db: Database.Database, context: MemorySearchContext, request: MemorySearchRequest,
@@ -186,16 +186,17 @@ function makeHit(db: Database.Database, kind: MemorySearchKind, sequence: number
   const normalized = normalizeMemoryDimension(dimension);
   const compatible = kind !== 'note' && version === context.version && normalized != null && normalized === normalizeMemoryDimension(context.dimension);
   let preview: Record<string, unknown>;
+  let noteRevision: Record<string, unknown> = {};
   if (kind === 'note') {
     if (typeof row.rootId !== 'string' || row.rootId.length > 128 || row.interpretationOnly !== true) throw new Error('bad_note');
     const latest = db.prepare(`SELECT id, json_extract(payload,'$.state') AS state FROM autonomy_memory_notes
       WHERE root_id=? ORDER BY revision DESC LIMIT 1`).get(row.rootId) as { id: string; state: string } | undefined;
-    if (!latest || !['candidate', 'withdrawn'].includes(latest.state)) throw new Error('bad_note_head');
-    preview = { kind: row.kind, title: text(row.title, 120), content: text(row.content, 2000),
-      state: row.state, parentId: row.parentId, rootId: row.rootId, revision: row.revision,
-      reason: text(row.reason, 300), sources: row.sources, interpretationOnly: true,
-      contextRole: 'authored_in_not_applicability', currentRevisionId: latest.id, currentState: latest.state,
-      isCurrent: row.id === latest.id, createdAt: row.createdAt };
+    if (!latest || latest.id.length > 128 || !['candidate', 'withdrawn'].includes(latest.state)) throw new Error('bad_note_head');
+    noteRevision = { rootId: row.rootId, parentId: text(row.parentId, 128), interpretationOnly: true,
+      currentRevisionId: latest.id, currentState: latest.state, isCurrent: row.id === latest.id };
+    preview = { ...noteRevision, kind: row.kind, title: text(row.title, 120), content: text(row.content, 2000),
+      state: row.state, revision: row.revision, reason: text(row.reason, 300), sources: row.sources,
+      contextRole: 'authored_in_not_applicability', createdAt: row.createdAt };
   } else if (kind === 'procedure') {
     const steps = Array.isArray(row.steps) ? row.steps : [];
     preview = { name: text(row.name, 120), status: row.status,
@@ -215,8 +216,9 @@ function makeHit(db: Database.Database, kind: MemorySearchKind, sequence: number
       detail: text(row.detail), effect: text(row.effect, 1200),
       effectTruncated: typeof row.effect === 'string' && row.effect.length > 1200 };
   }
+  // Clipping must never drop a correction/withdrawal marker or its current ID.
   if (Buffer.byteLength(JSON.stringify(preview), 'utf8') > 10000) preview = {
-    clipped: true, excerpt: text(JSON.stringify(preview), 2000),
+    clipped: true, ...noteRevision, excerpt: text(JSON.stringify(preview), 2000),
   };
   return { kind, id: row.id as string, sequence, worldId, version, dimension,
     sameWorld: worldId === context.worldId && normalized === normalizeMemoryDimension(context.dimension),
