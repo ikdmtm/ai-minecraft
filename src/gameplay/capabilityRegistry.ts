@@ -277,20 +277,23 @@ export class CapabilityRegistry {
 
       const placeableBlock = (this.bot.registry.blocksByName as any)?.[item.name];
       if (placeableBlock) {
-        actions.push({
-          id: `place:${item.name}`,
-          kind: 'place_item',
-          description: `Place carried block item ${item.name} at a locally valid adjacent position.`,
-          item: item.name,
-          preconditions: {
-            inventoryCount: item.count,
-            onGround: Boolean(this.bot.entity.onGround),
-          },
-          specification: {
-            blockName: placeableBlock.name ?? item.name,
-            hardness: Number(placeableBlock.hardness ?? 0) || 0,
-          },
-        });
+        for (const position of this.findPlacementPositions().slice(0, 6)) {
+          actions.push({
+            id: `place:${item.name}:${position.x}:${position.y}:${position.z}`,
+            kind: 'place_item',
+            description: `Place carried block item ${item.name} at the specified reachable position.`,
+            item: item.name,
+            position,
+            preconditions: {
+              inventoryCount: item.count,
+              reachable: true,
+            },
+            specification: {
+              blockName: placeableBlock.name ?? item.name,
+              hardness: Number(placeableBlock.hardness ?? 0) || 0,
+            },
+          });
+        }
       }
     }
 
@@ -337,6 +340,41 @@ export class CapabilityRegistry {
     }
 
     return dedupeAffordances(actions).slice(0, 96);
+  }
+
+  private findPlacementPositions(): Array<{ x: number; y: number; z: number }> {
+    const base = this.bot.entity.position.floored();
+    const candidates: Array<{ x: number; y: number; z: number; distance: number }> = [];
+    for (let dy = -1; dy <= 2; dy++) {
+      for (let dx = -2; dx <= 2; dx++) {
+        for (let dz = -2; dz <= 2; dz++) {
+          if (dx === 0 && dy === 0 && dz === 0) continue;
+          const target = base.offset(dx, dy, dz);
+          const block = this.bot.blockAt(target);
+          if (!block || (block.name !== 'air' && block.boundingBox !== 'empty')) continue;
+          const hasReference = [
+            target.offset(1, 0, 0), target.offset(-1, 0, 0),
+            target.offset(0, 1, 0), target.offset(0, -1, 0),
+            target.offset(0, 0, 1), target.offset(0, 0, -1),
+          ].some(pos => {
+            const neighbor = this.bot.blockAt(pos);
+            return Boolean(neighbor && neighbor.boundingBox === 'block');
+          });
+          if (!hasReference) continue;
+          const distance = this.bot.entity.position.distanceTo(target);
+          if (distance > 4.5) continue;
+          candidates.push({
+            x: target.x,
+            y: target.y,
+            z: target.z,
+            distance,
+          });
+        }
+      }
+    }
+    return candidates
+      .sort((a, b) => a.distance - b.distance)
+      .map(({ x, y, z }) => ({ x, y, z }));
   }
 
   private discoverProcessingAffordances(): ExecutiveActionCapability[] {
