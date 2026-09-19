@@ -1,6 +1,7 @@
 import { parseOperation, OPERATION_JSON_SCHEMA } from './primitiveOperations.js';
 import { validateProcedureSaveSelection, PROCEDURE_REVISION_INSTRUCTIONS } from './procedureSaveSelection.js';
 import { validateMemorySearchRequest, presentedMemoryParents, MEMORY_SEARCH_INSTRUCTIONS } from './memoryRetrieval.js';
+import { validateNoteSelection, MEMORY_NOTE_SCHEMA, MEMORY_NOTE_INSTRUCTIONS } from './memoryConsolidation.js';
 import {
   EXECUTIVE_TASKS,
   type ExecutiveDecision,
@@ -108,12 +109,13 @@ export class ExecutivePolicy {
                   knowledge_offset: { type: ['integer', 'null'] },
                   memory_query: { type: ['string', 'null'] },
                   memory_cursor: { type: ['string', 'null'] },
+                  memory_note: { anyOf: [MEMORY_NOTE_SCHEMA, { type: 'null' }] },
                   procedure_name: { type: ['string', 'null'] },
                   evidence_ids: { type: 'array', items: { type: 'string' } },
                   procedure_id: { type: ['string', 'null'] },
                   reason: { type: 'string' },
                 },
-                required: ['task', 'affordance_id', 'confidence', 'operation', 'knowledge_query', 'knowledge_offset', 'memory_query', 'memory_cursor', 'procedure_name', 'evidence_ids', 'procedure_id', 'reason'],
+                required: ['task', 'affordance_id', 'confidence', 'operation', 'knowledge_query', 'knowledge_offset', 'memory_query', 'memory_cursor', 'memory_note', 'procedure_name', 'evidence_ids', 'procedure_id', 'reason'],
               },
             },
           },
@@ -133,7 +135,7 @@ export class ExecutivePolicy {
         affordance_id: string;
         confidence: number;
         operation: unknown; knowledge_query: string | null; knowledge_offset: number | null;
-        memory_query: string | null; memory_cursor: string | null;
+        memory_query: string | null; memory_cursor: string | null; memory_note: unknown;
         procedure_name: string | null; evidence_ids: string[]; procedure_id: string | null; reason: string;
       };
 
@@ -142,6 +144,7 @@ export class ExecutivePolicy {
         operation: parsed.operation ? parseOperation(parsed.operation) : undefined,
         knowledgeQuery: parsed.knowledge_query ?? undefined, knowledgeOffset: parsed.knowledge_offset ?? undefined,
         memoryQuery: parsed.memory_query ?? undefined, memoryCursor: parsed.memory_cursor ?? undefined,
+        memoryNote: (parsed.memory_note ?? undefined) as ExecutiveDecision['memoryNote'],
         procedureName: parsed.procedure_name ?? undefined, evidenceIds: parsed.evidence_ids,
         procedureId: parsed.procedure_id ?? undefined, reason: parsed.reason?.slice(0, 300),
         capabilityId: validateAffordanceId(parsed.affordance_id, state),
@@ -245,6 +248,7 @@ function executiveInstructions(): string {
     'OPEN a block then read autonomy.window. TRANSFER uses its current windowId, sourceSlot, destinationSlot, item and count. Read slot contents after each transfer. CLOSE the window when done. Only the server decides whether a slot accepts an item.',
     'LOOKUP_KNOWLEDGE uses knowledge_query and knowledge_offset to inspect neutral registry and matching server-JAR facts, including items, foods, entity loot, recipes, tags and window slots. Use nextOffset for more results. Missing data is unknown, not proof a mechanic is impossible.',
     MEMORY_SEARCH_INSTRUCTIONS,
+    MEMORY_NOTE_INSTRUCTIONS,
     'SAVE_PROCEDURE uses a name and 2-12 consecutive verified recentExperience evidence IDs to remember a reusable procedure you actually demonstrated. It stores declarative basic operations, not code. Do not claim to have learned an untested procedure. RUN_PROCEDURE selects a saved procedureId; its targets are rebound in this world and every step is checked.',
     PROCEDURE_REVISION_INSTRUCTIONS,
     'Candidate procedures are experiments, not guaranteed skills. Prior-world experience is useful but old-world coordinates are not current facts. Consult outcomes and revise plans after failed predictions.',
@@ -278,6 +282,7 @@ function taskCriteria(): Record<ExecutiveTaskType, string> {
     EXECUTE_OPERATION: 'Execute a basic game control with explicit arguments.',
     LOOKUP_KNOWLEDGE: 'Query neutral Minecraft specifications.',
     RECALL_MEMORY: 'Search historical evidence and procedures without changing them.',
+    CONSOLIDATE_MEMORY: 'Save an evidence-linked interpretation or append its correction without deleting history.',
     SAVE_PROCEDURE: 'Remember a procedure from verified executed evidence.',
     RUN_PROCEDURE: 'Replay a learned procedure with live target binding.',
     EXECUTE_AFFORDANCE: 'Execute one currently available Minecraft affordance and then re-observe the world.',
@@ -330,6 +335,9 @@ function normalizeDecision(
     const request = validateMemorySearchRequest(decision.memoryQuery, decision.memoryCursor);
     return { ...decision, memoryQuery: request.query, memoryCursor: request.cursor };
   }
+  if (decision.task === 'CONSOLIDATE_MEMORY') {
+    return { ...decision, ...validateNoteSelection(decision.memoryNote, decision.evidenceIds, decision.reason, state.autonomy) };
+  }
   if (decision.task === 'SAVE_PROCEDURE') {
     return { ...decision, ...validateProcedureSaveSelection(
       decision.procedureName, decision.evidenceIds, state.autonomy?.recentExperience,
@@ -380,7 +388,7 @@ function normalizeSecret(value: string | undefined): string | null {
 }
 
 function extractOpenAIResponseText(data: any): string {
-  if (typeof data?.output_text === 'string' && data.output_text.trim()) return data.output_text.trim();
+  if (typeof data?.output_text === 'string' && data.output_text.trim()) return data.output_text;
   const parts: string[] = [];
   for (const item of Array.isArray(data?.output) ? data.output : []) {
     for (const content of Array.isArray(item?.content) ? item.content : []) {
@@ -415,6 +423,7 @@ function logDecision(
     knowledge_query: decision.knowledgeQuery ?? null,
     memory_query: decision.memoryQuery ?? null,
     memory_continuation: Boolean(decision.memoryCursor),
+    memory_note: decision.memoryNote ?? null,
     target_id: decision.targetId ?? null,
     confidence: decision.confidence,
     reason: decision.reason ?? null,

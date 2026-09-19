@@ -6,6 +6,7 @@ import { windowSnapshot, type PrimitiveOperation } from './primitiveOperations.j
 import { deriveProcedureSteps, procedureEnvironmentMatches } from './procedureBindings.js';
 import { normalizeMemoryDimension } from './worldMemory.js';
 import { searchExperience, memorySearchContextKey, type MemorySearchContext, type MemorySearchRequest, type MemorySearchResult } from './memoryRetrieval.js';
+import { MemoryNotes, type MemoryNote } from './memoryConsolidation.js';
 export { bindProcedureStep, completeProcedureStepBinding, ProcedureBindingError, procedureEnvironmentMatches } from './procedureBindings.js';
 
 export interface Evidence {
@@ -60,6 +61,7 @@ export interface ReplayRecord {
 export class ExperienceMemory {
   private db: Database.Database;
   private lastMemorySearch?: MemorySearchResult;
+  readonly notes: MemoryNotes;
   readonly sessionId = randomUUID();
   constructor(path = ':memory:') {
     if (path !== ':memory:') mkdirSync(dirname(resolve(path)), { recursive: true });
@@ -77,6 +79,7 @@ export class ExperienceMemory {
       CREATE INDEX IF NOT EXISTS autonomy_replays_by_procedure
         ON autonomy_procedure_replays(procedure_id, sequence);
     `);
+    this.notes = new MemoryNotes(this.db);
   }
   close(): void { if (this.db.open) this.db.close(); }
   /** Explicit query only: ordinary observation does not scan history. */
@@ -88,7 +91,20 @@ export class ExperienceMemory {
   }
   retrievalSnapshot(context: MemorySearchContext): MemorySearchResult | null {
     if (!this.lastMemorySearch || memorySearchContextKey(this.lastMemorySearch.context) !== memorySearchContextKey(context)) return null;
+    // An independently written correction must not leave a cached note labeled current.
+    if (this.lastMemorySearch.hits.some(hit => hit.kind === 'note' &&
+        this.notes.latestId(String(hit.preview.rootId)) !== hit.preview.currentRevisionId)) {
+      this.lastMemorySearch = undefined;
+      return null;
+    }
     return structuredClone(this.lastMemorySearch);
+  }
+  consolidate(context: MemorySearchContext, note: unknown, ids: unknown, reason: unknown): MemoryNote {
+    const saved = this.notes.save(context, this.sessionId, note, ids, reason);
+    // The next model can recall the returned ID. Do not carry superseded advice
+    // forward, auto-search the archive, or manufacture a new operation trace.
+    this.lastMemorySearch = undefined;
+    return saved;
   }
   append(input: Omit<Evidence, 'id' | 'sequence' | 'sessionId' | 'createdAt'>): Evidence {
     const row = { ...input, id: randomUUID(), sequence: 0, sessionId: this.sessionId, createdAt: Date.now() };
