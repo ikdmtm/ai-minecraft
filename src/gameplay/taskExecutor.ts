@@ -4,6 +4,7 @@ import { SemanticWorldModel } from './semanticWorldModel.js';
 import { SkillExecutor } from './skillExecutor.js';
 import type { WorldSensor } from './worldSensor.js';
 import type {
+  ExecutiveActionCapability,
   ExecutiveDecision,
   ExecutiveResource,
   ExecutiveStructure,
@@ -61,6 +62,7 @@ export class TaskExecutor {
       amount: decision.amount ?? null,
       resource: decision.resource ?? null,
       craft_item: decision.craftItem ?? null,
+      capability_id: decision.capabilityId ?? null,
       structure: decision.structure ?? null,
       source: decision.source,
       confidence: decision.confidence,
@@ -86,6 +88,9 @@ export class TaskExecutor {
           break;
         case 'ATTACK_TARGET':
           detail = await this.attackTarget(decision.targetId, startedGoal);
+          break;
+        case 'EXECUTE_CAPABILITY':
+          detail = await this.executeDynamicCapability(decision.capabilityId, startedGoal);
           break;
         case 'CRAFT_ITEM':
           detail = await this.craftExecutiveItem(
@@ -343,6 +348,163 @@ export class TaskExecutor {
 
     this.safeCheckpoint(startedGoal, 'entity_attacked');
     return `attacked:${entityName}`;
+  }
+
+  private async executeDynamicCapability(
+    capabilityId: string | undefined,
+    startedGoal: string,
+  ): Promise<string> {
+    if (!capabilityId) throw new Error('dynamic_capability_missing');
+    const state = this.semantic.capture(this.snapshot());
+    const capability = state.capabilities.actions.find(entry => entry.id === capabilityId);
+    if (!capability) throw new Error(`dynamic_capability_unavailable:${capabilityId}`);
+
+    this.update('executing_dynamic_capability', {
+      capability: capability.id,
+      kind: capability.kind,
+      item: capability.item ?? null,
+      target: capability.targetId ?? null,
+    });
+
+    switch (capability.kind) {
+      case 'hunt_entity':
+        await this.executeHuntCapability(capability, startedGoal);
+        break;
+      case 'consume_item': {
+        const result = await this.runPrimitive({
+          action: 'EAT',
+          consumeItem: capability.item,
+          confidence: 1,
+          source: 'task',
+          reason: `capability:${capability.id}`,
+        }, 20_000);
+        if (result.status !== 'succeeded') throw new Error(`capability_failed:${capability.id}:${result.detail}`);
+        this.safeCheckpoint(startedGoal, 'food_consumed');
+        break;
+      }
+      case 'place_item': {
+        const result = await this.runPrimitive({
+          action: 'PLACE_ITEM',
+          placeItem: capability.item,
+          confidence: 1,
+          source: 'task',
+          reason: `capability:${capability.id}`,
+        }, 20_000);
+        if (result.status !== 'succeeded') throw new Error(`capability_failed:${capability.id}:${result.detail}`);
+        this.safeCheckpoint(startedGoal, 'item_placed');
+        break;
+      }
+      case 'process_item': {
+        const result = await this.runPrimitive({
+          action: 'COOK_FOOD',
+          cookItem: capability.item,
+          confidence: 1,
+          source: 'task',
+          reason: `capability:${capability.id}`,
+        }, 30_000);
+        if (result.status !== 'succeeded') throw new Error(`capability_failed:${capability.id}:${result.detail}`);
+        this.safeCheckpoint(startedGoal, 'item_processed');
+        break;
+      }
+      case 'sleep': {
+        const result = await this.runPrimitive({
+          action: 'SLEEP',
+          confidence: 1,
+          source: 'task',
+          reason: `capability:${capability.id}`,
+        }, 30_000);
+        if (result.status !== 'succeeded') throw new Error(`capability_failed:${capability.id}:${result.detail}`);
+        this.safeCheckpoint(startedGoal, 'slept');
+        break;
+      }
+      case 'wait_condition':
+        await this.waitForCapabilityCondition(capability, startedGoal);
+        break;
+    }
+
+    return `capability_executed:${capability.id}`;
+  }
+
+  private async executeHuntCapability(
+    capability: ExecutiveActionCapability,
+    startedGoal: string,
+  ): Promise<void> {
+    const state = this.semantic.capture(this.snapshot());
+    const target = state.targets.find(candidate =>
+      candidate.id === capability.targetId &&
+      candidate.kind === 'entity' &&
+      Boolean(candidate.metadata.foodAnimal),
+    );
+    if (!target) throw new Error(`hunt_target_unavailable:${capability.targetId ?? 'none'}`);
+
+    const entityId = Number(target.metadata.entityId);
+    const entityName = typeof target.metadata.entityName === 'string'
+      ? target.metadata.entityName
+      : 'animal';
+    if (!Number.isFinite(entityId)) throw new Error('hunt_target_invalid_entity');
+
+    const raw = this.capturePrimitiveWorld();
+    const candidate: WorldCandidate = {
+      id: `entity:${entityId}`,
+      kind: 'entity',
+      name: entityName,
+      distance: target.distance,
+      position: { ...target.position },
+      hostile: false,
+      foodAnimal: true,
+    };
+    if (!raw.entityCandidates.some(entry => entry.id === candidate.id)) {
+      raw.entityCandidates.unshift(candidate);
+    }
+
+    const result = await this.runPrimitive({
+      action: 'HUNT_FOOD',
+      entityTargetId: candidate.id,
+      confidence: 1,
+      source: 'task',
+      reason: `capability:${capability.id}`,
+    }, 35_000, raw);
+    if (result.status !== 'succeeded') {
+      throw new Error(`capability_failed:${capability.id}:${result.detail}`);
+    }
+    this.safeCheckpoint(startedGoal, 'food_animal_hunted');
+  }
+
+  private async waitForCapabilityCondition(
+    capability: ExecutiveActionCapability,
+    startedGoal: string,
+  ): Promise<void> {
+    if (capability.id !== 'wait:daylight') {
+      throw new Error(`unsupported_wait_condition:${capability.id}`);
+    }
+
+    const deadline = Date.now() + 10 * 60_000;
+    while (Date.now() < deadline) {
+      const time = this.bot.time.timeOfDay;
+      const isNight = time >= 12500 && time < 23500;
+      if (!isNight) {
+        this.safeCheckpoint(startedGoal, 'wait_condition_satisfied:daylight');
+        return;
+      }
+
+      const threat = this.shared.get().threatLevel;
+      if (threat === 'danger' || threat === 'critical') {
+        throw new Error(`task_replan:wait_interrupted_by_threat:${threat}`);
+      }
+      if (this.bot.food <= 6) {
+        throw new Error('task_replan:wait_interrupted_by_hunger');
+      }
+
+      this.update('waiting_for_condition', {
+        capability: capability.id,
+        condition: 'daylight',
+        timeOfDay: time,
+        hunger: this.bot.food,
+      });
+      await delay(1_000);
+    }
+
+    throw new Error('wait_condition_timeout:daylight');
   }
 
   private async craftExecutiveItem(
