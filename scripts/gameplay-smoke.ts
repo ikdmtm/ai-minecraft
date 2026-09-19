@@ -136,6 +136,7 @@ async function main() {
     const cookedBefore = count('cooked_chicken');
     await run({ action: 'USE', item: 'cooked_chicken' });
     await until(() => bot!.food > hungerBefore, 'food_hunger_increased', 5000);
+    await until(() => count('cooked_chicken') === cookedBefore - 1, 'food_item_consumed', 5000);
     assert.equal(count('cooked_chicken'), cookedBefore - 1);
     assert.ok(bot.food > hungerBefore);
     console.log(JSON.stringify({ phase: 'use_verified', item: 'cooked_chicken', hunger_before: hungerBefore, hunger_after: bot.food }));
