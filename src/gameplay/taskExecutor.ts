@@ -7,7 +7,8 @@ import type { WorldSensor } from './worldSensor.js';
 import type { ExecutiveActionCapability, ExecutiveDecision, ExecutiveTaskSnapshot, TaskExecutionResult } from './executiveTypes.js';
 import { normalizeMemoryDimension, type WorldMemory } from './worldMemory.js';
 import { ExperienceMemory, bindProcedureStep } from './experienceMemory.js';
-import { parseOperation, inventorySignature, windowSignature, windowSnapshot, type PrimitiveOperation } from './primitiveOperations.js';
+import { parseOperation, windowSnapshot, type PrimitiveOperation } from './primitiveOperations.js';
+import { observeOperation as observation, assessOperationEffect, type EffectAssessment } from './operationEvidence.js';
 import type { SpatialRuntimeContext } from './spatialRuntimeContext.js';
 
 export class TaskExecutor {
@@ -92,7 +93,9 @@ export class TaskExecutor {
               if (this.shared.get().currentGoal !== startedGoal || Date.now() >= deadline) throw new Error('task_replan:procedure_boundary_changed');
               const op = bindProcedureStep(step, this.bot, anchor, bindings);
               const outcome = await this.operate(op, check, Math.max(100, deadline - Date.now()));
-              if (!outcome.verified) throw new Error('procedure_step_effect_unverified');
+              // Missing confirmation calls for re-observation/replanning, not
+              // a false failure of this skill or blind execution of its next step.
+              if (!outcome.verified) throw new Error('task_replan:procedure_step_effect_unconfirmed');
             }
             check();
             this.experience.recordReplay(procedure.id, true);
@@ -144,6 +147,7 @@ export class TaskExecutor {
     this.current.detail = op.action === 'WAIT' ? 'waiting_for_condition' : `operation:${op.action}`;
     this.current.progress = { operation: op.action, condition: op.until ?? null };
     let status: 'succeeded' | 'failed' | 'interrupted' = 'failed', detail = '', verified = false;
+    let assessment: EffectAssessment = { verified: false, outcome: 'effect_unconfirmed', reason: 'not_assessed' };
     try {
       const result = await this.primitive.runAndWait({ action: 'OPERATE', operation: op,
         confidence: 1, source: 'task', reason: `operation:${op.action}` }, this.sensor.capture(this.primitive.snapshot()), 'normal', timeout);
@@ -151,8 +155,9 @@ export class TaskExecutor {
       if (result.action !== 'OPERATE' || result.status === 'interrupted') throw new Error(`task_replan:operation_interrupted:${result.detail}`);
       if (result.status !== 'succeeded') throw new Error(`operation_failed:${result.detail}`);
       const after = observation(this.bot, op);
-      verified = verifiedEffect(op, before, after, hurt, result.detail);
-      status = 'succeeded'; detail = `${op.action}:${result.detail}:${verified ? 'effect_observed' : 'no_effect_confirmed'}`;
+      assessment = assessOperationEffect(op, before, after, hurt, result.detail);
+      verified = assessment.verified;
+      status = 'succeeded'; detail = `${op.action}:${result.detail}:${assessment.outcome}`;
       if (verified && op.action === 'PLACE' && op.position && op.item) {
         this.memory.observe({ kind: 'placed_block', key: `${op.position.x}:${op.position.y}:${op.position.z}`, label: op.item,
           position: op.position, dimension, scope: 'world', retention: 'stable', confidence: 1, metadata: { source: 'verified_self_action' } });
@@ -173,14 +178,19 @@ export class TaskExecutor {
       let effect: string;
       if (obsolete) {
         status = 'interrupted'; verified = false;
-        effect = JSON.stringify({ contextChanged: changed, interrupted: true,
+        effect = JSON.stringify({ outcome: 'interrupted', contextChanged: changed, interrupted: true,
           sourceWorldId: worldId, sourceDimension: dimension, sourceEpoch: ticket?.epoch ?? null,
           destinationWorldId: this.memory.getWorldId(), destinationDimension: String(this.bot.game?.dimension) });
       } else {
         const after = observation(this.bot, op);
-        effect = JSON.stringify({ hp: after.hp - before.hp, hunger: after.hunger - before.hunger,
+        effect = JSON.stringify({ outcome: status === 'succeeded' ? assessment.outcome : status,
+          assessmentReason: status === 'succeeded' ? assessment.reason : detail,
+          hp: after.hp - before.hp, hunger: after.hunger - before.hunger,
           inventoryBefore: before.inventory, inventoryAfter: after.inventory,
-          blockBefore: before.block, blockAfter: after.block, targetHurtObserved: hurt, windowChanged: before.window !== after.window });
+          blockBefore: before.block, blockAfter: after.block, targetHurtObserved: hurt,
+          targetEntityBefore: before.entityIdentity, targetEntityAfter: after.entityIdentity,
+          targetMetadataBefore: before.entityMetadata, targetMetadataAfter: after.entityMetadata,
+          windowChanged: before.window !== after.window });
       }
       const evidence = this.experience.append({ worldId, version, dimension,
         operation: op, status, verified, detail, effect, origin, blockName, entityName, window: win });
@@ -188,12 +198,15 @@ export class TaskExecutor {
         experience_session_id: evidence.sessionId, evidence_sequence: evidence.sequence,
         world_id: worldId, minecraft_version: version, dimension, spatial_epoch: ticket?.epoch ?? null,
         operation: op, status, effect_verified: verified, detail, effect });
-      if (status !== 'interrupted') this.memory.recordProcedureOutcome({
+      // Keep every unconfirmed/timeout/interrupted trace above, but do not
+      // contaminate success/failure statistics with missing evidence. Historical
+      // records are never rewritten or silently reclassified by this change.
+      if (status === 'failed' || (status === 'succeeded' && verified)) this.memory.recordProcedureOutcome({
         key: [version, dimension, op.action, op.item ?? '', blockName ?? '', entityName ?? ''].join('|'),
         label: `${op.action} ${op.item ?? blockName ?? entityName ?? ''}`.trim(),
         success: status === 'succeeded' && verified,
-        detail: status === 'succeeded' ? (verified ? 'effect_observed' : 'effect_not_confirmed') : 'operation_failed',
-        metadata: { action: op.action, item: op.item ?? null, observedEffect: effect.slice(0, 2000) },
+        detail: status === 'succeeded' ? assessment.outcome : 'operation_failed',
+        metadata: { action: op.action, item: op.item ?? null, evidenceId: evidence.id, observedEffect: effect.slice(0, 2000) },
       });
     }
   }
@@ -206,16 +219,6 @@ export class TaskExecutor {
   private log(kind: string, payload: Record<string, unknown>): void { console.log(JSON.stringify({ ts: new Date().toISOString(), kind, ...payload })); }
 }
 
-function observation(bot: mineflayer.Bot, op: PrimitiveOperation) {
-  const hp = bot.health, hunger = bot.food, inventory = inventorySignature(bot), window = windowSignature(bot);
-  const b = op.position ? bot.blockAt(new Vec3(op.position.x, op.position.y, op.position.z)) : null;
-  const block = b ? `${b.name}:${b.stateId}` : null;
-  const entity = op.entityId != null ? bot.entities[op.entityId] : null;
-  return { hp, hunger, inventory, window, block, position: { x: bot.entity.position.x, y: bot.entity.position.y, z: bot.entity.position.z },
-    yaw: bot.entity.yaw, pitch: bot.entity.pitch, held: bot.heldItem?.name, sleeping: bot.isSleeping, signature: JSON.stringify({ hp, hunger, inventory, window, block,
-    position: bot.entity.position, yaw: bot.entity.yaw, pitch: bot.entity.pitch, heldItem: bot.heldItem?.name,
-    entityMetadata: entity?.metadata, entityPresent: Boolean(entity), sleeping: bot.isSleeping }) };
-}
 function affordanceOperation(a: ExecutiveActionCapability): PrimitiveOperation {
   switch (a.kind) {
     case 'move_to': case 'collect_drop': return parseOperation({ action: 'MOVE', position: a.position });
@@ -227,20 +230,5 @@ function affordanceOperation(a: ExecutiveActionCapability): PrimitiveOperation {
     case 'interact_block': return parseOperation({ action: 'INTERACT_BLOCK', position: a.position });
     case 'wait_condition': return parseOperation({ action: 'WAIT', durationMs: 60000, until: a.specification.condition });
     default: throw new Error('affordance_requires_explicit_open_and_transfer');
-  }
-}
-
-function verifiedEffect(op: PrimitiveOperation, before: ReturnType<typeof observation>, after: ReturnType<typeof observation>, hurt: boolean, detail: string): boolean {
-  switch (op.action) {
-    case 'ATTACK': return hurt;
-    case 'MOVE': return Math.hypot(after.position.x-before.position.x, after.position.y-before.position.y, after.position.z-before.position.z) > 0.1;
-    case 'LOOK': return Math.abs(after.yaw-before.yaw) + Math.abs(after.pitch-before.pitch) > 0.0001;
-    case 'EQUIP': return before.held !== after.held;
-    case 'BREAK': case 'PLACE': return before.block !== after.block;
-    case 'OPEN': case 'CLOSE': case 'TRANSFER': return before.window !== after.window;
-    case 'CRAFT': return before.inventory !== after.inventory;
-    case 'USE': return before.inventory !== after.inventory || before.hunger !== after.hunger || before.block !== after.block;
-    case 'INTERACT_BLOCK': case 'INTERACT_ENTITY': return before.block !== after.block || before.window !== after.window || before.sleeping !== after.sleeping;
-    case 'WAIT': return detail === 'wait_elapsed' || detail.startsWith('condition_satisfied:');
   }
 }
