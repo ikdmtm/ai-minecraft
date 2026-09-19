@@ -79,9 +79,9 @@ export class TaskExecutor {
           const learningAfter = captureLearningSnapshot(this.bot);
           this.memory.recordProcedureOutcome({
             key: procedureKey(affordance),
-            label: affordance.description,
+            label: procedureLabel(affordance),
             success: true,
-            detail,
+            detail: 'success',
             metadata: {
               ...procedureMetadata(affordance),
               observedEffect: summarizeEffect(learningBefore, learningAfter),
@@ -105,9 +105,9 @@ export class TaskExecutor {
       if (affordance) {
         this.memory.recordProcedureOutcome({
           key: procedureKey(affordance),
-          label: affordance.description,
+          label: procedureLabel(affordance),
           success: false,
-          detail: message,
+          detail: sanitizeProcedureDetail(message, affordance),
           metadata: {
             ...procedureMetadata(affordance),
             observedEffect: learningBefore
@@ -432,6 +432,30 @@ function idleTask(): ExecutiveTaskSnapshot {
     detail: '',
     progress: {},
   };
+}
+
+function procedureLabel(affordance: ExecutiveActionCapability): string {
+  const parts = [affordance.kind];
+  if (affordance.item) parts.push(`item=${affordance.item}`);
+  if (affordance.outputItem) parts.push(`output=${affordance.outputItem}`);
+  if (affordance.station) parts.push(`station=${affordance.station}`);
+  const blockName = stringSpec(affordance, 'blockName');
+  const entityName = stringSpec(affordance, 'entityName');
+  const targetKind = stringSpec(affordance, 'targetKind');
+  if (blockName) parts.push(`block=${blockName}`);
+  if (entityName) parts.push(`entity=${entityName}`);
+  if (targetKind) parts.push(`target=${targetKind}`);
+  return parts.join(' ');
+}
+
+function sanitizeProcedureDetail(
+  message: string,
+  affordance: ExecutiveActionCapability,
+): string {
+  return message
+    .replaceAll(affordance.id, '<affordance>')
+    .replace(/-?\d+(?:\.\d+)?,-?\d+(?:\.\d+)?,-?\d+(?:\.\d+)?/g, '<position>')
+    .slice(0, 240);
 }
 
 function procedureKey(affordance: ExecutiveActionCapability): string {
