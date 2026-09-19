@@ -81,7 +81,7 @@ T01ではこの処理を検証専用CIへ置換した。[PR #1](https://github.c
 | T00 | 現状監査・設計契約・タスク分割 | VERIFIED（文書・監査のみ） | なし | この文書、固定した基準SHA、読んだCIログ |
 | T01 | 一回限りの移行CIを通常の検証専用CIへ置換 | VERIFIED・取り込み済み | T00 | run 35430600966 / 35430757373、merge 73379eb |
 | T02 | 自律実走の記録・停止・再開の形式を固定 | IMPLEMENTED（PR #2の最新CIを確認） | T01 | [T02記録](T02_RUN_RECORDING.md)、runRecorder.test.ts、対応PRのCI |
-| T03 | 基本操作の未検証箇所を1操作ずつ検証 | TODO | T01 | 対象操作の失敗再現・修正・回帰テスト |
+| T03 | 基本操作の未検証箇所を1操作ずつ検証 | T03a VERIFIED / T03b READY | T01 | 対象操作の失敗再現・修正・回帰テスト |
 | T04 | ワールド変更・再起動での記憶分離を検証 | TODO | T01 | 同seed別world、再起動、dimension等の検証結果 |
 | T05 | LLM自身による手順保存と別環境再利用を検証 | TODO | T02・T03・T04 | 保存元証拠、再bind、再実行結果、失敗時更新 |
 | T06 | 記憶の関連検索と整理を小さく追加 | TODO | T04 | 原記録保持、検索上限、反証・要約のテスト |
@@ -123,6 +123,12 @@ T01の実装・検証記録:
 ### T03: 操作アダプターの検証（1回1操作群）
 
 - T03a: CRAFT/USE の実サーバーテスト。所持数だけでなく実際の出力・満腹度等を確認する。
+
+T03a VERIFIED (PR #3, CI run 35434889504): the disposable Minecraft 1.21.4 server verified inventory crafting output/ingredient deltas, a crafting-table-required wooden_pickaxe recipe, and USE of selected cooked_chicken. Observed hunger changed 14 -> 20 and the consumed stack decreased by one. The smoke emitted REAL_SERVER_CRAFT_PASSED, REAL_SERVER_USE_PASSED, and the full REAL_SERVER_SMOKE_PASSED marker. Typecheck/build/regression/export checks also passed.
+
+During T03a, the real server exposed one adapter bug: CRAFT searched for a crafting table with canSeeBlock inside findBlock's scan predicate, which could dereference an incomplete scan candidate. The fix keeps the scan predicate to block identity/distance and passes the concrete nearby table to recipesFor/craft. The following two failures were fixture synchronization issues, not adapter changes: insufficient Hunger strength and asserting inventory consumption before the server inventory update arrived. The final fixture uses a strong bounded Hunger effect and waits for both hunger increase and item decrement.
+
+No gameplay strategy, memory, learning, or planner behavior was changed.
 - T03b: 対象entity/INTERACT/装備の検証。攻撃の成功を撃破成功と同一視しない。
 - T03c: TRANSFER/OPEN/CLOSE/WAIT の境界条件。古いwindow、満杯、条件timeout、割込み後の後続処理を確認する。
 
@@ -189,7 +195,7 @@ Observed result: Run manifest/JSONL journal and pre-run SQLite/knowledge snapsho
 Tests actually run / evidence: T01 final run 35430757373 was checked before merging PR #1. New T02 CI is recorded on PR #2; do not treat a pending or superseded run as verification of the latest head.
 Tests not run: Autonomous Hardcore play; behavior learning/cross-world evaluation. New tests use fixture child processes and temporary SQLite only.
 Remaining blocker: Verify the final T02 CI and review/integrate PR #2. Unknown seed and dirty source limitations remain explicit.
-Next single task: After T02 verification/integration, T03a only (real-server CRAFT/USE). Do not combine with T04/T05/T06.
+Next single task: T03b only (real-server target entity / INTERACT / EQUIP verification). Do not combine with T03c or T04/T05/T06.
 ```
 
 ## 7. 再開時の最小手順
