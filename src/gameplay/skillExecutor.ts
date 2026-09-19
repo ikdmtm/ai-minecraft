@@ -790,7 +790,11 @@ export class SkillExecutor {
   ): Promise<void> {
     const before = this.inventoryCount(itemName);
     try {
-      await this.bot.craft(recipe, 1, table ?? undefined);
+      await withTimeout(
+        this.bot.craft(recipe, 1, table ?? undefined),
+        8_000,
+        `craft_timeout:${itemName}`,
+      );
     } catch (error) {
       await this.reconcileCraftingState();
 
