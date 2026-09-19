@@ -116,10 +116,13 @@ describe('T06b non-destructive memory consolidation', () => {
   test.each([
     { title: '' }, { title: 'x'.repeat(121) }, { content: 'x'.repeat(2001) }, { content: '' },
     { kind: 'fact' }, { state: 'verified' }, { parentId: '' }, { state: 'withdrawn' }, { extra: true },
+    { kind: ['summary'] }, { state: ['candidate'] },
   ])('rejects invalid note shape %j', patch => {
     expect(() => parseNoteSelection({ ...note(), ...patch }, ['source'], 'reason')).toThrow('memory_note');
   });
-  test.each([[], ['x', 'x'], Array.from({ length: 13 }, (_, i) => String(i)), [42]])('rejects invalid sources %p', ids => {
+  test.each([
+    { ids: [] }, { ids: ['x', 'x'] }, { ids: Array.from({ length: 13 }, (_, i) => String(i)) }, { ids: [42] },
+  ])('rejects invalid sources %p', ({ ids }) => {
     expect(() => parseNoteSelection(note(), ids, 'reason')).toThrow('memory_note');
   });
   test('requires nonempty reason, context and real parent', () => {
@@ -157,5 +160,17 @@ describe('T06b non-destructive memory consolidation', () => {
     const autonomy = { ...context, recentExperience: [], memorySearch: memory.search(context, { query: n.id }) };
     expect(() => validateNoteSelection(note(), [n.id], 'reason', autonomy)).toThrow('memory_note_evidence_not_presented');
     expect(() => save([n.id])).toThrow('memory_note_source_missing');
+  });
+  test('large legitimate source previews retain correction markers and remain available in the next snapshot', () => {
+    const traces = Array.from({ length: 12 }, () => evidence({ worldId: '界'.repeat(512) }));
+    const first = save(traces.map(e => e.id), { content: 'long_old_claim ' + 'あ'.repeat(1900) });
+    const page = memory.search(context, { query: first.id });
+    expect(page.hits[0].preview).toMatchObject({ clipped: true, rootId: first.id, isCurrent: true, currentRevisionId: first.id });
+    expect(memory.retrievalSnapshot(context)).not.toBeNull();
+    const next = save(traces.map(e => e.id), { parentId: first.id, content: 'withdrawn', state: 'withdrawn' });
+    const oldPage = memory.search(context, { query: 'long_old_claim' });
+    expect(oldPage.hits[0].preview).toMatchObject({ clipped: true, isCurrent: false, currentState: 'withdrawn', currentRevisionId: next.id });
+    expect(Buffer.byteLength(JSON.stringify(oldPage))).toBeLessThanOrEqual(MEMORY_SEARCH_MAX_BYTES);
+    expect(memory.notes.get(first.id)).toEqual(first);
   });
 });
