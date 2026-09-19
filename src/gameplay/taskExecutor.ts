@@ -216,7 +216,8 @@ export class TaskExecutor {
       if (status === 'failed' || (status === 'succeeded' && verified)) this.memory.recordProcedureOutcome({
         key: [version, dimension, op.action, op.item ?? '', blockName ?? '', entityName ?? ''].join('|'),
         label: `${op.action} ${op.item ?? blockName ?? entityName ?? ''}`.trim(),
-        success: status === 'succeeded' ? assessment.outcome : 'operation_failed',
+        success: status === 'succeeded' && verified,
+        detail: status === 'succeeded' ? assessment.outcome : 'operation_failed',
         metadata: { action: op.action, item: op.item ?? null, evidenceId: evidence.id, observedEffect: effect.slice(0, 2000) },
       });
     }
