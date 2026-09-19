@@ -467,7 +467,25 @@ export class TaskExecutor {
         this.safeCheckpoint(startedGoal, 'excavation_site_failed');
         continue;
       }
-      this.safeCheckpoint(startedGoal, 'staircase_step');
+
+      // A staircase primitive certifies only one short segment. Re-observe the
+      // endpoint before extending farther. This lets the body cross a deep soil
+      // layer without silently exceeding the world model's safety guarantee.
+      const afterSegment = this.semantic.capture(this.snapshot());
+      if (afterSegment.player.inWater) {
+        throw new Error('stone_workspace_entered_water');
+      }
+      const continuation = afterSegment.targets
+        .filter(target =>
+          target.kind === 'excavation_site' &&
+          !triedExcavationSites.has(target.id) &&
+          target.distance <= 3.5 &&
+          target.risk === 'low',
+        )
+        .sort((a, b) => a.distance - b.distance || b.score - a.score)[0];
+      workspace = continuation ? excavationWorkspace(continuation) : null;
+
+      this.safeCheckpoint(startedGoal, continuation ? 'staircase_segment_recertified' : 'staircase_step');
     }
 
     throw new Error('stone_task_step_limit');
@@ -600,6 +618,7 @@ export class TaskExecutor {
         this.bot.entity.position.y - site.position.y,
         this.bot.entity.position.z - site.position.z,
       );
+      let buildPosition = site.position;
       if (distance > 1.5) {
         const nav = await this.runPrimitive({
           action: 'NAVIGATE',
@@ -611,7 +630,31 @@ export class TaskExecutor {
         if (nav.status === 'interrupted') {
           throw new Error('task_replan:shelter_navigation_interrupted');
         }
-        if (nav.status !== 'succeeded') continue;
+        if (nav.status !== 'succeeded') {
+          // A selected site can become locally unreachable after digging or
+          // terrain changes. If the bot is already dry and grounded nearby,
+          // let BUILD_SHELTER validate the current footprint instead of
+          // rejecting the whole intent before construction is even attempted.
+          const current = this.semantic.capture(this.snapshot());
+          if (
+            distance <= 6 &&
+            !current.player.inWater &&
+            current.player.onSolidGround
+          ) {
+            buildPosition = {
+              x: Math.floor(this.bot.entity.position.x),
+              y: Math.floor(this.bot.entity.position.y),
+              z: Math.floor(this.bot.entity.position.z),
+            };
+            this.update('establishing_shelter', {
+              stage: 'local_fallback',
+              site: site.id,
+              attempt: attempt + 1,
+            });
+          } else {
+            continue;
+          }
+        }
       }
 
       const arrived = this.semantic.capture(this.snapshot());
@@ -624,10 +667,12 @@ export class TaskExecutor {
       });
       const result = await this.runPrimitive({
         action: 'BUILD_SHELTER',
-        targetPosition: site.position,
+        targetPosition: buildPosition,
         confidence: 1,
         source: 'task',
-        reason: 'semantic_first_night_shelter',
+        reason: buildPosition === site.position
+          ? 'semantic_first_night_shelter'
+          : 'local_validated_shelter_fallback',
       }, 30_000);
 
       if (result.status === 'succeeded') {
