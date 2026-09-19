@@ -114,6 +114,10 @@ export class SemanticWorldModel {
           id: p.id, name: p.name, status: p.status, successes: p.successes, failures: p.failures,
           steps: p.steps, evidenceIds: p.evidenceIds,
         })) ?? [],
+        // Historical search is a bounded response workspace, never a live target
+        // or a new observation. Merely capturing the world does not run a query.
+        memorySearch: this.experience?.retrievalSnapshot({ worldId: this.memory.getWorldId(),
+          version: this.bot.version, dimension: String(this.bot.game.dimension) }) ?? null,
         knowledgeResults: this.knowledgeResults,
       },
       strategy,

@@ -5,6 +5,7 @@ export type ExecutiveTaskType =
   | 'EXECUTE_AFFORDANCE'
   | 'EXECUTE_OPERATION'
   | 'LOOKUP_KNOWLEDGE'
+  | 'RECALL_MEMORY'
   | 'SAVE_PROCEDURE'
   | 'RUN_PROCEDURE'
   | 'WAIT';
@@ -122,7 +123,7 @@ export interface ExecutiveCapabilitySnapshot {
 export interface ExecutiveTaskSnapshot {
   id: number;
   task: ExecutiveTaskType | 'NONE';
-  targetId: string | null;
+  targetId: null | string;
   status: 'idle' | 'running' | 'succeeded' | 'failed' | 'interrupted';
   startedAt: number | null;
   updatedAt: number;
@@ -172,6 +173,8 @@ export interface ExecutiveDecision {
   operation?: PrimitiveOperation;
   knowledgeQuery?: string;
   knowledgeOffset?: number;
+  memoryQuery?: string;
+  memoryCursor?: string;
   procedureName?: string;
   evidenceIds?: string[];
   procedureId?: string;
@@ -194,7 +197,7 @@ export interface TaskExecutionResult {
 }
 
 export const EXECUTIVE_TASKS: ExecutiveTaskType[] = [
-  'EXECUTE_OPERATION', 'LOOKUP_KNOWLEDGE', 'SAVE_PROCEDURE', 'RUN_PROCEDURE',
+  'EXECUTE_OPERATION', 'LOOKUP_KNOWLEDGE', 'RECALL_MEMORY', 'SAVE_PROCEDURE', 'RUN_PROCEDURE',
   'EXECUTE_AFFORDANCE',
   'WAIT',
 ];
