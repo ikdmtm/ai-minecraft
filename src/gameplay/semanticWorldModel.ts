@@ -143,8 +143,6 @@ export class SemanticWorldModel {
     const spatial = [
       ...this.findKnownStructures(),
       ...this.findRememberedLocations(),
-      ...this.findShelterSites(),
-      ...this.findExcavationSites(),
       ...this.findLandTargets(),
     ];
     const resources = this.findResourceSources().slice(0, 18);
