@@ -24,15 +24,9 @@ export class StrategicPlanner {
     this.running = true;
     if (!this.shared.get().currentGoal) {
       this.apply({
-        mainGoal: 'Acquire wood and establish basic tools.',
-        subGoals: [
-          'Find a reachable tree.',
-          'Collect at least 6 logs.',
-          'Craft planks and a crafting table.',
-          'Craft a wooden pickaxe.',
-          'Collect stone and upgrade to stone tools.',
-        ],
-        assessment: 'Fresh spawn with no equipment.',
+        mainGoal: 'Survive as long as possible in this Hardcore world while continuing to live actively.',
+        subGoals: [],
+        assessment: 'Fresh spawn. No prescribed progression plan has been chosen yet.',
       });
     }
     this.schedule(750);
@@ -64,11 +58,13 @@ export class StrategicPlanner {
           model: this.model,
           instructions: [
             'You are the long-horizon strategy layer for an autonomous Minecraft Hardcore player.',
-            'Choose a useful overall objective and 3-6 concrete milestones.',
+            'The public long-term objective is to survive for as many Minecraft days as possible in Hardcore.',
+            'Choose your own useful overall objective and 3-6 concrete milestones from the actual world state. Do not assume a standard Minecraft progression route.',
             'Do not issue frame-by-frame movement commands. The executive/task layers handle immediate action selection and execution.',
             'Treat known_structure semantic targets and state.facilities as persistent world memory. Do not forget a completed shelter merely because it is no longer nearby.',
-            'Priority order: survive immediate danger, establish safety, improve capability, explore/progress, take reasonable challenges.',
-            'Do not optimize for hiding forever. Progress through ordinary Minecraft while protecting the single Hardcore life.',
+            'Use state.capabilities as the source of truth for what the body can currently gather, craft, excavate, navigate to, or attack.',
+            'Survival is the objective, but passive hiding forever is not a satisfactory strategy: maintain a sustainable active life that learns the world, develops useful capability, explores when worthwhile, creates things, and takes justified risks.',
+            'Never prescribe wood->stone->shelter, an Ender Dragon route, or any other fixed progression unless you independently judge those steps useful from the current state.',
             'Write main_goal, sub_goals, and progress_assessment in concise English so the Jev policy can consume them consistently.',
             'Return JSON only with main_goal, sub_goals, progress_assessment.',
           ].join(' '),
@@ -77,6 +73,7 @@ export class StrategicPlanner {
             world: state.world,
             inventory: state.inventory,
             facilities: state.facilities,
+            capabilities: state.capabilities,
             current_goal: state.strategy.mainGoal,
             current_sub_goals: state.strategy.subGoals,
             active_task: state.activeTask,
