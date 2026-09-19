@@ -56,10 +56,22 @@ export class CapabilityRegistry {
       }))
       .slice(0, 20);
 
+    const huntFood = targets
+      .filter(target => target.kind === 'entity' && Boolean(target.metadata.foodAnimal))
+      .map(target => ({
+        targetId: target.id,
+        entity: stringMeta(target, 'entityName') ?? 'unknown',
+      }))
+      .slice(0, 12);
+
     return {
       gather,
       craft: this.discoverCraftableItems(strategyText),
       recipes: this.discoverReachableRecipes(gather, strategyText),
+      huntFood,
+      edible: this.discoverEdibleInventory(),
+      place: this.discoverPlaceableUtilities(),
+      cook: this.discoverCookableFood(),
       entityActions,
       canExcavate: targets.some(target => target.kind === 'excavation_site'),
     };
@@ -84,6 +96,9 @@ export class CapabilityRegistry {
       item: string;
       requiresTable: boolean;
       recipeCount: number;
+      utility: ExecutiveCapabilitySnapshot['craft'][number]['utility'];
+      owned: number;
+      strategyRelevant: boolean;
       priority: number;
     }> = [];
 
@@ -99,21 +114,46 @@ export class CapabilityRegistry {
 
       const readable = item.name.replace(/_/g, ' ');
       const mentioned = strategy.includes(item.name.toLowerCase()) || strategy.includes(readable);
+      const utility = craftUtility(item.name, item as any);
+      const owned = inventoryCount(this.bot, item.name);
+      const strategyRelevant = isCraftStrategicallyRelevant(utility, item.name, strategy, mentioned);
+
+      // Do not flood the executive with every decorative/redstone variant just
+      // because it is technically craftable. Keep survival-relevant affordances
+      // and anything the strategy explicitly asks for.
+      if (!strategyRelevant) continue;
+
+      // Workstations/storage/sleep infrastructure should not be duplicated as
+      // busywork once one is already carried unless the strategy names it.
+      if (
+        owned > 0 &&
+        !mentioned &&
+        (utility === 'workstation' || utility === 'storage' || utility === 'bed')
+      ) {
+        continue;
+      }
+
       results.push({
         item: item.name,
         requiresTable: recipes.every(recipe => Boolean(recipe.requiresTable)),
         recipeCount: recipes.length,
-        priority: mentioned ? 1000 : 0,
+        utility,
+        owned,
+        strategyRelevant,
+        priority: (mentioned ? 1000 : 0) + craftUtilityPriority(utility),
       });
     }
 
     this.craftCache = results
       .sort((a, b) => b.priority - a.priority || a.item.localeCompare(b.item))
-      .slice(0, 96)
-      .map(({ item, requiresTable, recipeCount }) => ({
+      .slice(0, 64)
+      .map(({ item, requiresTable, recipeCount, utility, owned, strategyRelevant }) => ({
         item,
         requiresTable,
         recipeCount,
+        utility,
+        owned,
+        strategyRelevant,
       }));
     this.craftCacheKey = cacheKey;
     return this.craftCache;
@@ -161,6 +201,50 @@ export class CapabilityRegistry {
         return a.reachableDepth - b.reachableDepth || a.item.localeCompare(b.item);
       })
       .slice(0, 128);
+  }
+
+  private discoverEdibleInventory(): ExecutiveCapabilitySnapshot['edible'] {
+    return this.bot.inventory.items()
+      .map(item => {
+        const data = (this.bot.registry.items as any)?.[item.type] ?? {};
+        const foodPoints = Number(data.foodPoints ?? data.food_points ?? 0);
+        return {
+          item: item.name,
+          count: item.count,
+          foodPoints: Number.isFinite(foodPoints) ? foodPoints : 0,
+        };
+      })
+      .filter(entry => entry.foodPoints > 0 || FALLBACK_EDIBLE_ITEMS.has(entry.item))
+      .map(entry => ({
+        ...entry,
+        foodPoints: entry.foodPoints > 0 ? entry.foodPoints : 2,
+      }))
+      .sort((a, b) => b.foodPoints - a.foodPoints || b.count - a.count);
+  }
+
+  private discoverPlaceableUtilities(): ExecutiveCapabilitySnapshot['place'] {
+    const seen = new Set<string>();
+    const result: ExecutiveCapabilitySnapshot['place'] = [];
+    for (const item of this.bot.inventory.items()) {
+      const role = placeableRole(item.name);
+      if (!role || seen.has(item.name)) continue;
+      seen.add(item.name);
+      result.push({ item: item.name, role });
+    }
+    return result;
+  }
+
+  private discoverCookableFood(): ExecutiveCapabilitySnapshot['cook'] {
+    const fuelAvailable = this.bot.inventory.items().some(item => isFuelItem(item.name));
+    const inventory = new Map(this.bot.inventory.items().map(item => [item.name, item.count]));
+    return Object.entries(COOKABLE_FOOD)
+      .filter(([input]) => (inventory.get(input) ?? 0) > 0)
+      .map(([input, output]) => ({
+        input,
+        output,
+        count: inventory.get(input) ?? 0,
+        fuelAvailable,
+      }));
   }
 
   private getRecipeGraph(): Array<{
@@ -257,6 +341,107 @@ export function canHarvestBlockNow(bot: mineflayer.Bot, block: any): boolean {
   return false;
 }
 
+
+const FALLBACK_EDIBLE_ITEMS = new Set([
+  'apple', 'bread', 'beef', 'porkchop', 'chicken', 'mutton', 'rabbit', 'cod', 'salmon',
+  'cooked_beef', 'cooked_porkchop', 'cooked_chicken', 'cooked_mutton', 'cooked_rabbit',
+  'cooked_cod', 'cooked_salmon', 'baked_potato', 'potato', 'carrot', 'golden_carrot',
+  'sweet_berries', 'glow_berries', 'melon_slice', 'dried_kelp', 'mushroom_stew',
+]);
+
+const COOKABLE_FOOD: Record<string, string> = {
+  beef: 'cooked_beef',
+  porkchop: 'cooked_porkchop',
+  chicken: 'cooked_chicken',
+  mutton: 'cooked_mutton',
+  rabbit: 'cooked_rabbit',
+  cod: 'cooked_cod',
+  salmon: 'cooked_salmon',
+  potato: 'baked_potato',
+  kelp: 'dried_kelp',
+};
+
+function inventoryCount(bot: mineflayer.Bot, name: string): number {
+  return bot.inventory.items()
+    .filter(item => item.name === name)
+    .reduce((sum, item) => sum + item.count, 0);
+}
+
+function craftUtility(
+  name: string,
+  data: any,
+): ExecutiveCapabilitySnapshot['craft'][number]['utility'] {
+  if (Number(data?.foodPoints ?? data?.food_points ?? 0) > 0 || FALLBACK_EDIBLE_ITEMS.has(name)) return 'food';
+  if (name.endsWith('_pickaxe') || name.endsWith('_axe') || name.endsWith('_shovel') || name.endsWith('_hoe')) return 'tool';
+  if (name.endsWith('_sword') || name === 'bow' || name === 'crossbow' || name === 'shield') return 'weapon';
+  if (
+    name.endsWith('_helmet') || name.endsWith('_chestplate') ||
+    name.endsWith('_leggings') || name.endsWith('_boots')
+  ) return 'armor';
+  if (name.endsWith('_bed')) return 'bed';
+  if (['crafting_table', 'furnace', 'smoker', 'blast_furnace', 'campfire'].includes(name)) return 'workstation';
+  if (['chest', 'trapped_chest', 'barrel', 'shulker_box'].includes(name) || name.endsWith('_shulker_box')) return 'storage';
+  if (['bucket', 'shears', 'fishing_rod', 'flint_and_steel', 'compass', 'clock'].includes(name)) return 'utility';
+  if (name === 'stick' || name.endsWith('_planks') || name === 'torch' || name.endsWith('_door')) return 'material';
+  if (
+    name.endsWith('_slab') || name.endsWith('_stairs') || name.endsWith('_fence') ||
+    name.endsWith('_wall') || name.endsWith('_log') || name === 'cobblestone' || name === 'dirt'
+  ) return 'building';
+  return 'misc';
+}
+
+function craftUtilityPriority(
+  utility: ExecutiveCapabilitySnapshot['craft'][number]['utility'],
+): number {
+  switch (utility) {
+    case 'food': return 140;
+    case 'tool': return 130;
+    case 'weapon': return 120;
+    case 'armor': return 115;
+    case 'bed': return 110;
+    case 'workstation': return 100;
+    case 'utility': return 90;
+    case 'storage': return 75;
+    case 'material': return 70;
+    case 'building': return 40;
+    default: return 0;
+  }
+}
+
+function isCraftStrategicallyRelevant(
+  utility: ExecutiveCapabilitySnapshot['craft'][number]['utility'],
+  name: string,
+  strategy: string,
+  mentioned: boolean,
+): boolean {
+  if (mentioned) return true;
+  if (['food', 'tool', 'weapon', 'armor', 'bed', 'workstation', 'utility'].includes(utility)) return true;
+  if (utility === 'storage') return /(storage|store|cache|chest|barrel|base)/.test(strategy);
+  if (utility === 'material') return true;
+  if (utility === 'building') return /(build|shelter|base|repair|structure)/.test(strategy);
+  // Redstone/decorative/misc items stay hidden unless the current strategy
+  // explicitly names them. This preserves open-ended crafting without letting
+  // "anything craftable" become fake progress.
+  return false;
+}
+
+function placeableRole(name: string): ExecutiveCapabilitySnapshot['place'][number]['role'] | null {
+  if (['crafting_table', 'furnace', 'smoker', 'blast_furnace', 'campfire'].includes(name)) return 'workstation';
+  if (['chest', 'trapped_chest', 'barrel'].includes(name) || name.endsWith('_shulker_box')) return 'storage';
+  if (name.endsWith('_bed')) return 'sleep';
+  return null;
+}
+
+function isFuelItem(name: string): boolean {
+  return (
+    name === 'coal' ||
+    name === 'charcoal' ||
+    name === 'stick' ||
+    name.endsWith('_log') ||
+    name.endsWith('_wood') ||
+    name.endsWith('_planks')
+  );
+}
 
 function recipeIngredients(
   bot: mineflayer.Bot,
