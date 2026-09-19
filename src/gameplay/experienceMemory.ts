@@ -130,6 +130,8 @@ export class ExperienceMemory {
       if (!procedureEnvironmentMatches(parent, first.version, first.dimension)) throw new Error('procedure_revision_environment_mismatch');
       const id = 'learned:' + createHash('sha256').update(JSON.stringify([parentId, ids])).digest('hex').slice(0, 20);
       const existing = this.get(id); if (existing) return existing;
+      const parentEnd = this.evidence(parent.evidenceIds).at(-1);
+      if (!parentEnd || first.sequence <= parentEnd.sequence) throw new Error('procedure_revision_requires_new_demonstration');
       const steps = deriveProcedureSteps(traces);
       if (ids.some(id => parent.evidenceIds.includes(id)) || canonical(steps) === canonical(parent.steps)) {
         throw new Error('procedure_revision_unchanged:replay_existing_procedure');
@@ -174,11 +176,14 @@ export class ExperienceMemory {
     if (!procedure) throw new Error('procedure_not_found');
     if (!procedureEnvironmentMatches(procedure, input.version, input.dimension)) throw new Error('procedure_environment_mismatch');
     const traces = this.evidence(input.evidenceIds);
+    // Unlike a demonstration selected for SAVE, a cancelled runtime's finalizer
+    // can append after another task. Check this attempt's ordered prefix, not
+    // adjacency in the shared append log, and never include the intervening task.
     if (traces.length > procedure.steps.length || traces.some((trace, i) =>
       trace.sessionId !== this.sessionId || trace.worldId !== input.worldId || trace.version !== input.version ||
       normalizeMemoryDimension(trace.dimension) !== normalizeMemoryDimension(input.dimension) ||
       trace.operation.action !== procedure.steps[i].operation.action ||
-      (i > 0 && trace.sequence !== traces[i - 1].sequence + 1))) throw new Error('procedure_replay_evidence_mismatch');
+      (i > 0 && trace.sequence <= traces[i - 1].sequence))) throw new Error('procedure_replay_evidence_mismatch');
     if (input.outcome === 'succeeded' && (traces.length !== procedure.steps.length ||
         traces.some(trace => trace.status !== 'succeeded' || !trace.verified))) throw new Error('procedure_replay_unverified_success');
     if (input.outcome === 'failed' && traces.at(-1)?.status !== 'failed') throw new Error('procedure_replay_failure_evidence_required');
