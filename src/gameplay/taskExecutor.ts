@@ -51,6 +51,7 @@ export class TaskExecutor {
       spatial_epoch: ticket?.epoch ?? null,
       affordance_id: decision.capabilityId ?? null, operation: decision.operation ?? null,
       knowledge_query: decision.knowledgeQuery ?? null, knowledge_offset: decision.knowledgeOffset ?? null,
+      memory_query: decision.memoryQuery ?? null, memory_continuation: Boolean(decision.memoryCursor),
       procedure_id: decision.procedureId ?? null, procedure_name: decision.procedureName ?? null,
       evidence_ids: decision.evidenceIds ?? null,
       reason: decision.reason ?? null, based_on_revision: decision.basedOnRevision });
@@ -76,6 +77,17 @@ export class TaskExecutor {
         case 'LOOKUP_KNOWLEDGE': {
           this.semantic.lookupKnowledge(decision.knowledgeQuery ?? '', decision.knowledgeOffset ?? 0);
           detail = 'knowledge_query_completed'; break;
+        }
+        case 'RECALL_MEMORY': {
+          const result = this.experience.search({ worldId: taskWorldId, version: this.bot.version, dimension: taskDimension! },
+            { query: decision.memoryQuery ?? '', cursor: decision.memoryCursor });
+          check();
+          this.log('memory_recalled', { task_id: this.current.id, query: result.query,
+            world_id: taskWorldId, dimension: taskDimension, scanned: result.scanned,
+            hit_ids: result.hits.map(hit => ({ kind: hit.kind, id: hit.id })),
+            coverage: result.coverage, has_more: result.nextCursor != null,
+            skipped_malformed: result.skippedMalformed, skipped_oversized: result.skippedOversized });
+          detail = `memory_query_completed:${result.hits.length}:${result.coverage}`; break;
         }
         case 'SAVE_PROCEDURE': {
           const procedure = decision.procedureId
