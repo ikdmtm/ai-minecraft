@@ -81,7 +81,7 @@ T01ではこの処理を検証専用CIへ置換した。[PR #1](https://github.c
 | T00 | 現状監査・設計契約・タスク分割 | VERIFIED（文書・監査のみ） | なし | この文書、固定した基準SHA、読んだCIログ |
 | T01 | 一回限りの移行CIを通常の検証専用CIへ置換 | VERIFIED・取り込み済み | T00 | run 35430600966 / 35430757373、merge 73379eb |
 | T02 | 自律実走の記録・停止・再開の形式を固定 | IMPLEMENTED（PR #2の最新CIを確認） | T01 | [T02記録](T02_RUN_RECORDING.md)、runRecorder.test.ts、対応PRのCI |
-| T03 | 基本操作の未検証箇所を1操作ずつ検証 | TODO | T01 | 対象操作の失敗再現・修正・回帰テスト |
+| T03 | 基本操作の未検証箇所を1操作ずつ検証 | IN_PROGRESS（T03a） | T01 | 対象操作の失敗再現・修正・回帰テスト |
 | T04 | ワールド変更・再起動での記憶分離を検証 | TODO | T01 | 同seed別world、再起動、dimension等の検証結果 |
 | T05 | LLM自身による手順保存と別環境再利用を検証 | TODO | T02・T03・T04 | 保存元証拠、再bind、再実行結果、失敗時更新 |
 | T06 | 記憶の関連検索と整理を小さく追加 | TODO | T04 | 原記録保持、検索上限、反証・要約のテスト |
@@ -123,6 +123,8 @@ T01の実装・検証記録:
 ### T03: 操作アダプターの検証（1回1操作群）
 
 - T03a: CRAFT/USE の実サーバーテスト。所持数だけでなく実際の出力・満腹度等を確認する。
+
+T03a current scope (PR #3): disposable Minecraft 1.21.4 server only. Verify inventory crafting output/ingredient deltas, a crafting-table-required recipe, and USE of a selected cooked food by observing both inventory decrement and hunger increase. No gameplay strategy, memory, learning, or planner changes are in scope. Status remains IN_PROGRESS until the PR CI smoke passes.
 - T03b: 対象entity/INTERACT/装備の検証。攻撃の成功を撃破成功と同一視しない。
 - T03c: TRANSFER/OPEN/CLOSE/WAIT の境界条件。古いwindow、満杯、条件timeout、割込み後の後続処理を確認する。
 
