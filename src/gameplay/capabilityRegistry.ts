@@ -50,16 +50,6 @@ export class CapabilityRegistry {
     const craft = this.discoverCraftableItems(strategyText);
     const recipes = this.discoverReachableRecipes(gather, strategyText);
 
-    const entityActions = targets
-      .filter(target => target.kind === 'entity')
-      .map(target => ({
-        targetId: target.id,
-        entity: stringMeta(target, 'entityName') ?? 'unknown',
-        hostile: Boolean(target.metadata.hostile),
-        actions: ['NAVIGATE_TARGET', 'ATTACK_TARGET'] as const,
-      }))
-      .slice(0, 20);
-
     return {
       itemSpecs: this.discoverItemSpecs(),
       blockSpecs: this.discoverBlockSpecs(),
@@ -67,8 +57,6 @@ export class CapabilityRegistry {
       craft,
       recipes,
       actions: this.discoverAffordances(targets, craft, recipes),
-      entityActions,
-      canExcavate: targets.some(target => target.kind === 'excavation_site'),
     };
   }
 
