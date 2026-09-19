@@ -268,41 +268,46 @@ export class ExecutivePolicy {
 function executiveInstructions(): string {
   return [
     'You are the executive controller of an autonomous Minecraft Hardcore player.',
-    'Decide what the player should do next from the current world state, inventory, strategy, recent failures, time, threats, and semantic targets.',
-    'The capabilities listed in capability_reference describe what the body can currently attempt; they are NOT a prescribed progression order.',
-    'Do not follow a fixed wood->stone->shelter script unless the actual situation and strategy make that the best choice.',
-    'Choose one task and its parameters. The task executor handles low-level pathfinding, repeated mining, collection, and crafting mechanics.',
-    'For GATHER_RESOURCE, amount means the desired TOTAL amount of that resource in inventory when the task finishes, not an additional amount.',
-    'Use semantic target IDs when a location or entity target matters. Never invent coordinates or target IDs.',
-    'For logs use a tree_cluster target; for food use a food_source; for cobblestone prefer a visible stone_source or otherwise an excavation_site.',
-    'item_drop targets are recoverable dropped resources; use NAVIGATE_TARGET when collecting nearby drops is important.',
-    'known_structure targets are persistent remembered places the bot already built. A known_structure with structureKind=shelter is an existing completed shelter that can be revisited with NAVIGATE_TARGET.',
-    'For BUILD_STRUCTURE(shelter), use a shelter_site target only when a genuinely new shelter is needed.',
-    'Reuse nearby facilities shown in state.facilities; do not craft duplicate workstations unless there is a concrete reason.',
-    'If state.facilities.shelterNearby is true, treat an existing completed shelter as available and do not build another one unless relocation is genuinely needed.',
-    'If a previous task failed, use its error in recentEvents to choose a different approach instead of blindly repeating it.',
-    'Prefer coherent purposeful behavior over frequent task switching.',
-    'Safety emergencies are handled by a separate deterministic kernel; you still should avoid obviously unreasonable risks.',
+    'Decide the next action from the current world state, inventory, long-horizon strategy, recent failures, semantic targets, and dynamically discovered capabilities.',
+    'Capabilities are affordances, not a progression script. Do not assume wood->stone->shelter or any other canonical route.',
+    'Choose one executable task and its parameters. The body handles pathfinding, physical mining, crafting execution, and short certified excavation segments.',
+    'For GATHER_RESOURCE choose a concrete resource exposed by state.capabilities.gather. amount is the desired TOTAL inventory count.',
+    'For CRAFT_ITEM choose only an item exposed by state.capabilities.craft. These are recipes currently executable from Minecraft recipe data.',
+    'EXCAVATE_TARGET opens one short world-model-certified excavation segment to discover or access terrain; it is not tied to any specific resource.',
+    'ATTACK_TARGET acts on a concrete observed entity. Decide yourself whether attacking it serves the current plan and survival objective.',
+    'Use semantic target IDs when a location, resource source, or entity matters. Never invent coordinates or target IDs.',
+    'resource_source targets identify visible harvestable blocks and the inventory resource their Minecraft drop data produces.',
+    'item_drop targets are recoverable dropped items. known_structure targets are persistent remembered places.',
+    'For BUILD_STRUCTURE(shelter), use a shelter_site only when a new shelter is actually useful.',
+    'Reuse existing facilities and remembered structures. Do not duplicate work without a reason.',
+    'Use recent failures to change approach instead of blindly repeating the same failed task.',
+    'Safety emergencies are handled by a separate deterministic reflex layer; still avoid obviously unreasonable voluntary risks.',
   ].join(' ');
 }
 
-function capabilityReference(): Record<string, string> {
+function capabilityReference(state: ExecutiveWorldState): Record<string, unknown> {
   return {
-    NAVIGATE_TARGET: 'Move to one supplied semantic target such as land, a tree cluster, stone source, food source, dropped item, remembered structure, or shelter site.',
-    GATHER_RESOURCE: 'Reach a desired total inventory amount of a resource. Supported resource abstractions today: logs, cobblestone, food.',
-    CRAFT_ITEM: 'Craft one concrete supported item. Recipe prerequisites and crafting-table placement are handled by the body where possible.',
-    BUILD_STRUCTURE: 'Build one supported structure at an appropriate semantic target. Supported structure today: shelter.',
-    CONTINUE_TASK: 'Continue a currently running task when it remains appropriate.',
-    WAIT: 'Do nothing briefly when no useful executable action is appropriate.',
+    NAVIGATE_TARGET: 'Move to a supplied semantic target.',
+    GATHER_RESOURCE: state.capabilities.gather,
+    EXCAVATE_TARGET: state.capabilities.canExcavate
+      ? 'Open one short certified excavation segment at an excavation_site, then re-observe.'
+      : 'Unavailable: no certified excavation site.',
+    ATTACK_TARGET: state.capabilities.entityActions,
+    CRAFT_ITEM: state.capabilities.craft,
+    BUILD_STRUCTURE: 'Build a supported structure when useful. Current embodied structure primitive: shelter.',
+    CONTINUE_TASK: 'Continue a running task when it remains appropriate.',
+    WAIT: 'Do nothing briefly when no useful executable action is available.',
   };
 }
 
 function taskCriteria(): Record<ExecutiveTaskType, string> {
   return {
     CONTINUE_TASK: 'Keep the currently running task.',
-    NAVIGATE_TARGET: 'Move to a selected semantic target for positioning, retreat, approach, or relocation.',
-    GATHER_RESOURCE: 'Acquire a selected resource in a selected amount.',
-    CRAFT_ITEM: 'Craft a selected concrete item because it is useful for the chosen plan.',
+    NAVIGATE_TARGET: 'Move to a selected semantic target for positioning, approach, retreat, or relocation.',
+    GATHER_RESOURCE: 'Acquire a dynamically available concrete resource to a desired inventory total.',
+    EXCAVATE_TARGET: 'Open one short certified excavation segment to discover or access terrain.',
+    ATTACK_TARGET: 'Attack a selected observed entity when that serves the current plan.',
+    CRAFT_ITEM: 'Craft a currently executable item selected from Minecraft recipe data.',
     BUILD_STRUCTURE: 'Build a selected structure at a suitable semantic target.',
     WAIT: 'Briefly wait when acting would not improve the situation.',
   };
@@ -324,25 +329,28 @@ function targetCriteria(targets: SemanticTarget[]): Record<string, string> {
   return result;
 }
 
-function resourceCriteria(): Record<ExecutiveResource, string> {
-  return {
-    none: 'No resource parameter.',
-    logs: 'Wood logs.',
-    cobblestone: 'Cobblestone for tools/building/furnace.',
-    food: 'Raw edible animal drops.',
-  };
+function resourceCriteria(state: ExecutiveWorldState): Record<string, string> {
+  const result: Record<string, string> = { none: 'No resource parameter.' };
+  for (const capability of state.capabilities.gather) {
+    result[capability.resource] =
+      `Harvest ${capability.resource} from observed source blocks: ${capability.sourceBlocks.join(', ')}`;
+  }
+  return result;
 }
 
-function craftCriteria(): Record<CraftItem, string> {
-  return Object.fromEntries(
-    CRAFT_ITEMS.map(item => [item, item === 'none' ? 'No craft item.' : `Craft ${item}.`]),
-  ) as Record<CraftItem, string>;
+function craftCriteria(state: ExecutiveWorldState): Record<string, string> {
+  const result: Record<string, string> = { none: 'No craft item.' };
+  for (const capability of state.capabilities.craft) {
+    result[capability.item] =
+      `Craft ${capability.item}; requiresTable=${capability.requiresTable}; executableRecipeCount=${capability.recipeCount}`;
+  }
+  return result;
 }
 
 function structureCriteria(): Record<ExecutiveStructure, string> {
   return {
     none: 'No structure parameter.',
-    shelter: 'Compact enclosed emergency/first-night shelter.',
+    shelter: 'Compact enclosed shelter with a usable entrance.',
   };
 }
 
@@ -350,12 +358,14 @@ function validateTask(value: string): ExecutiveTaskType {
   return (EXECUTIVE_TASKS as string[]).includes(value) ? value as ExecutiveTaskType : 'WAIT';
 }
 
-function validateResource(value: string | undefined): ExecutiveResource {
-  return (EXECUTIVE_RESOURCES as string[]).includes(value ?? '') ? value as ExecutiveResource : 'none';
+function validateResource(value: string | undefined, state: ExecutiveWorldState): ExecutiveResource {
+  if (!value || value === 'none') return 'none';
+  return state.capabilities.gather.some(entry => entry.resource === value) ? value : 'none';
 }
 
-function validateCraftItem(value: string | undefined): CraftItem {
-  return (CRAFT_ITEMS as string[]).includes(value ?? '') ? value as CraftItem : 'none';
+function validateCraftItem(value: string | undefined, state: ExecutiveWorldState): string {
+  if (!value || value === 'none') return 'none';
+  return state.capabilities.craft.some(entry => entry.item === value) ? value : 'none';
 }
 
 function validateStructure(value: string | undefined): ExecutiveStructure {
@@ -389,15 +399,24 @@ function normalizeDecisionParameters(
   const target = targetId ? state.targets.find(candidate => candidate.id === targetId) : undefined;
 
   if (decision.task === 'GATHER_RESOURCE') {
-    const compatibleKinds: Record<ExecutiveResource, SemanticTarget['kind'][]> = {
-      none: [],
-      logs: ['tree_cluster'],
-      cobblestone: ['stone_source', 'excavation_site'],
-      food: ['food_source'],
-    };
-    if (target && !compatibleKinds[decision.resource ?? 'none'].includes(target.kind)) {
-      targetId = undefined;
+    const resource = decision.resource ?? 'none';
+    if (target) {
+      const targetResource = typeof target.metadata.resource === 'string'
+        ? target.metadata.resource
+        : typeof target.metadata.itemName === 'string'
+          ? target.metadata.itemName
+          : null;
+      if (
+        !['resource_source', 'item_drop'].includes(target.kind) ||
+        (targetResource && targetResource !== resource)
+      ) {
+        targetId = undefined;
+      }
     }
+  } else if (decision.task === 'EXCAVATE_TARGET') {
+    if (target?.kind !== 'excavation_site') targetId = undefined;
+  } else if (decision.task === 'ATTACK_TARGET') {
+    if (target?.kind !== 'entity') targetId = undefined;
   } else if (
     decision.task === 'BUILD_STRUCTURE' &&
     decision.structure === 'shelter' &&
@@ -407,6 +426,14 @@ function normalizeDecisionParameters(
   }
 
   return { ...decision, targetId };
+}
+
+function dynamicResourceOptions(state: ExecutiveWorldState): string[] {
+  return ['none', ...new Set(state.capabilities.gather.map(entry => entry.resource))];
+}
+
+function dynamicCraftOptions(state: ExecutiveWorldState): string[] {
+  return ['none', ...new Set(state.capabilities.craft.map(entry => entry.item))];
 }
 
 function normalizeSecret(value: string | undefined): string | null {
