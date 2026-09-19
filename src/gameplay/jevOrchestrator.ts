@@ -205,6 +205,7 @@ export class CognitiveOrchestrator {
   nextGeneration(): void {
     this.generation++;
     this.shared.reset(this.generation);
+    this.provenance.clear();
     const worldId = this.memory.startNewWorld();
     this.shared.pushEvent({
       type: 'memory_world_rotated',
