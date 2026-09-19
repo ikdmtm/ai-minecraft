@@ -52,6 +52,13 @@ export interface ExecutiveCapabilitySnapshot {
     requiresTable: boolean;
     recipeCount: number;
   }>;
+  recipes: Array<{
+    item: string;
+    requiresTable: boolean;
+    resultCount: number;
+    reachableDepth: number;
+    ingredients: Array<{ item: string; count: number }>;
+  }>;
   entityActions: Array<{
     targetId: string;
     entity: string;
