@@ -8,6 +8,10 @@ import { createInterface } from 'node:readline';
 type Fields = Record<string, unknown>;
 const SECRET_KEY = /(?:api[_-]?key|token|secret|password|passwd|authorization|cookie|credential)/i;
 const digest = (bytes: Buffer | string) => createHash('sha256').update(bytes).digest('hex');
+function errorMessage(error: unknown): string {
+  if (error && typeof error === 'object' && 'message' in error) return String(error.message);
+  return String(error);
+}
 
 /** Only allowlisted configuration is recorded. Known secrets are also removed from error text. */
 export function makeRedactor(env: NodeJS.ProcessEnv): (value: unknown) => unknown {
@@ -94,9 +98,16 @@ export class RunRecorder {
       if (!fs.existsSync(path)) {
         this.manifest.memory = { status: 'absent_at_start', source_path: path, snapshot: null };
       } else {
-        const db = new Database(path, { readonly: true, fileMustExist: true });
+        let db: Database.Database | undefined;
         const destination = join(this.directory, 'memory-start.sqlite');
-        try { await db.backup(destination); } finally { db.close(); }
+        try {
+          db = new Database(path, { readonly: true, fileMustExist: true });
+          db.prepare('SELECT name FROM sqlite_schema LIMIT 1').all();
+          await db.backup(destination);
+        } catch (error) {
+          // Native SQLite errors are not always instanceof the current JS realm's Error.
+          throw new Error(`memory_snapshot_failed:${errorMessage(error)}`);
+        } finally { db?.close(); }
         fs.chmodSync(destination, 0o600);
         this.manifest.memory = { status: 'snapshotted', source_path: path, snapshot: 'memory-start.sqlite',
           sha256: digest(fs.readFileSync(destination)), captured_at: new Date().toISOString(),
@@ -223,7 +234,7 @@ export async function runRecordedChild(recorder: RunRecorder, args: string[], co
     return await new Promise<number>(resolveCode => {
       child = spawn(command, args, { cwd: recorder.cwd, env: { ...recorder.env, GAMEPLAY_RUN_ID: recorder.runId },
         detached: process.platform !== 'win32', stdio: ['ignore', 'pipe', 'pipe'] });
-      recorder.running(child.pid);
+      try { recorder.running(child.pid); } catch { recordingError = true; terminate('SIGTERM'); }
       const readers = [createInterface({ input: child.stdout!, crlfDelay: Infinity }), createInterface({ input: child.stderr!, crlfDelay: Infinity })];
       readers[0].on('line', line => receive(line, 'stdout'));
       readers[1].on('line', line => receive(line, 'stderr'));
@@ -245,14 +256,17 @@ export async function runRecordedChild(recorder: RunRecorder, args: string[], co
 async function main(): Promise<void> {
   // Credentials are inherited by the child but are never dumped into the manifest.
   require('dotenv').config({ quiet: true });
-  const recorder = new RunRecorder();
+  // stdout can fail asynchronously (e.g. a closed pipe); the journal remains authoritative.
+  let consoleAvailable = true;
+  process.stdout.on('error', () => { consoleAvailable = false; });
+  const recorder = new RunRecorder(process.cwd(), process.env, line => { if (consoleAvailable) process.stdout.write(line); });
   try {
     await recorder.prepare();
     const extension = extname(__filename);
     const args = extension === '.ts' ? ['--import', 'tsx', join(__dirname, 'jevMain.ts')] : [join(__dirname, 'jevMain.js')];
     process.exitCode = await runRecordedChild(recorder, [...args, ...process.argv.slice(2)]);
   } catch (error) {
-    recorder.record({ kind: 'recorder_error', message: error instanceof Error ? error.message : String(error) });
+    recorder.record({ kind: 'recorder_error', message: errorMessage(error) });
     recorder.finish(1, null, 'preparation_failed'); process.exitCode = 1;
   }
 }
