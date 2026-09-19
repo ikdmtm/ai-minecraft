@@ -370,6 +370,7 @@ export class CapabilityRegistry {
       });
     }
 
+    actions.push(...this.discoverBreakBlockAffordances());
     actions.push(...this.discoverProcessingAffordances());
     actions.push(...this.discoverInteractionAffordances());
 
@@ -428,6 +429,62 @@ export class CapabilityRegistry {
     return candidates
       .sort((a, b) => a.distance - b.distance)
       .map(({ x, y, z }) => ({ x, y, z }));
+  }
+
+  private discoverBreakBlockAffordances(): ExecutiveActionCapability[] {
+    let positions: any[] = [];
+    try {
+      positions = this.bot.findBlocks({
+        matching: block =>
+          Boolean(block?.diggable) &&
+          block.name !== 'air' &&
+          block.name !== 'water' &&
+          block.name !== 'lava',
+        maxDistance: 8,
+        count: 120,
+      }) as any[];
+    } catch {
+      return [];
+    }
+
+    const player = this.bot.entity.position;
+    return positions
+      .map(pos => this.bot.blockAt(pos))
+      .filter((block): block is any => Boolean(block && block.diggable && this.bot.canSeeBlock(block)))
+      .map(block => {
+        const distance = player.distanceTo(block.position);
+        const horizontal = Math.hypot(
+          player.x - (block.position.x + 0.5),
+          player.z - (block.position.z + 0.5),
+        );
+        const supportingPlayer =
+          horizontal <= 0.9 &&
+          block.position.y === Math.floor(player.y) - 1;
+        return {
+          id: `break:block:${block.name}:${block.position.x}:${block.position.y}:${block.position.z}`,
+          kind: 'break_block' as const,
+          description: `Break visible diggable block ${block.name}.`,
+          blockTargetId: `block:${block.name}:${block.position.x}:${block.position.y}:${block.position.z}`,
+          position: {
+            x: block.position.x,
+            y: block.position.y,
+            z: block.position.z,
+          },
+          preconditions: {
+            visible: true,
+            distance: Math.round(distance * 10) / 10,
+            supportingPlayer,
+            canHarvestDropsNow: canHarvestBlockNow(this.bot, block),
+          },
+          specification: {
+            blockName: block.name,
+            hardness: Number.isFinite(Number(block.hardness)) ? Number(block.hardness) : null,
+            declaredDrops: blockDropNames(this.bot, block).join(','),
+          },
+        };
+      })
+      .sort((a, b) => Number(a.preconditions.distance) - Number(b.preconditions.distance))
+      .slice(0, 28);
   }
 
   private discoverProcessingAffordances(): ExecutiveActionCapability[] {
