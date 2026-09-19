@@ -202,7 +202,12 @@ export class SkillExecutor {
           await this.mine(this.findBlockCandidate(world, decision.blockTargetId), token);
           break;
         case 'DIG_STAIRCASE':
-          await this.digStaircase(decision.direction ?? 'E', token, decision.targetPosition);
+          await this.digStaircase(
+            decision.direction ?? 'E',
+            token,
+            decision.targetPosition,
+            decision.excavationMode ?? 'down',
+          );
           break;
         case 'CRAFT':
           await this.craft(decision.craftItem ?? 'none', token);
@@ -633,6 +638,7 @@ export class SkillExecutor {
     direction: CompassDirection,
     token: number,
     targetPosition?: { x: number; y: number; z: number },
+    mode: 'down' | 'up' = 'down',
   ): Promise<void> {
     if (targetPosition) await this.moveToExactAnchor(targetPosition, token);
     const ground = this.bot.blockAt(this.bot.entity.position.offset(0, -1, 0));
@@ -645,10 +651,11 @@ export class SkillExecutor {
       : this.bot.entity.position.floored();
     const startingCobble = this.inventoryCount('cobblestone');
 
-    this.updateDetail(`digging_safe_staircase ${direction}`);
+    const verticalStep = mode === 'up' ? 1 : -1;
+    this.updateDetail(`digging_safe_staircase_${mode} ${direction}`);
     for (let step = 0; step < 4; step++) {
       this.assertActive(token);
-      const next = anchor.offset(dx, -1, dz);
+      const next = anchor.offset(dx, verticalStep, dz);
       const headPos = new Vec3(next.x, next.y + 1, next.z);
       const feetPos = new Vec3(next.x, next.y, next.z);
       const supportPos = new Vec3(next.x, next.y - 1, next.z);
@@ -911,6 +918,8 @@ export class SkillExecutor {
       throw new Error(`insufficient_build_material:available=${availableMaterials}/${requiredMaterials}_plus_door`);
     }
 
+    await this.clearShelterObstructions(base, token);
+
     const walls = [[1, 0], [-1, 0], [0, -1]] as const;
     let placed = 0;
 
@@ -1002,6 +1011,33 @@ export class SkillExecutor {
       detail: `placed=${placed} door=${placedDoor.name}`,
       importance: 'high',
     });
+  }
+
+  private async clearShelterObstructions(base: Vec3, token: number): Promise<void> {
+    const positions: Vec3[] = [];
+    for (const [dx, dz] of [[1, 0], [-1, 0], [0, -1]] as const) {
+      positions.push(base.offset(dx, 0, dz), base.offset(dx, 1, dz));
+    }
+    positions.push(
+      base.offset(0, 2, 0),
+      base.offset(1, 2, 0),
+      base.offset(0, 0, 1),
+      base.offset(0, 1, 1),
+    );
+
+    for (const position of positions) {
+      this.assertActive(token);
+      const block = this.bot.blockAt(position);
+      if (!block || block.name === 'air' || block.boundingBox === 'empty') continue;
+      if (this.provenance?.isPlayerPlaced(block.position)) {
+        throw new Error(`shelter_site_obstructed:player_placed:${block.name}`);
+      }
+      if (!isSoftShelterObstruction(block)) {
+        throw new Error(`shelter_site_obstructed:${block.name}`);
+      }
+      await this.digAdjacentBlock(position, token);
+      await delay(60);
+    }
   }
 
   private buildMaterialCount(): number {
@@ -1266,6 +1302,25 @@ function dominantCardinal(dx: number, dz: number): [number, number] {
 function isSolidGround(block: any | null): boolean {
   if (!block || isHazardBlock(block)) return false;
   return block.boundingBox === 'block';
+}
+
+function isSoftShelterObstruction(block: any | null): boolean {
+  if (!block) return false;
+  const name = String(block.name ?? '');
+  return (
+    name.endsWith('_leaves') ||
+    name.endsWith('_sapling') ||
+    name.endsWith('_flower') ||
+    name === 'grass' ||
+    name === 'short_grass' ||
+    name === 'tall_grass' ||
+    name === 'fern' ||
+    name === 'large_fern' ||
+    name === 'dead_bush' ||
+    name === 'vine' ||
+    name === 'glow_lichen' ||
+    name === 'snow'
+  );
 }
 
 function isHazardBlock(block: any | null): boolean {
