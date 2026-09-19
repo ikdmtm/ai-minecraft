@@ -11,6 +11,7 @@ export interface WorldMemoryObservation {
   key: string;
   label: string;
   position?: { x: number; y: number; z: number };
+  dimension?: string | null;
   scope?: MemoryScope;
   retention?: MemoryRetention;
   confidence?: number;
@@ -22,6 +23,7 @@ export interface WorldMemoryRecord {
   kind: string;
   label: string;
   position?: { x: number; y: number; z: number };
+  dimension: string | null;
   confidence: number;
   firstSeenAt: number;
   lastSeenAt: number;
@@ -39,6 +41,7 @@ type MemoryRow = {
   x: number | null;
   y: number | null;
   z: number | null;
+  dimension: string | null;
   confidence: number;
   first_seen_at: number;
   last_seen_at: number;
@@ -72,6 +75,7 @@ export class WorldMemory {
           x REAL,
           y REAL,
           z REAL,
+          dimension TEXT,
           confidence REAL NOT NULL,
           first_seen_at INTEGER NOT NULL,
           last_seen_at INTEGER NOT NULL,
@@ -84,6 +88,15 @@ export class WorldMemory {
         CREATE INDEX IF NOT EXISTS idx_gameplay_memory_scope
           ON gameplay_memory(scope, world_id, kind, last_seen_at);
       `);
+      // Additive migration: old coordinates remain dimension-unknown history.
+      // Never guess overworld, rewrite IDs, or delete the previous records.
+      const database = this.db;
+      database.transaction(() => {
+        const columns = database.prepare('PRAGMA table_info(gameplay_memory)').all() as Array<{ name: string }>;
+        if (!columns.some(column => column.name === 'dimension')) {
+          database.exec('ALTER TABLE gameplay_memory ADD COLUMN dimension TEXT');
+        }
+      })();
       const persistedWorld = this.db.prepare(
         'SELECT value FROM gameplay_memory_meta WHERE key = ?',
       ).get('current_world_id') as { value?: string } | undefined;
@@ -115,7 +128,8 @@ export class WorldMemory {
     const scope = observation.scope ?? 'world';
     const retention = observation.retention ?? (scope === 'stable' ? 'stable' : 'session');
     const worldId = scope === 'world' ? this.worldId : null;
-    const id = memoryId(scope, worldId, observation.kind, observation.key);
+    const dimension = scope === 'world' ? normalizeMemoryDimension(observation.dimension) : null;
+    const id = memoryId(scope, worldId, observation.kind, observation.key, dimension);
     const existing = this.records.get(id);
     const confidence = clamp01(observation.confidence ?? 0.9);
     // Sampling the same fact many times a second is not independent evidence or a reason for a disk write.
@@ -130,6 +144,7 @@ export class WorldMemory {
           ...existing,
           label: observation.label,
           position: observation.position ? { ...observation.position } : existing.position,
+          dimension,
           confidence: Math.max(effectiveConfidence(existing, now), confidence),
           lastSeenAt: now,
           observations: existing.observations + 1,
@@ -146,6 +161,7 @@ export class WorldMemory {
           kind: observation.kind,
           label: observation.label,
           position: observation.position ? { ...observation.position } : undefined,
+          dimension,
           confidence,
           firstSeenAt: now,
           lastSeenAt: now,
@@ -198,6 +214,7 @@ export class WorldMemory {
 
   recall(options?: {
     kind?: string;
+    dimension?: string | null;
     origin?: { x: number; y: number; z: number };
     minConfidence?: number;
     limit?: number;
@@ -209,11 +226,16 @@ export class WorldMemory {
     const origin = options?.origin;
     const includeWorld = options?.includeWorld ?? true;
     const includeGlobal = options?.includeGlobal ?? true;
+    // No dimension means legacy/unknown only, NOT a wildcard across all maps.
+    // Runtime callers must pass the currently observed dimension.
+    const dimension = normalizeMemoryDimension(options?.dimension);
 
     const recalled = [...this.records.values()]
       .filter(record => {
         if (options?.kind && record.kind !== options.kind) return false;
-        if (record.scope === 'world') return includeWorld && record.worldId === this.worldId;
+        if (record.scope === 'world') {
+          return includeWorld && record.worldId === this.worldId && record.dimension === dimension;
+        }
         return includeGlobal;
       })
       .map(record => ({
@@ -246,6 +268,7 @@ export class WorldMemory {
     const rows = this.db.prepare('SELECT * FROM gameplay_memory WHERE scope = ? AND world_id = ? ORDER BY last_seen_at DESC LIMIT ?').all('world', worldId, Math.min(64, limit)) as MemoryRow[];
     return rows.map(r => ({ id: r.id, kind: r.kind, label: r.label,
       position: r.x == null || r.y == null || r.z == null ? undefined : { x: r.x, y: r.y, z: r.z },
+      dimension: normalizeMemoryDimension(r.dimension),
       confidence: r.confidence, firstSeenAt: r.first_seen_at, lastSeenAt: r.last_seen_at, observations: r.observations,
       retention: r.retention, scope: r.scope, worldId: r.world_id, metadata: JSON.parse(r.metadata_json) }));
   }
@@ -255,11 +278,13 @@ export class WorldMemory {
     radius: number,
     kinds?: string[],
     strength = 0.35,
+    dimension?: string | null,
   ): void {
     const allowed = kinds ? new Set(kinds) : null;
+    const currentDimension = normalizeMemoryDimension(dimension);
     const now = Date.now();
     for (const record of this.records.values()) {
-      if (record.scope !== 'world' || record.worldId !== this.worldId || !record.position) continue;
+      if (record.scope !== 'world' || record.worldId !== this.worldId || !record.position || record.dimension !== currentDimension) continue;
       if (allowed && !allowed.has(record.kind)) continue;
       if (distance(position, record.position) > radius) continue;
       record.confidence = clamp01(effectiveConfidence(record, now) - strength);
@@ -296,7 +321,7 @@ export class WorldMemory {
   private loadPersisted(): void {
     if (!this.db) return;
     const rows = this.db.prepare(`
-      SELECT id, kind, label, x, y, z, confidence, first_seen_at, last_seen_at,
+      SELECT id, kind, label, x, y, z, dimension, confidence, first_seen_at, last_seen_at,
              observations, retention, scope, world_id, metadata_json
       FROM gameplay_memory
     `).all() as MemoryRow[];
@@ -317,6 +342,7 @@ export class WorldMemory {
         kind: row.kind,
         label: row.label,
         position,
+        dimension: normalizeMemoryDimension(row.dimension),
         confidence: row.confidence,
         firstSeenAt: row.first_seen_at,
         lastSeenAt: row.last_seen_at,
@@ -333,10 +359,10 @@ export class WorldMemory {
     if (!this.db) return;
     this.db.prepare(`
       INSERT INTO gameplay_memory (
-        id, kind, label, x, y, z, confidence, first_seen_at, last_seen_at,
+        id, kind, label, x, y, z, dimension, confidence, first_seen_at, last_seen_at,
         observations, retention, scope, world_id, metadata_json
       ) VALUES (
-        @id, @kind, @label, @x, @y, @z, @confidence, @first_seen_at, @last_seen_at,
+        @id, @kind, @label, @x, @y, @z, @dimension, @confidence, @first_seen_at, @last_seen_at,
         @observations, @retention, @scope, @world_id, @metadata_json
       )
       ON CONFLICT(id) DO UPDATE SET
@@ -344,6 +370,7 @@ export class WorldMemory {
         x = excluded.x,
         y = excluded.y,
         z = excluded.z,
+        dimension = excluded.dimension,
         confidence = excluded.confidence,
         last_seen_at = excluded.last_seen_at,
         observations = excluded.observations,
@@ -356,6 +383,7 @@ export class WorldMemory {
       x: record.position?.x ?? null,
       y: record.position?.y ?? null,
       z: record.position?.z ?? null,
+      dimension: record.dimension,
       confidence: record.confidence,
       first_seen_at: record.firstSeenAt,
       last_seen_at: record.lastSeenAt,
@@ -377,12 +405,26 @@ export class WorldMemory {
   }
 }
 
+/** Normalize protocol/resource-location spelling without inventing a dimension. */
+export function normalizeMemoryDimension(value: unknown): string | null {
+  if (typeof value !== 'string') return null;
+  const name = value.trim();
+  if (name === 'overworld') return 'minecraft:overworld';
+  if (name === 'nether' || name === 'the_nether') return 'minecraft:the_nether';
+  if (name === 'end' || name === 'the_end') return 'minecraft:the_end';
+  return /^[a-z0-9_.-]+:[a-z0-9_./-]+$/.test(name) ? name : null;
+}
+
 function memoryId(
   scope: MemoryScope,
   worldId: string | null,
   kind: string,
   key: string,
+  dimension: string | null = null,
 ): string {
+  if (scope === 'world' && dimension != null) {
+    return `world-dimension:${JSON.stringify([worldId, dimension, kind, key])}`;
+  }
   return scope === 'world'
     ? `world:${worldId ?? 'unknown'}:${kind}:${key}`
     : `${scope}:${kind}:${key}`;
