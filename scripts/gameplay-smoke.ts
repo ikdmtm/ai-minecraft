@@ -99,20 +99,27 @@ async function main() {
     const logBefore = count('oak_log');
     const planksBefore = count('oak_planks');
     await run({ action: 'CRAFT', item: 'oak_planks', count: 2 });
+    // Completion can precede the final server inventory packet. Observe the
+    // exact expected deltas, with a deadline; do not retry or weaken the craft.
+    await until(() => count('oak_log') === logBefore - 2 && count('oak_planks') === planksBefore + 8,
+      'planks_craft_inventory_confirmed', 5000);
     assert.equal(count('oak_log'), logBefore - 2);
     assert.equal(count('oak_planks'), planksBefore + 8);
 
     const sticksBefore = count('stick');
     await run({ action: 'CRAFT', item: 'stick', count: 1 });
+    await until(() => count('stick') === sticksBefore + 4, 'stick_craft_inventory_confirmed', 5000);
     assert.equal(count('stick'), sticksBefore + 4);
 
     await run({ action: 'CRAFT', item: 'crafting_table', count: 1 });
+    await until(() => count('crafting_table') === 1, 'table_craft_inventory_confirmed', 5000);
     assert.equal(count('crafting_table'), 1);
     await run({ action: 'PLACE', position: tablePos, item: 'crafting_table' });
     assert.equal(bot.blockAt(new Vec3(tablePos.x, tablePos.y, tablePos.z))?.name, 'crafting_table');
 
     const pickaxesBefore = count('wooden_pickaxe');
     await run({ action: 'CRAFT', item: 'wooden_pickaxe', count: 1 });
+    await until(() => count('wooden_pickaxe') === pickaxesBefore + 1, 'pickaxe_craft_inventory_confirmed', 5000);
     assert.equal(count('wooden_pickaxe'), pickaxesBefore + 1);
     console.log('REAL_SERVER_CRAFT_PASSED: inventory-recipe and crafting-table-recipe outputs verified');
 
