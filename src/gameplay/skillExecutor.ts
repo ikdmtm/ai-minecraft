@@ -175,6 +175,8 @@ export class SkillExecutor {
       target_id: targetId,
       craft_item: decision.craftItem ?? null,
       place_item: decision.placeItem ?? null,
+      use_item: decision.useItem ?? null,
+      process_item: decision.processItem ?? null,
       cook_item: decision.cookItem ?? null,
       consume_item: decision.consumeItem ?? null,
       direction: decision.direction ?? null,
@@ -218,6 +220,15 @@ export class SkillExecutor {
           break;
         case 'PLACE_ITEM':
           await this.placeInventoryItem(decision.placeItem ?? 'none', token);
+          break;
+        case 'USE_ITEM':
+          await this.useInventoryItem(decision.useItem ?? 'none', token);
+          break;
+        case 'PROCESS_ITEM':
+          await this.processInventoryItem(decision.processItem ?? 'none', token, decision.targetPosition);
+          break;
+        case 'INTERACT_BLOCK':
+          await this.interactBlock(decision.targetPosition, token);
           break;
         case 'COOK_FOOD':
           await this.cookFood(decision.cookItem ?? 'none', token);
@@ -922,6 +933,142 @@ export class SkillExecutor {
     });
   }
 
+  private async useInventoryItem(itemName: string, token: number): Promise<void> {
+    if (!itemName || itemName === 'none') throw new Error('use_item_missing_item');
+    const item = this.bot.inventory.items().find(entry => entry.name === itemName);
+    if (!item) throw new Error(`use_item_not_in_inventory:${itemName}`);
+
+    await this.bot.equip(item, 'hand');
+    this.assertActive(token);
+    const data = (this.bot.registry.items as any)?.[item.type] ?? {};
+    const foodPoints = Number(data.foodPoints ?? data.food_points ?? 0);
+
+    if (foodPoints > 0) {
+      await this.bot.consume();
+    } else {
+      this.bot.activateItem();
+      await delay(350);
+      this.assertActive(token);
+      this.bot.deactivateItem();
+    }
+
+    this.shared.pushEvent({
+      type: 'item_used',
+      detail: itemName,
+      importance: 'low',
+    });
+  }
+
+  private async processInventoryItem(
+    inputName: string,
+    token: number,
+    targetPosition?: { x: number; y: number; z: number },
+  ): Promise<void> {
+    if (!inputName || inputName === 'none') throw new Error('process_item_missing_input');
+    const input = this.bot.inventory.items().find(entry => entry.name === inputName);
+    if (!input) throw new Error(`process_item_input_missing:${inputName}`);
+
+    const station = targetPosition
+      ? this.bot.blockAt(new Vec3(
+          Math.floor(targetPosition.x),
+          Math.floor(targetPosition.y),
+          Math.floor(targetPosition.z),
+        ))
+      : this.bot.findBlock({
+          matching: block => block.name === 'smoker' || block.name === 'furnace',
+          maxDistance: 8,
+        });
+    if (!station || !['smoker', 'furnace'].includes(station.name)) {
+      throw new Error('process_item_station_missing');
+    }
+
+    const fuel = this.findFuelItem();
+    if (!fuel) throw new Error('process_item_fuel_missing');
+
+    const movements = this.normalMovements();
+    movements.canDig = false;
+    this.bot.pathfinder.setMovements(movements);
+    await withTimeout(
+      this.bot.pathfinder.goto(new goals.GoalNear(station.position.x, station.position.y, station.position.z, 2)),
+      8_000,
+      'process_station_path_timeout',
+      () => this.bot.pathfinder.stop(),
+    );
+    this.assertActive(token);
+
+    const window: any = await (this.bot as any).openFurnace(station);
+    try {
+      await withTimeout(
+        Promise.resolve(window.putInput(input.type, input.metadata ?? null, 1)),
+        5_000,
+        'process_put_input_timeout',
+      );
+      this.assertActive(token);
+      const freshFuel = this.bot.inventory.items().find(entry => entry.name === fuel.name);
+      if (!freshFuel) throw new Error('process_item_fuel_disappeared');
+      await withTimeout(
+        Promise.resolve(window.putFuel(freshFuel.type, freshFuel.metadata ?? null, 1)),
+        5_000,
+        'process_put_fuel_timeout',
+      );
+      this.assertActive(token);
+
+      const started = Date.now();
+      while (Date.now() - started < 20_000) {
+        this.assertActive(token);
+        const output = typeof window.outputItem === 'function' ? window.outputItem() : null;
+        if (output) {
+          await withTimeout(Promise.resolve(window.takeOutput()), 5_000, 'process_take_output_timeout');
+          this.shared.pushEvent({
+            type: 'item_processed',
+            detail: `${inputName}->${output.name ?? 'output'} via ${station.name}`,
+            importance: 'medium',
+          });
+          return;
+        }
+        await delay(250);
+      }
+      throw new Error(`process_output_timeout:${inputName}`);
+    } finally {
+      try { await window.close(); } catch { /* best effort */ }
+    }
+  }
+
+  private async interactBlock(
+    targetPosition: { x: number; y: number; z: number } | undefined,
+    token: number,
+  ): Promise<void> {
+    if (!targetPosition) throw new Error('interact_block_target_missing');
+    const block = this.bot.blockAt(new Vec3(
+      Math.floor(targetPosition.x),
+      Math.floor(targetPosition.y),
+      Math.floor(targetPosition.z),
+    ));
+    if (!block) throw new Error('interact_block_missing');
+
+    const movements = this.normalMovements();
+    movements.canDig = false;
+    this.bot.pathfinder.setMovements(movements);
+    await withTimeout(
+      this.bot.pathfinder.goto(new goals.GoalNear(block.position.x, block.position.y, block.position.z, 2)),
+      8_000,
+      'interact_block_path_timeout',
+      () => this.bot.pathfinder.stop(),
+    );
+    this.assertActive(token);
+
+    if (block.name.endsWith('_bed')) {
+      await this.bot.sleep(block);
+    } else {
+      await this.bot.activateBlock(block);
+    }
+    this.shared.pushEvent({
+      type: 'block_interacted',
+      detail: `${block.name}@${block.position.x},${block.position.y},${block.position.z}`,
+      importance: 'low',
+    });
+  }
+
   private async cookFood(inputName: string, token: number): Promise<void> {
     if (!inputName || inputName === 'none') throw new Error('cook_food_missing_input');
     const input = this.bot.inventory.items().find(entry => entry.name === inputName);
@@ -1328,8 +1475,11 @@ function actionToReflexState(action: TypedGameplayDecision['action']): ReflexSta
     case 'DIG_STAIRCASE': return 'mining';
     case 'CRAFT':
     case 'PLACE_ITEM':
+    case 'PROCESS_ITEM':
     case 'COOK_FOOD':
     case 'BUILD_SHELTER': return 'crafting';
+    case 'USE_ITEM': return 'eating';
+    case 'INTERACT_BLOCK': return 'exploring';
     case 'HUNT_FOOD': return 'gathering';
     case 'EAT': return 'eating';
     case 'FLEE': return 'fleeing';
