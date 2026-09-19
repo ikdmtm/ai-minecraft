@@ -14,6 +14,7 @@ import {
   canHarvestBlockNow,
 } from './capabilityRegistry.js';
 import { isFoodAnimal } from './worldSensor.js';
+import { WorldMemory } from './worldMemory.js';
 
 const WATERLIKE = new Set([
   'water', 'bubble_column', 'seagrass', 'tall_seagrass', 'kelp', 'kelp_plant',
@@ -24,16 +25,12 @@ export class SemanticWorldModel {
   private lastFingerprint = '';
   private readonly capabilityRegistry: CapabilityRegistry;
   private lastSurfaceAnchor: SemanticPosition | null = null;
-  private readonly rememberedFoodSources = new Map<string, {
-    entityName: string;
-    position: SemanticPosition;
-    lastSeenAt: number;
-  }>();
 
   constructor(
     private readonly bot: mineflayer.Bot,
     private readonly shared: SharedStateBus,
     private readonly provenance?: WorldProvenance,
+    private readonly memory: WorldMemory = new WorldMemory(),
   ) {
     this.capabilityRegistry = new CapabilityRegistry(bot);
   }
@@ -91,6 +88,20 @@ export class SemanticWorldModel {
       strategy,
       activeTask,
       targets,
+      memory: this.memory.recall({
+        origin: position,
+        minConfidence: 0.1,
+        limit: 24,
+      }).map(record => ({
+        id: record.id,
+        kind: record.kind,
+        label: record.label,
+        position: { ...record.position },
+        confidence: Math.round(record.confidence * 100) / 100,
+        lastSeenAt: record.lastSeenAt,
+        observations: record.observations,
+        metadata: { ...record.metadata },
+      })),
       recentEvents: this.shared.getRecentEvents(25_000).slice(-16).map(event => ({
         type: event.type,
         detail: event.detail,
@@ -498,6 +509,23 @@ export class SemanticWorldModel {
       for (const resource of resources) {
         const existing = nearestByResource.get(resource);
         if (existing && existing.distance <= distance) continue;
+        this.memory.observe({
+          kind: 'resource_site',
+          key: resourceMemoryKey(resource, block.position),
+          label: resource,
+          position: {
+            x: block.position.x,
+            y: block.position.y,
+            z: block.position.z,
+          },
+          retention: 'session',
+          confidence: 0.9,
+          metadata: {
+            resource,
+            blockName: block.name,
+            source: 'visible_block',
+          },
+        });
         nearestByResource.set(resource, {
           id: `resource_source:${resource}:${block.position.x}:${block.position.y}:${block.position.z}`,
           kind: 'resource_source',
@@ -552,10 +580,17 @@ export class SemanticWorldModel {
 
         if (foodAnimal && distance <= 32) {
           const key = foodMemoryKey(entity.name ?? 'animal', position);
-          this.rememberedFoodSources.set(key, {
-            entityName: entity.name ?? 'animal',
+          this.memory.observe({
+            kind: 'food_source',
+            key,
+            label: entity.name ?? 'animal',
             position,
-            lastSeenAt: now,
+            retention: 'session',
+            confidence: 0.95,
+            metadata: {
+              entityName: entity.name ?? 'animal',
+              source: 'visual_entity',
+            },
           });
         }
 
@@ -579,36 +614,37 @@ export class SemanticWorldModel {
       .sort((a, b) => b.score - a.score)
       .slice(0, 16);
 
-    for (const [key, memory] of this.rememberedFoodSources) {
-      if (now - memory.lastSeenAt > 5 * 60_000) this.rememberedFoodSources.delete(key);
-    }
     return targets;
   }
 
   private findRememberedFoodSources(): SemanticTarget[] {
     const origin = this.bot.entity.position;
-    const now = Date.now();
-    return [...this.rememberedFoodSources.entries()]
-      .filter(([, memory]) => now - memory.lastSeenAt <= 5 * 60_000)
-      .map(([key, memory]) => {
-        const distance = distance3(origin, memory.position);
-        const ageSeconds = (now - memory.lastSeenAt) / 1000;
+    return this.memory.recall({
+      kind: 'food_source',
+      origin,
+      minConfidence: 0.18,
+      limit: 8,
+    })
+      .map(record => {
+        const distance = distance3(origin, record.position);
         return {
-          id: `food_source:${key}`,
+          id: `memory_target:${record.id}`,
           kind: 'food_source' as const,
-          position: { ...memory.position },
+          position: { ...record.position },
           distance: round1(distance),
-          score: 205 - distance * 1.5 - ageSeconds * 0.08,
+          score: 195 + record.confidence * 20 - distance * 1.5,
           risk: distance <= 24 ? 'low' as const : 'medium' as const,
           metadata: {
-            entityName: memory.entityName,
-            lastSeenAt: memory.lastSeenAt,
+            memoryId: record.id,
+            entityName: record.metadata.entityName ?? record.label,
+            confidence: record.confidence,
+            lastSeenAt: record.lastSeenAt,
+            observations: record.observations,
             currentlyVisible: false,
           },
         };
       })
-      .sort((a, b) => b.score - a.score)
-      .slice(0, 8);
+      .sort((a, b) => b.score - a.score);
   }
 
   private findItemDrops(): SemanticTarget[] {
@@ -820,6 +856,16 @@ function isUnsafeSupportMiningTarget(
   const horizontal = Math.hypot(player.x - (block.x + 0.5), player.z - (block.z + 0.5));
   const playerFeetY = Math.floor(player.y);
   return horizontal <= 1.45 && block.y <= playerFeetY - 1 && block.y >= playerFeetY - 2;
+}
+
+function resourceMemoryKey(
+  resource: string,
+  position: { x: number; y: number; z: number },
+): string {
+  const x = Math.round(position.x / 4) * 4;
+  const y = Math.round(position.y / 4) * 4;
+  const z = Math.round(position.z / 4) * 4;
+  return `${resource}:${x}:${y}:${z}`;
 }
 
 function foodMemoryKey(
