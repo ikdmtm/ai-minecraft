@@ -76,7 +76,9 @@ test('fresh comparison is explicit and does not erase the original memory', asyn
 
 test('corrupt source DB fails rather than silently using empty memory', async () => {
   env.DB_PATH = join(cwd, 'broken.db'); fs.writeFileSync(env.DB_PATH, 'broken source');
-  await expect(prepareIsolatedEvaluation(cwd, env, options)).rejects.toThrow();
+  // Native SQLite errors need not inherit the Jest realm's Error constructor.
+  // Check the actual rejection code, not a realm-dependent instanceof matcher.
+  await expect(prepareIsolatedEvaluation(cwd, env, options)).rejects.toMatchObject({ code: 'SQLITE_NOTADB' });
   expect(fs.readFileSync(env.DB_PATH, 'utf8')).toBe('broken source');
   const root = join(cwd, 'data/gameplay-evaluations');
   const dir = fs.readdirSync(root)[0];
