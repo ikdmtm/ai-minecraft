@@ -275,7 +275,7 @@ export class SemanticWorldModel {
         const floor = this.bot.blockAt(new Vec3(center.x + dx, center.y - 1, center.z + dz));
         const feet = this.bot.blockAt(new Vec3(center.x + dx, center.y, center.z + dz));
         const head = this.bot.blockAt(new Vec3(center.x + dx, center.y + 1, center.z + dz));
-        if (!isSolidStand(floor) || !isPassable(feet) || !isPassable(head)) return false;
+        if (!isStableTerrainSupport(floor) || !isPassable(feet) || !isPassable(head)) return false;
       }
     }
     return true;
@@ -537,9 +537,6 @@ function semanticFingerprint(state: Omit<ExecutiveWorldState, 'revision'>): stri
     state.facilities.furnaceNearby ? 1 : 0,
     state.facilities.bedNearby ? 1 : 0,
     state.facilities.shelterNearby ? 1 : 0,
-    state.capabilities.gather.map(entry => entry.resource).sort().join(','),
-    state.capabilities.craft.map(entry => entry.item).sort().join(','),
-    state.capabilities.entityActions.map(entry => entry.targetId).sort().join(','),
     state.strategy.mainGoal,
     state.activeTask.id,
     state.activeTask.status,
@@ -547,10 +544,18 @@ function semanticFingerprint(state: Omit<ExecutiveWorldState, 'revision'>): stri
 }
 
 
-function isSafeExcavationSupport(block: any | null): boolean {
+function isStableTerrainSupport(block: any | null): boolean {
   if (!block) return false;
   if (WATERLIKE.has(block.name) || block.name === 'lava') return false;
-  return block.boundingBox === 'block';
+  if (block.boundingBox !== 'block') return false;
+  // Prismarine Block exposes Minecraft's physical material category. For
+  // excavation/shelter foundations we want terrain, not foliage, trunks,
+  // workstations, wool, or other solid-but-unstable/non-terrain blocks.
+  return block.material === 'rock' || block.material === 'dirt';
+}
+
+function isSafeExcavationSupport(block: any | null): boolean {
+  return isStableTerrainSupport(block);
 }
 
 function isExcavatableVolume(bot: mineflayer.Bot, block: any | null): boolean {
