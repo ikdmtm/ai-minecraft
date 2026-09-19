@@ -1,5 +1,4 @@
 import {
-  EXECUTIVE_RESOURCES,
   EXECUTIVE_STRUCTURES,
   EXECUTIVE_TASKS,
   type ExecutiveDecision,
@@ -9,10 +8,6 @@ import {
   type ExecutiveWorldState,
   type SemanticTarget,
 } from './executiveTypes.js';
-import {
-  CRAFT_ITEMS,
-  type CraftItem,
-} from './typedActions.js';
 
 interface ExecutivePolicyConfig {
   typesafeApiKey?: string;
