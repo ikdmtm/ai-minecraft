@@ -773,138 +773,6 @@ export class SkillExecutor {
     await this.craftRecipeWithRecovery(item, recipes[0], table);
   }
 
-  private async craftNamed(itemName: string, table: any | null): Promise<void> {
-    const itemId = this.bot.registry.itemsByName[itemName]?.id;
-    if (!itemId) throw new Error(`unknown_item:${itemName}`);
-
-    await this.prepareCraftingState();
-    const recipes = this.bot.recipesFor(itemId, null, 1, table ?? null);
-    if (recipes.length === 0) throw new Error(`no_recipe:${itemName}`);
-    await this.craftRecipeWithRecovery(itemName, recipes[0], table);
-  }
-
-  private async craftRecipeWithRecovery(
-    itemName: string,
-    recipe: any,
-    table: any | null,
-  ): Promise<void> {
-    const before = this.inventoryCount(itemName);
-    try {
-      await this.bot.craft(recipe, 1, table ?? undefined);
-    } catch (error) {
-      await this.reconcileCraftingState();
-
-      // Mineflayer 1.21.x crafting can time out waiting for updateSlot even
-      // after the server accepted the craft. Trust the resynchronised server
-      // inventory rather than immediately issuing the recipe a second time.
-      if (this.inventoryCount(itemName) > before) {
-        this.shared.pushEvent({
-          type: 'crafted_reconciled',
-          detail: itemName,
-          importance: 'medium',
-        });
-        return;
-      }
-
-      throw error;
-    }
-
-    this.shared.pushEvent({ type: 'crafted', detail: itemName, importance: 'low' });
-  }
-
-  private async prepareCraftingState(): Promise<void> {
-    const currentWindow = this.bot.currentWindow;
-    if (currentWindow) {
-      try {
-        const sync = (this.bot as any)._syncWindow?.(currentWindow);
-        if (sync) await withTimeout(Promise.resolve(sync), 3_000, 'craft_window_sync_timeout');
-      } catch {
-        // Best effort; close the stale GUI even if its model cannot be synced.
-      }
-      try {
-        await this.bot.closeWindow(currentWindow);
-      } catch {
-        // Best effort.
-      }
-    }
-
-    await this.syncPlayerInventory();
-  }
-
-  private async reconcileCraftingState(): Promise<void> {
-    const currentWindow = this.bot.currentWindow;
-    if (currentWindow) {
-      try {
-        const sync = (this.bot as any)._syncWindow?.(currentWindow);
-        if (sync) await withTimeout(Promise.resolve(sync), 3_000, 'craft_reconcile_window_timeout');
-      } catch {
-        // Continue with the authoritative player-inventory refresh below.
-      }
-      try {
-        await this.bot.closeWindow(currentWindow);
-      } catch {
-        // Best effort.
-      }
-    }
-
-    // Give late server slot packets a short chance to land, then explicitly
-    // request a full window-0 inventory snapshot.
-    await delay(150);
-    await this.syncPlayerInventory();
-    await delay(100);
-  }
-
-  private async syncPlayerInventory(): Promise<void> {
-    try {
-      const sync = (this.bot as any)._syncWindow?.(this.bot.inventory);
-      if (sync) await withTimeout(Promise.resolve(sync), 3_000, 'inventory_sync_timeout');
-    } catch {
-      // A sync failure should not itself wedge the skill executor.
-    }
-  }
-
-  private async ensurePlanks(): Promise<void> {
-    await this.ensurePlankCount(1);
-  }
-
-  private async ensurePlankCount(minimum: number): Promise<void> {
-    while (this.plankCount() < minimum) {
-      const log = this.bot.inventory.items().find(item => item.name.endsWith('_log'));
-      if (!log) throw new Error(`insufficient_planks:${this.plankCount()}/${minimum}`);
-      await this.craftNamed(`${log.name.slice(0, -4)}_planks`, null);
-    }
-  }
-
-  private async ensureStickCount(minimum: number): Promise<void> {
-    while (this.inventoryCount('stick') < minimum) {
-      await this.ensurePlankCount(2);
-      await this.craftNamed('stick', null);
-    }
-  }
-
-  private plankCount(): number {
-    return this.bot.inventory.items()
-      .filter(item => item.name.endsWith('_planks'))
-      .reduce((total, item) => total + item.count, 0);
-  }
-
-  private async ensureCraftingTable(token: number): Promise<any> {
-    let table = this.bot.findBlock({ matching: block => block.name === 'crafting_table', maxDistance: 8 });
-    if (table) return table;
-
-    let item = this.bot.inventory.items().find(entry => entry.name === 'crafting_table');
-    if (!item) {
-      await this.ensurePlankCount(4);
-      await this.craftNamed('crafting_table', null);
-      item = this.bot.inventory.items().find(entry => entry.name === 'crafting_table');
-    }
-    if (!item) throw new Error('crafting_table_not_in_inventory');
-
-    table = await this.placeAdjacent(item, token);
-    if (!table) throw new Error('failed_to_place_crafting_table');
-    return table;
-  }
-
   private async placeAdjacent(item: any, token: number): Promise<any | null> {
     const base = this.bot.entity.position.floored();
     const offsets = [[1, 0], [-1, 0], [0, 1], [0, -1]] as const;
@@ -938,9 +806,13 @@ export class SkillExecutor {
     const underPlayer = this.bot.blockAt(base.offset(0, -1, 0));
     if (!isSolidGround(underPlayer)) throw new Error('shelter_requires_solid_ground');
 
-    // A real shelter needs an exit. Prepare a wooden door before consuming
-    // structural material so a failed build can never leave the bot sealed in.
-    const door = await this.ensureShelterDoor(token, base);
+    // Structure skills execute a physical plan; they do not synthesize their
+    // own progression prerequisites. The executive must explicitly obtain/craft
+    // a door before asking the body to build this shelter template.
+    const door = this.bot.inventory.items().find(item =>
+      item.name.endsWith('_door') && item.name !== 'iron_door',
+    );
+    if (!door) throw new Error('shelter_requires_door_item');
 
     // Three 2-high walls + two roof blocks = 8 structural blocks.
     // The south side is the doorway.
@@ -1041,68 +913,6 @@ export class SkillExecutor {
       detail: `placed=${placed} door=${placedDoor.name}`,
       importance: 'high',
     });
-  }
-
-  private async ensureShelterDoor(token: number, base: Vec3): Promise<any> {
-    const existingDoor = this.bot.inventory.items().find(item =>
-      item.name.endsWith('_door') && item.name !== 'iron_door',
-    );
-    if (existingDoor) return existingDoor;
-
-    const species = this.findDoorWoodSpecies();
-    if (!species) throw new Error('shelter_requires_door_material');
-
-    const plankName = `${species}_planks`;
-    const doorName = `${species}_door`;
-    while (this.inventoryCount(plankName) < 6) {
-      const log = this.bot.inventory.items().find(item => item.name === `${species}_log`);
-      if (!log) throw new Error(`shelter_requires_door_material:${species}`);
-      await this.craftNamed(plankName, null);
-      this.assertActive(token);
-    }
-
-    const table = await this.ensureCraftingTable(token);
-    await this.craftNamed(doorName, table);
-    this.assertActive(token);
-
-    // If we temporarily placed our own table beside the shelter to craft the
-    // door, collect it again before walls are built so it cannot occupy the
-    // doorway or a wall cell.
-    if (
-      table?.position &&
-      this.provenance?.roleOf(table.position) === 'workstation' &&
-      table.position.distanceTo(base) <= 2
-    ) {
-      try {
-        await this.bot.dig(table);
-        this.provenance?.forget(table.position);
-        await delay(150);
-        await this.collectNearbyDrops(token, 2.5);
-      } catch {
-        // A table in a non-door wall cell is still usable as part of the base.
-      }
-    }
-
-    const door = this.bot.inventory.items().find(item => item.name === doorName);
-    if (!door) throw new Error(`shelter_door_not_in_inventory:${doorName}`);
-    return door;
-  }
-
-  private findDoorWoodSpecies(): string | null {
-    const candidates = new Map<string, number>();
-    for (const item of this.bot.inventory.items()) {
-      if (item.name.endsWith('_planks')) {
-        const species = item.name.slice(0, -7);
-        candidates.set(species, (candidates.get(species) ?? 0) + item.count);
-      } else if (item.name.endsWith('_log')) {
-        const species = item.name.slice(0, -4);
-        candidates.set(species, (candidates.get(species) ?? 0) + item.count * 4);
-      }
-    }
-
-    return [...candidates.entries()]
-      .filter(([, potentialPlanks]) => potentialPlanks >= 6)
-      .sort((a, b) => b[1] - a[1])[0]?.[0] ?? null;
   }
 
   private buildMaterialCount(): number {
