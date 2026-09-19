@@ -466,7 +466,7 @@ export class TaskExecutor {
       if (result.status === 'interrupted') {
         throw new Error('task_replan:shelter_build_interrupted');
       }
-      if (result.detail.includes('insufficient_build_material')) {
+      if (!isRetriableShelterSiteFailure(result.detail)) {
         throw new Error(`shelter_failed:${result.detail}`);
       }
 
@@ -589,6 +589,22 @@ function inventoryMap(bot: mineflayer.Bot): Record<string, number> {
     result[item.name] = (result[item.name] ?? 0) + item.count;
   }
   return result;
+}
+
+function isRetriableShelterSiteFailure(detail: string): boolean {
+  return [
+    'shelter_requires_solid_ground',
+    'shelter_uneven_or_liquid_ground',
+    'shelter_missing_reference',
+    'shelter_roof_anchor_reference_missing',
+    'shelter_roof_anchor_failed',
+    'shelter_roof_reference_missing',
+    'shelter_roof_failed',
+    'shelter_door_ground_missing',
+    'shelter_doorway_blocked',
+    'shelter_door_failed',
+    'shelter_too_incomplete',
+  ].some(reason => detail.includes(reason));
 }
 
 function excavationDirection(target: SemanticTarget): 'N' | 'E' | 'S' | 'W' | null {
