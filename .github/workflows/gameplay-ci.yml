@@ -6,26 +6,38 @@ on:
       - revive/gameplay-first-jev
   pull_request:
 
+permissions:
+  contents: read
+
 jobs:
   test:
     runs-on: ubuntu-latest
     timeout-minutes: 15
-
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-
+        with:
+          persist-credentials: false
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: 22
           cache: npm
-
       - name: Install dependencies
         run: npm ci
-
+      - name: Export verification workspace
+        run: |
+          mkdir -p /tmp/gameplay-verification
+          git archive HEAD | tar -x -C /tmp/gameplay-verification
+          cp -a node_modules /tmp/gameplay-verification/node_modules
+          tar -czf /tmp/gameplay-verification.tgz -C /tmp/gameplay-verification .
+      - name: Upload verification workspace
+        uses: actions/upload-artifact@v4
+        with:
+          name: gameplay-verification
+          path: /tmp/gameplay-verification.tgz
+          retention-days: 1
       - name: Typecheck
         run: npm run lint
-
       - name: Unit tests
         run: npm test
