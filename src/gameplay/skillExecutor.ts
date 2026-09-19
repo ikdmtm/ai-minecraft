@@ -219,7 +219,7 @@ export class SkillExecutor {
           await this.craft(decision.craftItem ?? 'none', token);
           break;
         case 'PLACE_ITEM':
-          await this.placeInventoryItem(decision.placeItem ?? 'none', token);
+          await this.placeInventoryItem(decision.placeItem ?? 'none', token, decision.targetPosition);
           break;
         case 'USE_ITEM':
           await this.useInventoryItem(decision.useItem ?? 'none', token);
@@ -916,16 +916,62 @@ export class SkillExecutor {
     return null;
   }
 
-  private async placeInventoryItem(itemName: string, token: number): Promise<void> {
+  private async placeInventoryItem(
+    itemName: string,
+    token: number,
+    targetPosition?: { x: number; y: number; z: number },
+  ): Promise<void> {
     if (!itemName || itemName === 'none') throw new Error('place_item_missing_item');
     const item = this.bot.inventory.items().find(entry => entry.name === itemName);
     if (!item) throw new Error(`place_item_not_in_inventory:${itemName}`);
 
     this.updateDetail(`placing ${itemName}`);
     const role = placementRole(itemName);
-    const placed = await this.placeAdjacent(item, token, role);
-    if (!placed) throw new Error(`place_item_no_valid_location:${itemName}`);
 
+    let placed: any | null = null;
+    if (targetPosition) {
+      const target = new Vec3(
+        Math.floor(targetPosition.x),
+        Math.floor(targetPosition.y),
+        Math.floor(targetPosition.z),
+      );
+      const existing = this.bot.blockAt(target);
+      if (existing && existing.name !== 'air' && existing.boundingBox !== 'empty') {
+        throw new Error(`place_item_target_occupied:${existing.name}`);
+      }
+
+      await this.bot.equip(item, 'hand');
+      const references = [
+        [target.offset(-1, 0, 0), new Vec3(1, 0, 0)],
+        [target.offset(1, 0, 0), new Vec3(-1, 0, 0)],
+        [target.offset(0, -1, 0), new Vec3(0, 1, 0)],
+        [target.offset(0, 1, 0), new Vec3(0, -1, 0)],
+        [target.offset(0, 0, -1), new Vec3(0, 0, 1)],
+        [target.offset(0, 0, 1), new Vec3(0, 0, -1)],
+      ] as const;
+
+      for (const [referencePos, face] of references) {
+        this.assertActive(token);
+        const reference = this.bot.blockAt(referencePos);
+        if (!reference || reference.boundingBox !== 'block') continue;
+        try {
+          await this.bot.placeBlock(reference, face);
+          this.provenance?.markPlaced(target, role);
+          await delay(150);
+          const candidate = this.bot.blockAt(target);
+          if (candidate && candidate.name !== 'air') {
+            placed = candidate;
+            break;
+          }
+        } catch {
+          // Try another valid reference face.
+        }
+      }
+    } else {
+      placed = await this.placeAdjacent(item, token, role);
+    }
+
+    if (!placed) throw new Error(`place_item_no_valid_location:${itemName}`);
     this.shared.pushEvent({
       type: 'item_placed',
       detail: `${itemName}@${placed.position.x},${placed.position.y},${placed.position.z}`,
@@ -1325,7 +1371,19 @@ export class SkillExecutor {
     const entity = candidate ? this.entityFromCandidate(candidate) : null;
     if (!entity) throw new Error('no_attack_target');
     await this.equipBestWeapon();
-    await this.approachAndAttack(entity, token, 6);
+
+    const movements = new Movements(this.bot);
+    movements.allowSprinting = true;
+    this.bot.pathfinder.setMovements(movements);
+    if (this.bot.entity.position.distanceTo(entity.position) > 3.5) {
+      await this.bot.pathfinder.goto(new goals.GoalNear(entity.position.x, entity.position.y, entity.position.z, 2));
+      this.assertActive(token);
+    }
+
+    const fresh = this.bot.entities[entity.id];
+    if (!fresh) throw new Error('attack_target_disappeared');
+    this.bot.attack(fresh);
+    await delay(600);
   }
 
   private async approachAndAttack(entity: any, token: number, maxHits: number): Promise<void> {
