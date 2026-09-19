@@ -86,9 +86,7 @@ export interface ExecutiveCapabilitySnapshot {
     item: string;
     requiresTable: boolean;
     recipeCount: number;
-    utility: 'food' | 'tool' | 'weapon' | 'armor' | 'bed' | 'workstation' | 'storage' | 'material' | 'building' | 'utility' | 'misc';
     owned: number;
-    strategyRelevant: boolean;
   }>;
   actions: ExecutiveActionCapability[];
   recipes: Array<{
