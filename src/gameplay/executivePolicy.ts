@@ -278,6 +278,10 @@ function executiveInstructions(): string {
     'Use semantic target IDs when a location, resource source, or entity matters. Never invent coordinates or target IDs.',
     'resource_source targets identify visible harvestable blocks and the inventory resource their Minecraft drop data produces.',
     'item_drop targets are recoverable dropped items. known_structure targets are persistent remembered places.',
+    'land targets are concrete walkable terrain. shelter_site targets are footprints the body can reach and prepare, including clearing soft foliage before construction.',
+    'excavation_site metadata.mode may be down or up. An up site with purpose=surface_return is a certified short ascent toward a previously observed natural surface; prefer it over passive waiting when the strategy calls for leaving an underground dead end.',
+    'For any task that needs a target, select a compatible target_id. Do not choose NAVIGATE_TARGET, EXCAVATE_TARGET, or BUILD_STRUCTURE with target_id=none when a compatible semantic target is present.',
+    'WAIT is only for situations where no useful executable action improves the state. If recentEvents contains gameplay_no_progress, change approach rather than repeating WAIT while safe affordances exist.',
     'For BUILD_STRUCTURE(shelter), use a shelter_site only when a new shelter is actually useful. The current shelter body requires one wooden door and at least eight structural blocks already in inventory; satisfy those prerequisites explicitly with CRAFT_ITEM/GATHER_RESOURCE instead of expecting BUILD_STRUCTURE to craft them.',
     'Reuse existing facilities and remembered structures. Do not duplicate work without a reason.',
     'Use recent failures to change approach instead of blindly repeating the same failed task. If BUILD_STRUCTURE has just failed for a systemic crafting/material reason, do not retry the same build unchanged until the missing prerequisite or execution state has changed.',
@@ -420,16 +424,23 @@ function normalizeDecisionParameters(
   decision: ExecutiveDecision,
 ): ExecutiveDecision {
   let targetId = decision.targetId;
-  const target = targetId ? state.targets.find(candidate => candidate.id === targetId) : undefined;
+  let target = targetId ? state.targets.find(candidate => candidate.id === targetId) : undefined;
+  let reason = decision.reason;
 
-  // Event-driven Executive decisions are made at task boundaries. Reject
-  // action/argument combinations that cannot be executed instead of sending
-  // them into the Task layer to fail repeatedly.
+  // Event-driven Executive decisions are made at task boundaries. Repair a
+  // missing location parameter from the matching affordance kind when the
+  // intent is otherwise executable; do not turn a good high-level choice into
+  // a WAIT loop merely because the model emitted target_id=none.
   if (decision.task === 'CONTINUE_TASK' && state.activeTask.status !== 'running') {
     return asWait(decision, 'invalid_task:no_running_task');
   }
+
   if (decision.task === 'NAVIGATE_TARGET' && !target) {
-    return asWait(decision, 'invalid_target:navigate_requires_target');
+    const rebound = bestNavigationTarget(state.targets);
+    if (!rebound) return asWait(decision, 'invalid_target:navigate_requires_target');
+    target = rebound;
+    targetId = rebound.id;
+    reason = `auto_bound_target:${rebound.kind}`;
   }
 
   if (decision.task === 'GATHER_RESOURCE') {
@@ -448,7 +459,9 @@ function normalizeDecisionParameters(
       }
     }
   } else if (decision.task === 'EXCAVATE_TARGET') {
-    const excavationTargets = state.targets.filter(candidate => candidate.kind === 'excavation_site');
+    const excavationTargets = state.targets
+      .filter(candidate => candidate.kind === 'excavation_site')
+      .sort((a, b) => b.score - a.score);
     if (excavationTargets.length === 0) {
       return {
         ...decision,
@@ -462,7 +475,9 @@ function normalizeDecisionParameters(
       };
     }
     if (target?.kind !== 'excavation_site') {
-      return asWait(decision, 'invalid_target:excavation_requires_site');
+      target = excavationTargets[0];
+      targetId = target.id;
+      reason = 'auto_bound_target:excavation_site';
     }
   } else if (decision.task === 'ATTACK_TARGET') {
     if (target?.kind !== 'entity') {
@@ -472,7 +487,9 @@ function normalizeDecisionParameters(
     decision.task === 'BUILD_STRUCTURE' &&
     decision.structure === 'shelter'
   ) {
-    const shelterTargets = state.targets.filter(candidate => candidate.kind === 'shelter_site');
+    const shelterTargets = state.targets
+      .filter(candidate => candidate.kind === 'shelter_site')
+      .sort((a, b) => b.score - a.score);
     if (shelterTargets.length === 0) {
       return {
         ...decision,
@@ -486,11 +503,25 @@ function normalizeDecisionParameters(
       };
     }
     if (target?.kind !== 'shelter_site') {
-      return asWait(decision, 'invalid_target:shelter_requires_site');
+      target = shelterTargets[0];
+      targetId = target.id;
+      reason = 'auto_bound_target:shelter_site';
     }
   }
 
-  return { ...decision, targetId };
+  return { ...decision, targetId, reason };
+}
+
+function bestNavigationTarget(targets: SemanticTarget[]): SemanticTarget | undefined {
+  const preferredKinds = new Set(['known_structure', 'land', 'shelter_site']);
+  const candidates = targets
+    .filter(target =>
+      preferredKinds.has(target.kind) &&
+      target.risk !== 'high' &&
+      target.distance > 2.25,
+    )
+    .sort((a, b) => b.score - a.score || a.distance - b.distance);
+  return candidates[0];
 }
 
 function asWait(decision: ExecutiveDecision, reason: string): ExecutiveDecision {
@@ -554,6 +585,7 @@ function logDecision(
     structure: decision.structure ?? null,
     amount: decision.amount ?? null,
     confidence: decision.confidence,
+    reason: decision.reason ?? null,
     active_task: state.activeTask,
     strategy_goal: state.strategy.mainGoal,
   }));
