@@ -113,13 +113,6 @@ export interface ExecutiveCapabilitySnapshot {
     reachableDepth: number;
     ingredients: Array<{ item: string; count: number }>;
   }>;
-  entityActions: Array<{
-    targetId: string;
-    entity: string;
-    hostile: boolean;
-    actions: readonly ['NAVIGATE_TARGET', 'ATTACK_TARGET'];
-  }>;
-  canExcavate: boolean;
 }
 
 export interface ExecutiveTaskSnapshot {
