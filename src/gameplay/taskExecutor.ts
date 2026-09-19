@@ -8,6 +8,7 @@ import type { ExecutiveActionCapability, ExecutiveDecision, ExecutiveTaskSnapsho
 import { normalizeMemoryDimension, type WorldMemory } from './worldMemory.js';
 import { ExperienceMemory, bindProcedureStep } from './experienceMemory.js';
 import { parseOperation, inventorySignature, windowSignature, windowSnapshot, type PrimitiveOperation } from './primitiveOperations.js';
+import type { SpatialRuntimeContext } from './spatialRuntimeContext.js';
 
 export class TaskExecutor {
   private sequence = 0;
@@ -24,6 +25,7 @@ export class TaskExecutor {
     private readonly semantic: SemanticWorldModel,
     private readonly memory: WorldMemory,
     private readonly experience: ExperienceMemory = new ExperienceMemory(),
+    private readonly spatial?: SpatialRuntimeContext,
   ) {
     this.log('run_context', { context: {
       world_id: this.memory.getWorldId(), minecraft_version: this.bot.version ?? null,
@@ -35,19 +37,23 @@ export class TaskExecutor {
   snapshot(): ExecutiveTaskSnapshot { return { ...this.current, progress: { ...this.current.progress } }; }
   async execute(decision: ExecutiveDecision): Promise<TaskExecutionResult> {
     if (this.stopped) return { status: 'interrupted', detail: 'runtime_stopped' };
+    if (this.spatial && !this.spatial.isReady()) return { status: 'interrupted', detail: 'task_replan:spatial_not_ready' };
     if (this.current.status === 'running') return { status: 'failed', detail: 'task_already_running' };
+    const ticket = this.spatial?.ticket();
     const token = ++this.epoch;
     const taskWorldId = this.memory.getWorldId();
     const taskDimension = normalizeMemoryDimension(this.bot.game.dimension);
     this.current = { id: ++this.sequence, task: decision.task, targetId: decision.targetId ?? null,
       status: 'running', startedAt: Date.now(), updatedAt: Date.now(), detail: '', progress: {} };
     this.log('task_started', { task_id: this.current.id, task: decision.task,
+      spatial_epoch: ticket?.epoch ?? null,
       affordance_id: decision.capabilityId ?? null, operation: decision.operation ?? null,
       knowledge_query: decision.knowledgeQuery ?? null, knowledge_offset: decision.knowledgeOffset ?? null,
       procedure_id: decision.procedureId ?? null, procedure_name: decision.procedureName ?? null,
       evidence_ids: decision.evidenceIds ?? null,
       reason: decision.reason ?? null, based_on_revision: decision.basedOnRevision });
     const check = () => {
+      if (ticket && !this.spatial!.matches(ticket)) throw new Error('task_replan:spatial_context_changed');
       if (this.stopped || token !== this.epoch) throw new Error('task_replan:cancelled');
       if (taskDimension == null) throw new Error('task_replan:dimension_unavailable');
       if (this.memory.getWorldId() !== taskWorldId || normalizeMemoryDimension(this.bot.game.dimension) !== taskDimension) {
@@ -88,6 +94,7 @@ export class TaskExecutor {
               const outcome = await this.operate(op, check, Math.max(100, deadline - Date.now()));
               if (!outcome.verified) throw new Error('procedure_step_effect_unverified');
             }
+            check();
             this.experience.recordReplay(procedure.id, true);
           } catch (error) {
             if (!(error instanceof Error && error.message.startsWith('task_replan:'))) this.experience.recordReplay(procedure.id, false);
@@ -106,12 +113,20 @@ export class TaskExecutor {
       return { status, detail };
     }
   }
+  /** Temporary interruption, unlike stop(): destination work may start once ready. */
+  interruptSpatialTransition(reason: string): void {
+    this.epoch++;
+    this.primitive.stop();
+    if (this.current.status === 'running') this.finish('interrupted', `spatial_transition:${reason}`);
+  }
   stop(): void {
     this.stopped = true; this.epoch++; this.primitive.stop();
     if (this.current.status === 'running') this.finish('interrupted', 'runtime_stop');
   }
   private async operate(op: PrimitiveOperation, check: () => void, timeout = 70000): Promise<{ detail: string; verified: boolean }> {
     check();
+    const taskId = this.current.id, operationEpoch = this.epoch;
+    const ticket = this.spatial?.ticket();
     const before = observation(this.bot, op);
     const win = windowSnapshot(this.bot);
     const origin = { x: this.bot.entity.position.x, y: this.bot.entity.position.y, z: this.bot.entity.position.z };
@@ -119,10 +134,12 @@ export class TaskExecutor {
     const entityName = op.entityId != null ? this.bot.entities[op.entityId]?.name : undefined;
     const worldId = this.memory.getWorldId();
     const dimension = String(this.bot.game.dimension), version = this.bot.version;
-    const contextChanged = () => this.memory.getWorldId() !== worldId ||
+    const contextChanged = () => (ticket != null && !this.spatial!.matches(ticket)) || this.memory.getWorldId() !== worldId ||
       normalizeMemoryDimension(this.bot.game.dimension) !== normalizeMemoryDimension(dimension);
     let hurt = false;
-    const hurtListener = (entity: any) => { if (entity.id === op.entityId) hurt = true; };
+    const hurtListener = (entity: any) => {
+      if (!contextChanged() && operationEpoch === this.epoch && entity.id === op.entityId) hurt = true;
+    };
     this.bot.on('entityHurt', hurtListener);
     this.current.detail = op.action === 'WAIT' ? 'waiting_for_condition' : `operation:${op.action}`;
     this.current.progress = { operation: op.action, condition: op.until ?? null };
@@ -143,28 +160,34 @@ export class TaskExecutor {
       if (verified && op.action === 'BREAK' && op.position) this.memory.markContradictedNear(op.position, 0.1, ['placed_block'], 1, dimension);
       return { detail, verified };
     } catch (error) {
-      // Preserve the source context; a cross-dimension completion is not a placement
-      // in the destination and is not negative training evidence for the action.
       detail = contextChanged() ? 'task_replan:spatial_context_changed' : error instanceof Error ? error.message : String(error);
       status = detail.startsWith('task_replan:') ? 'interrupted' : 'failed';
       verified = false;
       throw new Error(detail);
     } finally {
       this.bot.removeListener('entityHurt', hurtListener);
-      const after = observation(this.bot, op);
-      const effect = contextChanged()
-        ? JSON.stringify({ contextChanged: true, sourceWorldId: worldId, sourceDimension: dimension,
-            destinationWorldId: this.memory.getWorldId(), destinationDimension: String(this.bot.game.dimension) })
-        : JSON.stringify({ hp: after.hp - before.hp, hunger: after.hunger - before.hunger,
-            inventoryBefore: before.inventory, inventoryAfter: after.inventory,
-            blockBefore: before.block, blockAfter: after.block, targetHurtObserved: hurt, windowChanged: before.window !== after.window });
+      // Do not read the new world's blocks or even its incomplete inventory in
+      // an old operation's finalizer. Preserve the original task ID as well.
+      const changed = contextChanged();
+      const obsolete = changed || this.stopped || operationEpoch !== this.epoch;
+      let effect: string;
+      if (obsolete) {
+        status = 'interrupted'; verified = false;
+        effect = JSON.stringify({ contextChanged: changed, interrupted: true,
+          sourceWorldId: worldId, sourceDimension: dimension, sourceEpoch: ticket?.epoch ?? null,
+          destinationWorldId: this.memory.getWorldId(), destinationDimension: String(this.bot.game?.dimension) });
+      } else {
+        const after = observation(this.bot, op);
+        effect = JSON.stringify({ hp: after.hp - before.hp, hunger: after.hunger - before.hunger,
+          inventoryBefore: before.inventory, inventoryAfter: after.inventory,
+          blockBefore: before.block, blockAfter: after.block, targetHurtObserved: hurt, windowChanged: before.window !== after.window });
+      }
       const evidence = this.experience.append({ worldId, version, dimension,
         operation: op, status, verified, detail, effect, origin, blockName, entityName, window: win });
-      this.log('operation_evidence', { task_id: this.current.id, evidence_id: evidence.id,
+      this.log('operation_evidence', { task_id: taskId, evidence_id: evidence.id,
         experience_session_id: evidence.sessionId, evidence_sequence: evidence.sequence,
-        world_id: worldId, minecraft_version: version, dimension,
+        world_id: worldId, minecraft_version: version, dimension, spatial_epoch: ticket?.epoch ?? null,
         operation: op, status, effect_verified: verified, detail, effect });
-      // A safety/context interruption is not evidence that the operation itself failed.
       if (status !== 'interrupted') this.memory.recordProcedureOutcome({
         key: [version, dimension, op.action, op.item ?? '', blockName ?? '', entityName ?? ''].join('|'),
         label: `${op.action} ${op.item ?? blockName ?? entityName ?? ''}`.trim(),

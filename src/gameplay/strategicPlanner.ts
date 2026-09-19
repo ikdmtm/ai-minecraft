@@ -1,5 +1,6 @@
 import type { SharedStateBus } from '../cognitive/sharedState.js';
 import type { ExecutiveWorldState } from './executiveTypes.js';
+import type { SpatialRuntimeContext } from './spatialRuntimeContext.js';
 
 interface StrategyOutput {
   mainGoal: string;
@@ -10,6 +11,8 @@ interface StrategyOutput {
 export class StrategicPlanner {
   private timer: ReturnType<typeof setTimeout> | null = null;
   private running = false;
+  private requestEpoch = 0;
+  private pending: AbortController | null = null;
 
   constructor(
     private readonly shared: SharedStateBus,
@@ -17,6 +20,7 @@ export class StrategicPlanner {
     private readonly model: string,
     private readonly getState: () => ExecutiveWorldState,
     private readonly onGoalChanged: (goal: string) => void,
+    private readonly spatial?: SpatialRuntimeContext,
   ) {}
 
   start(): void {
@@ -34,22 +38,36 @@ export class StrategicPlanner {
 
   stop(): void {
     this.running = false;
+    this.requestEpoch++;
+    this.pending?.abort();
+    this.pending = null;
     if (this.timer) clearTimeout(this.timer);
     this.timer = null;
   }
 
   private schedule(delay = 45_000): void {
     if (!this.running) return;
-    this.timer = setTimeout(() => void this.runCycle(), delay);
+    if (this.timer) clearTimeout(this.timer);
+    this.timer = setTimeout(() => { this.timer = null; void this.runCycle(); }, delay);
   }
 
   private async runCycle(): Promise<void> {
     if (!this.running) return;
+    if (this.spatial && !this.spatial.isReady()) { this.schedule(750); return; }
+    const ticket = this.spatial?.ticket();
+    const request = ++this.requestEpoch;
+    this.pending?.abort();
+    const controller = new AbortController();
+    this.pending = controller;
+    const timeout = setTimeout(() => controller.abort(), 30000);
+    const current = () => this.running && request === this.requestEpoch &&
+      !controller.signal.aborted && (!ticket || this.spatial!.matches(ticket));
     const started = Date.now();
     try {
       const state = this.getState();
       const response = await fetch('https://api.openai.com/v1/responses', {
         method: 'POST',
+        signal: controller.signal,
         headers: {
           'Content-Type': 'application/json',
           Authorization: `Bearer ${this.apiKey}`,
@@ -93,28 +111,32 @@ export class StrategicPlanner {
           max_output_tokens: 600,
         }),
       });
+      if (!current()) return;
       if (!response.ok) throw new Error(`OpenAI strategy ${response.status}: ${await response.text()}`);
       const data = (await response.json()) as any;
-      const text = extractResponseText(data);
-      const parsed = parseStrategy(text);
+      // Body decoding may complete after a transition even if fetch resolved before it.
+      if (!current()) {
+        console.log(JSON.stringify({ ts: new Date().toISOString(), kind: 'strategic_stale_decision', spatial_epoch: ticket?.epoch ?? null }));
+        return;
+      }
+      const parsed = parseStrategy(extractResponseText(data));
       if (parsed) {
         this.apply(parsed);
         console.log(JSON.stringify({
-          ts: new Date().toISOString(),
-          kind: 'strategic_decision',
-          latency_ms: Date.now() - started,
-          output: parsed,
+          ts: new Date().toISOString(), kind: 'strategic_decision',
+          latency_ms: Date.now() - started, spatial_epoch: ticket?.epoch ?? null, output: parsed,
         }));
       }
     } catch (error) {
-      console.log(JSON.stringify({
-        ts: new Date().toISOString(),
-        kind: 'strategic_error',
-        latency_ms: Date.now() - started,
+      if (this.running && request === this.requestEpoch) console.log(JSON.stringify({
+        ts: new Date().toISOString(), kind: 'strategic_error', latency_ms: Date.now() - started,
         message: error instanceof Error ? error.message : String(error),
       }));
     } finally {
-      this.schedule();
+      clearTimeout(timeout);
+      if (this.pending === controller) this.pending = null;
+      // An old request must not schedule a second loop after stop/start.
+      if (this.running && request === this.requestEpoch) this.schedule();
     }
   }
 
