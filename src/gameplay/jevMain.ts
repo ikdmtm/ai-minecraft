@@ -209,7 +209,8 @@ function startStatusLogging(): void {
       task: executiveState?.activeTask ?? null,
       skill: jevState?.currentSkill ?? null,
       semantic_revision: executiveState?.revision ?? null,
-      semantic_targets: executiveState?.targets.slice(0, 10) ?? [],
+      semantic_target_counts: countSemanticTargetKinds(executiveState?.targets ?? []),
+      semantic_targets: executiveState?.targets.slice(0, 12) ?? [],
       threat_level: state.threatLevel,
       hp: runtime?.hp ?? null,
       hunger: runtime?.hunger ?? null,
@@ -269,6 +270,12 @@ function diffInventory(before: Record<string, number>, after: Record<string, num
     if (value !== 0) delta[name] = value;
   }
   return delta;
+}
+
+function countSemanticTargetKinds(targets: Array<{ kind: string }>): Record<string, number> {
+  const counts: Record<string, number> = {};
+  for (const target of targets) counts[target.kind] = (counts[target.kind] ?? 0) + 1;
+  return counts;
 }
 
 function positionOf(bot: any): Record<string, number> | null {
