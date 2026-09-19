@@ -1,4 +1,5 @@
 import { parseOperation, OPERATION_JSON_SCHEMA } from './primitiveOperations.js';
+import { validateProcedureSaveSelection } from './procedureSaveSelection.js';
 import {
   EXECUTIVE_TASKS,
   type ExecutiveDecision,
@@ -318,8 +319,9 @@ function normalizeDecision(
     return decision;
   }
   if (decision.task === 'SAVE_PROCEDURE') {
-    if (!decision.procedureName || !Array.isArray(decision.evidenceIds)) throw new Error('procedure_evidence_required');
-    return decision;
+    return { ...decision, ...validateProcedureSaveSelection(
+      decision.procedureName, decision.evidenceIds, state.autonomy?.recentExperience,
+    ) };
   }
   if (decision.task === 'RUN_PROCEDURE') {
     if (!decision.procedureId) throw new Error('procedure_id_required');
@@ -395,6 +397,8 @@ function logDecision(
     affordance_id: decision.capabilityId ?? null,
     operation: decision.operation ?? null,
     procedure_id: decision.procedureId ?? null,
+    procedure_name: decision.procedureName ?? null,
+    evidence_ids: decision.evidenceIds ?? null,
     knowledge_query: decision.knowledgeQuery ?? null,
     target_id: decision.targetId ?? null,
     confidence: decision.confidence,
