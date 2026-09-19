@@ -15,18 +15,7 @@ export type GameplayActionType =
 
 export type CompassDirection = 'N' | 'NE' | 'E' | 'SE' | 'S' | 'SW' | 'W' | 'NW';
 
-export type CraftItem =
-  | 'none'
-  | 'planks'
-  | 'sticks'
-  | 'crafting_table'
-  | 'wooden_pickaxe'
-  | 'wooden_axe'
-  | 'wooden_sword'
-  | 'stone_pickaxe'
-  | 'stone_axe'
-  | 'stone_sword'
-  | 'furnace';
+export type CraftItem = string;
 
 export interface TypedGameplayDecision {
   action: GameplayActionType;
@@ -105,17 +94,3 @@ export const GAMEPLAY_ACTIONS: GameplayActionType[] = [
 ];
 
 export const COMPASS_DIRECTIONS: CompassDirection[] = ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW'];
-
-export const CRAFT_ITEMS: CraftItem[] = [
-  'none',
-  'planks',
-  'sticks',
-  'crafting_table',
-  'wooden_pickaxe',
-  'wooden_axe',
-  'wooden_sword',
-  'stone_pickaxe',
-  'stone_axe',
-  'stone_sword',
-  'furnace',
-];
