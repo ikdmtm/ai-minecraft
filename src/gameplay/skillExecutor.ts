@@ -1,3 +1,4 @@
+import { executePrimitiveOperation } from './primitiveOperations.js';
 import mineflayer from 'mineflayer';
 import { Movements, goals } from 'mineflayer-pathfinder';
 import { Vec3 } from 'vec3';
@@ -91,16 +92,19 @@ export class SkillExecutor {
       };
     }
 
+    if (immediate.id === beforeId) return { ...immediate, status: 'interrupted', detail: 'skill_not_dispatched' };
+    const ownId = immediate.id;
     const started = Date.now();
 
     while (Date.now() - started < timeoutMs) {
       const snapshot = this.snapshot();
-      if (snapshot.id !== beforeId && snapshot.status !== 'running') return snapshot;
+      if (snapshot.id !== ownId) return { ...immediate, status: 'interrupted', detail: 'skill_replaced' };
+      if (snapshot.status !== 'running') return snapshot;
       if (snapshot.id === beforeId && snapshot.status !== 'running' && decision.action === 'WAIT') return snapshot;
       await delay(75);
     }
 
-    if (this.current.status === 'running') this.cancel(`primitive_wait_timeout:${decision.action}`);
+    if (this.current.id === ownId && this.current.status === 'running') this.cancel(`primitive_wait_timeout:${decision.action}`);
     return this.snapshot();
   }
 
@@ -196,7 +200,13 @@ export class SkillExecutor {
     skillId: number,
   ): Promise<void> {
     try {
+      let executionDetail = 'completed';
       switch (decision.action) {
+        case 'OPERATE':
+          executionDetail = await executePrimitiveOperation(this.bot, decision.operation, {
+            assertActive: () => this.assertActive(token), provenance: this.provenance,
+          });
+          break;
         case 'NAVIGATE':
           if (!decision.targetPosition) throw new Error('navigate_target_missing');
           await this.navigate(decision.targetPosition, token);
@@ -260,7 +270,7 @@ export class SkillExecutor {
         ...this.current,
         status: 'succeeded',
         updatedAt: Date.now(),
-        detail: 'completed',
+        detail: executionDetail,
       };
       this.log('skill_succeeded', {
         skill_id: skillId,
@@ -301,6 +311,10 @@ export class SkillExecutor {
 
   private cancel(reason: string): void {
     this.cancellationToken++;
+    // Release the old operation synchronously, before a safety replacement starts.
+    try { this.bot.stopDigging(); } catch { /* best effort */ }
+    try { this.bot.deactivateItem(); } catch { /* best effort */ }
+    try { this.bot.clearControlStates(); } catch { /* best effort */ }
     try { this.bot.pathfinder.stop(); } catch { /* best effort */ }
     if (this.current.status === 'running') {
       this.log('skill_interrupted', {
@@ -987,7 +1001,7 @@ export class SkillExecutor {
     await this.bot.equip(item, 'hand');
     this.assertActive(token);
     const data = (this.bot.registry.items as any)?.[item.type] ?? {};
-    const foodPoints = Number(data.foodPoints ?? data.food_points ?? 0);
+    const foodPoints = Number((this.bot.registry as any).foodsByName?.[item.name]?.foodPoints ?? data.foodPoints ?? data.food_points ?? 0);
 
     if (foodPoints > 0) {
       await this.bot.consume();
@@ -1588,7 +1602,7 @@ function placementRole(itemName: string): 'workstation' | 'utility' {
 
 function isEdibleItem(bot: mineflayer.Bot, item: any): boolean {
   const data = (bot.registry.items as any)?.[item?.type] ?? {};
-  const foodPoints = Number(data.foodPoints ?? data.food_points ?? 0);
+  const foodPoints = Number((bot.registry as any).foodsByName?.[item.name]?.foodPoints ?? data.foodPoints ?? data.food_points ?? 0);
   return foodPoints > 0 || FOOD_ITEMS.has(item?.name ?? '');
 }
 

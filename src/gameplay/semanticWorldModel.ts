@@ -1,3 +1,6 @@
+import { MinecraftKnowledge } from './minecraftKnowledge.js';
+import { windowSnapshot, localGridSnapshot } from './primitiveOperations.js';
+import type { ExperienceMemory } from './experienceMemory.js';
 import type mineflayer from 'mineflayer';
 import type { SharedStateBus } from '../cognitive/sharedState.js';
 import { Vec3 } from 'vec3';
@@ -20,6 +23,8 @@ const WATERLIKE = new Set([
 ]);
 
 export class SemanticWorldModel {
+  private readonly knowledge: MinecraftKnowledge;
+  private knowledgeResults: Record<string, unknown>[] = [];
   private revision = 0;
   private lastFingerprint = '';
   private readonly capabilityRegistry: CapabilityRegistry;
@@ -30,8 +35,10 @@ export class SemanticWorldModel {
     private readonly shared: SharedStateBus,
     private readonly provenance?: WorldProvenance,
     private readonly memory: WorldMemory = new WorldMemory(),
+    private readonly experience?: ExperienceMemory,
   ) {
     this.capabilityRegistry = new CapabilityRegistry(bot);
+    this.knowledge = new MinecraftKnowledge(bot);
   }
 
   capture(activeTask: ExecutiveTaskSnapshot): ExecutiveWorldState {
@@ -84,6 +91,17 @@ export class SemanticWorldModel {
         shelterNearby: Boolean(this.provenance?.hasStructureNearby('shelter', position, 24)),
       },
       capabilities,
+      autonomy: {
+        version: this.bot.version, dimension: String(this.bot.game.dimension), worldId: this.memory.getWorldId(),
+        window: windowSnapshot(this.bot),
+        localGrid: localGridSnapshot(this.bot),
+        recentExperience: this.experience?.recent(24).filter(e => e.worldId === this.memory.getWorldId()) ?? [],
+        learnedProcedures: this.experience?.list(this.bot.version, String(this.bot.game.dimension)).map(p => ({
+          id: p.id, name: p.name, status: p.status, successes: p.successes, failures: p.failures,
+          steps: p.steps, evidenceIds: p.evidenceIds,
+        })) ?? [],
+        knowledgeResults: this.knowledgeResults,
+      },
       strategy,
       activeTask,
       targets,
@@ -130,6 +148,12 @@ export class SemanticWorldModel {
       revision: this.revision,
       ...stateWithoutRevision,
     };
+  }
+
+  lookupKnowledge(query: string, offset = 0): Record<string, unknown> {
+    const result = this.knowledge.lookup(query, offset);
+    this.knowledgeResults = [...this.knowledgeResults, result].slice(-3);
+    return result;
   }
 
   getRevision(): number {

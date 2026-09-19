@@ -13,6 +13,7 @@ function createMockAdapter(): jest.Mocked<YouTubeApiAdapter> {
     endBroadcast: jest.fn().mockResolvedValue(undefined),
     uploadThumbnail: jest.fn().mockResolvedValue(undefined),
     getStreamStatus: jest.fn().mockResolvedValue('active'),
+    getBroadcastStatus: jest.fn().mockResolvedValue('live'),
   };
 }
 

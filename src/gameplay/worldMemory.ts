@@ -118,6 +118,12 @@ export class WorldMemory {
     const id = memoryId(scope, worldId, observation.kind, observation.key);
     const existing = this.records.get(id);
     const confidence = clamp01(observation.confidence ?? 0.9);
+    // Sampling the same fact many times a second is not independent evidence or a reason for a disk write.
+    if (existing && now - existing.lastSeenAt < 2000 &&
+        JSON.stringify(existing.metadata) === JSON.stringify(observation.metadata ?? {}) &&
+        ((!existing.position && !observation.position) || (existing.position && observation.position && distance(existing.position, observation.position) < 0.5))) {
+      return cloneRecord(existing);
+    }
 
     const next: WorldMemoryRecord = existing
       ? {
@@ -176,7 +182,7 @@ export class WorldMemory {
       label: input.label,
       scope,
       retention: 'stable',
-      confidence: Math.max(0.25, empirical),
+      confidence: 1, // Confidence in the recorded evidence, not probability of future success.
       metadata: {
         ...(existing?.metadata ?? {}),
         ...(input.metadata ?? {}),
@@ -231,6 +237,17 @@ export class WorldMemory {
 
     this.prune(now);
     return recalled;
+  }
+
+  close(): void { if (this.db?.open) this.db.close(); }
+
+  recallHistory(worldId: string, limit = 16): WorldMemoryRecord[] {
+    if (!this.db) return [...this.records.values()].filter(r => r.scope === 'world' && r.worldId === worldId).slice(0, limit).map(cloneRecord);
+    const rows = this.db.prepare('SELECT * FROM gameplay_memory WHERE scope = ? AND world_id = ? ORDER BY last_seen_at DESC LIMIT ?').all('world', worldId, Math.min(64, limit)) as MemoryRow[];
+    return rows.map(r => ({ id: r.id, kind: r.kind, label: r.label,
+      position: r.x == null || r.y == null || r.z == null ? undefined : { x: r.x, y: r.y, z: r.z },
+      confidence: r.confidence, firstSeenAt: r.first_seen_at, lastSeenAt: r.last_seen_at, observations: r.observations,
+      retention: r.retention, scope: r.scope, worldId: r.world_id, metadata: JSON.parse(r.metadata_json) }));
   }
 
   markContradictedNear(
@@ -355,7 +372,7 @@ export class WorldMemory {
       if (record.retention === 'stable' || record.scope !== 'world') continue;
       if (effectiveConfidence(record, now) >= 0.025) continue;
       this.records.delete(id);
-      this.db?.prepare('DELETE FROM gameplay_memory WHERE id = ?').run(id);
+      // Retain the disk record as history; forgetting removes only active working memory.
     }
   }
 }

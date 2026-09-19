@@ -65,8 +65,8 @@ export class CapabilityRegistry {
       .map(item => {
         const data = (this.bot.registry.items as any)?.[item.type] ?? {};
         const placeable = (this.bot.registry.blocksByName as any)?.[item.name];
-        const foodPoints = Number(data.foodPoints ?? data.food_points);
-        const saturation = Number(data.saturation ?? data.saturationModifier);
+        const foodPoints = Number((this.bot.registry as any).foodsByName?.[item.name]?.foodPoints ?? data.foodPoints ?? data.food_points);
+        const saturation = Number((this.bot.registry as any).foodsByName?.[item.name]?.saturation ?? data.saturation ?? data.saturationModifier);
         const maxDurability = Number(data.maxDurability ?? data.max_durability);
         const stackSize = Number(data.stackSize ?? data.stack_size);
         return {
@@ -121,10 +121,10 @@ export class CapabilityRegistry {
       .map(item => `${item.name}:${item.count}`)
       .sort()
       .join(',');
-    const cacheKey = `${inventoryKey}|table=${Boolean(nearbyTable || tableInInventory)}|${strategyText}`;
+    const cacheKey = `${inventoryKey}|table=${Boolean(nearbyTable)}|${strategyText}`;
     if (cacheKey === this.craftCacheKey) return this.craftCache;
 
-    const tableAccess: any = nearbyTable ?? (tableInInventory ? true : null);
+    const tableAccess: any = nearbyTable ?? null;
     const strategy = strategyText.toLowerCase();
     const results: Array<{
       item: string;
@@ -302,7 +302,7 @@ export class CapabilityRegistry {
     const placementPositions = this.findPlacementPositions().slice(0, 6);
     for (const item of this.bot.inventory.items()) {
       const data = (this.bot.registry.items as any)?.[item.type] ?? {};
-      const foodPoints = Number(data.foodPoints ?? data.food_points ?? 0);
+      const foodPoints = Number((this.bot.registry as any).foodsByName?.[item.name]?.foodPoints ?? data.foodPoints ?? data.food_points ?? 0);
       if (foodPoints > 0) {
         useActions.push({
           id: `use:${item.name}`,
@@ -314,7 +314,7 @@ export class CapabilityRegistry {
           },
           specification: {
             foodPoints,
-            saturation: Number(data.saturation ?? data.saturationModifier ?? 0) || 0,
+            saturation: Number((this.bot.registry as any).foodsByName?.[item.name]?.saturation ?? data.saturation ?? data.saturationModifier ?? 0) || 0,
           },
         });
       }
@@ -362,7 +362,7 @@ export class CapabilityRegistry {
     }
 
     const breakActions = this.discoverBreakBlockAffordances();
-    const processActions = this.discoverProcessingAffordances();
+    const processActions: ExecutiveActionCapability[] = []; // Use explicit OPEN/TRANSFER; smelting facts come from the vanilla export.
     const interactionActions = this.discoverInteractionAffordances();
     const time = this.bot.time.timeOfDay;
     const waitAction: ExecutiveActionCapability = time >= 12500 && time < 23500

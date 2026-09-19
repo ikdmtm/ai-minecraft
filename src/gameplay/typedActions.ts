@@ -1,4 +1,6 @@
+import type { PrimitiveOperation } from './primitiveOperations.js';
 export type GameplayActionType =
+  | 'OPERATE'
   | 'CONTINUE'
   | 'NAVIGATE'
   | 'EXPLORE'
@@ -24,6 +26,7 @@ export type CraftItem = string;
 
 export interface TypedGameplayDecision {
   action: GameplayActionType;
+  operation?: PrimitiveOperation;
   blockTargetId?: string;
   entityTargetId?: string;
   craftItem?: CraftItem;
@@ -89,6 +92,7 @@ export interface JevWorldState {
 }
 
 export const GAMEPLAY_ACTIONS: GameplayActionType[] = [
+  'OPERATE',
   'CONTINUE',
   'NAVIGATE',
   'EXPLORE',

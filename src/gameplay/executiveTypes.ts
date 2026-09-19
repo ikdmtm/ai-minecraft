@@ -1,7 +1,12 @@
+import type { PrimitiveOperation } from './primitiveOperations.js';
 import type { CraftItem } from './typedActions.js';
 
 export type ExecutiveTaskType =
   | 'EXECUTE_AFFORDANCE'
+  | 'EXECUTE_OPERATION'
+  | 'LOOKUP_KNOWLEDGE'
+  | 'SAVE_PROCEDURE'
+  | 'RUN_PROCEDURE'
   | 'WAIT';
 
 export type ExecutiveResource = string;
@@ -160,9 +165,16 @@ export interface ExecutiveWorldState {
   targets: SemanticTarget[];
   memory: ExecutiveMemoryRecord[];
   recentEvents: Array<{ type: string; detail: string; importance: string }>;
+  autonomy?: Record<string, unknown>;
 }
 
 export interface ExecutiveDecision {
+  operation?: PrimitiveOperation;
+  knowledgeQuery?: string;
+  knowledgeOffset?: number;
+  procedureName?: string;
+  evidenceIds?: string[];
+  procedureId?: string;
   task: ExecutiveTaskType;
   targetId?: string;
   resource?: ExecutiveResource;
@@ -182,6 +194,7 @@ export interface TaskExecutionResult {
 }
 
 export const EXECUTIVE_TASKS: ExecutiveTaskType[] = [
+  'EXECUTE_OPERATION', 'LOOKUP_KNOWLEDGE', 'SAVE_PROCEDURE', 'RUN_PROCEDURE',
   'EXECUTE_AFFORDANCE',
   'WAIT',
 ];

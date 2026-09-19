@@ -19,7 +19,10 @@
     "test:serial": "jest --runInBand",
     "test:watch": "jest --watch",
     "test:coverage": "jest --coverage",
-    "lint": "tsc --noEmit"
+    "lint": "tsc --noEmit",
+    "test:gameplay": "jest src/gameplay --runInBand",
+    "test:knowledge-export": "python3 scripts/test-export-knowledge.py",
+    "test:gameplay-smoke": "tsx scripts/gameplay-smoke.ts"
   },
   "engines": {
     "node": ">=22"

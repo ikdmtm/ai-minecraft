@@ -77,14 +77,7 @@ describe('TacticalLayer', () => {
 
       const layer = new TacticalLayer(mockAdapter, shared, reflex, events);
       // 直接 runCycle を呼ぶためにアクセス
-      layer.start();
-
-      // 最初のタイマー発火を待つ
-      await new Promise(r => setTimeout(r, 100));
-      // runCycle が非同期で実行されるので少し待つ
-      await waitFor(() => mockAdapter.call.mock.calls.length >= 1, 10_000);
-
-      layer.stop();
+      await runOnce(layer);
 
       expect(events.onCommentary).toHaveBeenCalledWith('よし、木を集めよう。');
       expect(shared.get().currentCommentary).toBe('よし、木を集めよう。');
@@ -100,10 +93,7 @@ describe('TacticalLayer', () => {
       }));
 
       const layer = new TacticalLayer(mockAdapter, shared, reflex, events);
-      layer.start();
-
-      await waitFor(() => mockAdapter.call.mock.calls.length >= 1, 10_000);
-      layer.stop();
+      await runOnce(layer);
 
       expect(shared.get().currentGoal).toBe('洞窟を探索する');
       expect(reflex.interruptCurrentAction).toHaveBeenCalled();
@@ -115,10 +105,7 @@ describe('TacticalLayer', () => {
       mockAdapter.call.mockRejectedValue(new Error('API error'));
 
       const layer = new TacticalLayer(mockAdapter, shared, reflex, events);
-      layer.start();
-
-      await waitFor(() => mockAdapter.call.mock.calls.length >= 1, 10_000);
-      layer.stop();
+      await runOnce(layer);
 
       expect(events.onCommentary).not.toHaveBeenCalled();
     }, 15_000);
@@ -128,10 +115,7 @@ describe('TacticalLayer', () => {
       mockAdapter.call.mockResolvedValue('not json at all');
 
       const layer = new TacticalLayer(mockAdapter, shared, reflex, events);
-      layer.start();
-
-      await waitFor(() => mockAdapter.call.mock.calls.length >= 1, 10_000);
-      layer.stop();
+      await runOnce(layer);
 
       expect(events.onCommentary).not.toHaveBeenCalled();
     }, 15_000);
@@ -147,10 +131,7 @@ describe('TacticalLayer', () => {
 
       const before = { ...shared.get().emotionalState };
       const layer = new TacticalLayer(mockAdapter, shared, reflex, events);
-      layer.start();
-
-      await waitFor(() => mockAdapter.call.mock.calls.length >= 1, 10_000);
-      layer.stop();
+      await runOnce(layer);
 
       const after = shared.get().emotionalState;
       expect(after.valence).toBeLessThan(before.valence);
@@ -162,10 +143,7 @@ describe('TacticalLayer', () => {
       mockAdapter.call.mockResolvedValue('```json\n{"goal_adjustment":null,"commentary":"テスト","threat_assessment":"safe","emotion_shift":null}\n```');
 
       const layer = new TacticalLayer(mockAdapter, shared, reflex, events);
-      layer.start();
-
-      await waitFor(() => mockAdapter.call.mock.calls.length >= 1, 10_000);
-      layer.stop();
+      await runOnce(layer);
 
       expect(events.onCommentary).toHaveBeenCalledWith('テスト');
     }, 15_000);
@@ -179,10 +157,7 @@ describe('TacticalLayer', () => {
       mockAdapter.call.mockResolvedValue('{}');
 
       const layer = new TacticalLayer(mockAdapter, shared, reflex, events);
-      layer.start();
-
-      await waitFor(() => mockAdapter.call.mock.calls.length >= 1, 10_000);
-      layer.stop();
+      await runOnce(layer);
 
       const userMsg = mockAdapter.call.mock.calls[0][1];
       const parsed = JSON.parse(userMsg);
@@ -194,14 +169,9 @@ describe('TacticalLayer', () => {
   });
 });
 
-function waitFor(predicate: () => boolean, timeoutMs: number): Promise<void> {
-  return new Promise((resolve, reject) => {
-    const start = Date.now();
-    const check = () => {
-      if (predicate()) return resolve();
-      if (Date.now() - start > timeoutMs) return reject(new Error('waitFor timeout'));
-      setTimeout(check, 50);
-    };
-    check();
-  });
+async function runOnce(layer: TacticalLayer): Promise<void> {
+  // Test one cycle without waiting 4-5 real seconds; start/stop timers are covered separately.
+  const cycle = layer as unknown as { running: boolean; runCycle: () => Promise<void> };
+  cycle.running = true;
+  try { await cycle.runCycle(); } finally { layer.stop(); }
 }

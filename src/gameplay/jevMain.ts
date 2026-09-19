@@ -181,7 +181,9 @@ function startStatusLogging(): void {
     const executiveState = orchestrator.getExecutiveWorldState();
 
     if (runtime) {
-      const alert = progressMonitor.observe(runtime);
+      const intentionalWait = executiveState?.activeTask.status === 'running' && executiveState.activeTask.detail === 'waiting_for_condition';
+      if (intentionalWait) progressMonitor.reset();
+      const alert = intentionalWait ? null : progressMonitor.observe(runtime);
       if (alert) {
         shared.pushEvent({ type: 'gameplay_no_progress', detail: alert.detail, importance: 'high' });
         logEvent('gameplay_no_progress', {
@@ -209,6 +211,9 @@ function startStatusLogging(): void {
       task: executiveState?.activeTask ?? null,
       skill: jevState?.currentSkill ?? null,
       semantic_revision: executiveState?.revision ?? null,
+      memory_world_id: executiveState?.autonomy?.worldId ?? null,
+      learned_procedures: (executiveState?.autonomy?.learnedProcedures as unknown[] | undefined)?.length ?? 0,
+      open_window: executiveState?.autonomy?.window ?? null,
       semantic_target_counts: countSemanticTargetKinds(executiveState?.targets ?? []),
       semantic_targets: executiveState?.targets.slice(0, 12) ?? [],
       threat_level: state.threatLevel,

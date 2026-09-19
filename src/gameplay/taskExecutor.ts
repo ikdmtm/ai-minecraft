@@ -1,25 +1,21 @@
 import type mineflayer from 'mineflayer';
+import { Vec3 } from 'vec3';
 import type { SharedStateBus } from '../cognitive/sharedState.js';
 import { SemanticWorldModel } from './semanticWorldModel.js';
 import { SkillExecutor } from './skillExecutor.js';
 import type { WorldSensor } from './worldSensor.js';
-import type {
-  ExecutiveActionCapability,
-  ExecutiveDecision,
-  ExecutiveTaskSnapshot,
-  TaskExecutionResult,
-} from './executiveTypes.js';
-import type {
-  JevWorldState,
-  TypedGameplayDecision,
-  WorldCandidate,
-} from './typedActions.js';
+import type { ExecutiveActionCapability, ExecutiveDecision, ExecutiveTaskSnapshot, TaskExecutionResult } from './executiveTypes.js';
 import type { WorldMemory } from './worldMemory.js';
+import { ExperienceMemory, bindProcedureStep } from './experienceMemory.js';
+import { parseOperation, inventorySignature, windowSignature, windowSnapshot, type PrimitiveOperation } from './primitiveOperations.js';
 
 export class TaskExecutor {
   private sequence = 0;
-  private current: ExecutiveTaskSnapshot = idleTask();
-
+  private epoch = 0;
+  private stopped = false;
+  private current: ExecutiveTaskSnapshot = {
+    id: 0, task: 'NONE', targetId: null, status: 'idle', startedAt: null, updatedAt: Date.now(), detail: '', progress: {},
+  };
   constructor(
     private readonly bot: mineflayer.Bot,
     private readonly shared: SharedStateBus,
@@ -27,577 +23,171 @@ export class TaskExecutor {
     private readonly sensor: WorldSensor,
     private readonly semantic: SemanticWorldModel,
     private readonly memory: WorldMemory,
+    private readonly experience: ExperienceMemory = new ExperienceMemory(),
   ) {}
-
-  snapshot(): ExecutiveTaskSnapshot {
-    return {
-      ...this.current,
-      progress: { ...this.current.progress },
-    };
-  }
-
+  snapshot(): ExecutiveTaskSnapshot { return { ...this.current, progress: { ...this.current.progress } }; }
   async execute(decision: ExecutiveDecision): Promise<TaskExecutionResult> {
-    if (decision.task === 'CONTINUE_TASK' && this.current.status !== 'running') {
-      return { status: 'failed', detail: 'no_running_task_to_continue' };
-    }
-
-    const taskId = ++this.sequence;
-    const startedGoal = this.shared.get().currentGoal;
-    this.current = {
-      id: taskId,
-      task: decision.task,
-      targetId: decision.targetId ?? null,
-      status: 'running',
-      startedAt: Date.now(),
-      updatedAt: Date.now(),
-      detail: '',
-      progress: {},
+    if (this.stopped) return { status: 'interrupted', detail: 'runtime_stopped' };
+    if (this.current.status === 'running') return { status: 'failed', detail: 'task_already_running' };
+    const token = ++this.epoch;
+    this.current = { id: ++this.sequence, task: decision.task, targetId: decision.targetId ?? null,
+      status: 'running', startedAt: Date.now(), updatedAt: Date.now(), detail: '', progress: {} };
+    this.log('task_started', { task_id: this.current.id, task: decision.task,
+      affordance_id: decision.capabilityId ?? null, operation: decision.operation ?? null,
+      reason: decision.reason ?? null, based_on_revision: decision.basedOnRevision });
+    const check = () => {
+      if (this.stopped || token !== this.epoch) throw new Error('task_replan:cancelled');
     };
-
-    this.log('task_started', {
-      task_id: taskId,
-      task: decision.task,
-      target_id: decision.targetId ?? null,
-      affordance_id: decision.capabilityId ?? null,
-      source: decision.source,
-      confidence: decision.confidence,
-      based_on_revision: decision.basedOnRevision,
-    });
-
-    let affordance: ExecutiveActionCapability | undefined;
-    let learningBefore: LearningSnapshot | undefined;
     try {
-      let detail = '';
+      check(); let detail: string;
       switch (decision.task) {
         case 'EXECUTE_AFFORDANCE': {
-          if (!decision.capabilityId) throw new Error('affordance_missing');
           const state = this.semantic.capture(this.snapshot());
-          affordance = state.capabilities.actions.find(action => action.id === decision.capabilityId);
-          if (!affordance) throw new Error(`affordance_unavailable:${decision.capabilityId}`);
-          learningBefore = captureLearningSnapshot(this.bot);
-          detail = await this.executeAffordance(affordance, startedGoal);
-          this.rememberWorldOutcome(affordance);
-          const learningAfter = captureLearningSnapshot(this.bot);
-          this.memory.recordProcedureOutcome({
-            key: procedureKey(affordance),
-            label: procedureLabel(affordance),
-            success: true,
-            detail: 'success',
-            metadata: {
-              ...procedureMetadata(affordance),
-              observedEffect: summarizeEffect(learningBefore, learningAfter),
-            },
-          });
+          const action = state.capabilities.actions.find(a => a.id === decision.capabilityId);
+          if (!action) throw new Error('affordance_unavailable');
+          detail = (await this.operate(affordanceOperation(action), check)).detail;
           break;
         }
-        case 'WAIT':
-          await delay(500);
-          detail = 'waited';
+        case 'EXECUTE_OPERATION': detail = (await this.operate(parseOperation(decision.operation), check)).detail; break;
+        case 'LOOKUP_KNOWLEDGE': {
+          this.semantic.lookupKnowledge(decision.knowledgeQuery ?? '', decision.knowledgeOffset ?? 0);
+          detail = 'knowledge_query_completed'; break;
+        }
+        case 'SAVE_PROCEDURE': {
+          const procedure = this.experience.save(decision.procedureName ?? '', decision.evidenceIds ?? []);
+          detail = `procedure_saved:${procedure.id}:candidate`;
           break;
-        case 'CONTINUE_TASK':
-          detail = 'continued';
-          break;
+        }
+        case 'RUN_PROCEDURE': {
+          const procedure = this.experience.get(decision.procedureId ?? '');
+          if (!procedure) throw new Error('procedure_not_found');
+          if (procedure.version !== this.bot.version || procedure.dimension !== String(this.bot.game.dimension)) throw new Error('procedure_environment_mismatch');
+          const anchor = this.bot.entity.position.floored(), bindings = new Map<string, number>();
+          const deadline = Date.now() + 60000, startedGoal = this.shared.get().currentGoal;
+          try {
+            for (const step of procedure.steps) {
+              check();
+              if (this.shared.get().currentGoal !== startedGoal || Date.now() >= deadline) throw new Error('task_replan:procedure_boundary_changed');
+              const op = bindProcedureStep(step, this.bot, anchor, bindings);
+              const outcome = await this.operate(op, check, Math.max(100, deadline - Date.now()));
+              if (!outcome.verified) throw new Error('procedure_step_effect_unverified');
+            }
+            this.experience.recordReplay(procedure.id, true);
+          } catch (error) {
+            if (!(error instanceof Error && error.message.startsWith('task_replan:'))) this.experience.recordReplay(procedure.id, false);
+            throw error;
+          }
+          detail = `procedure_replayed:${procedure.id}`; break;
+        }
+        case 'WAIT': detail = (await this.operate({ action: 'WAIT', durationMs: 3000, until: 'timeout' }, check)).detail; break;
+        default: throw new Error('unsupported_executive_task');
       }
-
-      this.finish('succeeded', detail);
-      return { status: 'succeeded', detail };
+      check(); this.finish('succeeded', detail); return { status: 'succeeded', detail };
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      if (affordance) {
-        this.memory.recordProcedureOutcome({
-          key: procedureKey(affordance),
-          label: procedureLabel(affordance),
-          success: false,
-          detail: sanitizeProcedureDetail(message, affordance),
-          metadata: {
-            ...procedureMetadata(affordance),
-            observedEffect: learningBefore
-              ? summarizeEffect(learningBefore, captureLearningSnapshot(this.bot))
-              : 'unknown',
-          },
-        });
-      }
-      const status = message.startsWith('task_replan:') ? 'interrupted' : 'failed';
-      this.finish(status, message);
-      return { status, detail: message };
+      const detail = error instanceof Error ? error.message : String(error);
+      const status = detail.startsWith('task_replan:') || this.stopped || token !== this.epoch ? 'interrupted' : 'failed';
+      if (token === this.epoch) this.finish(status, detail);
+      return { status, detail };
     }
   }
-
   stop(): void {
-    if (this.current.status === 'running') {
-      this.finish('interrupted', 'runtime_stop');
-    }
+    this.stopped = true; this.epoch++; this.primitive.stop();
+    if (this.current.status === 'running') this.finish('interrupted', 'runtime_stop');
   }
-
-  private async executeAffordance(
-    affordance: ExecutiveActionCapability,
-    startedGoal: string,
-  ): Promise<string> {
-    this.update('executing_affordance', {
-      affordance: affordance.id,
-      kind: affordance.kind,
-      item: affordance.item ?? null,
-      target: affordance.targetId ?? null,
-    });
-
-    switch (affordance.kind) {
-      case 'move_to': {
-        if (!affordance.position) throw new Error('move_affordance_missing_position');
-        await this.requirePrimitiveSuccess(await this.runPrimitive({
-          action: 'NAVIGATE',
-          targetPosition: affordance.position,
-          confidence: 1,
-          source: 'task',
-          reason: `affordance:${affordance.id}`,
-        }, 30_000), affordance);
-        break;
+  private async operate(op: PrimitiveOperation, check: () => void, timeout = 70000): Promise<{ detail: string; verified: boolean }> {
+    check();
+    const before = observation(this.bot, op);
+    const win = windowSnapshot(this.bot);
+    const origin = { x: this.bot.entity.position.x, y: this.bot.entity.position.y, z: this.bot.entity.position.z };
+    const blockName = op.position ? this.bot.blockAt(new Vec3(op.position.x, op.position.y, op.position.z))?.name : undefined;
+    const entityName = op.entityId != null ? this.bot.entities[op.entityId]?.name : undefined;
+    const worldId = this.memory.getWorldId();
+    let hurt = false;
+    const hurtListener = (entity: any) => { if (entity.id === op.entityId) hurt = true; };
+    this.bot.on('entityHurt', hurtListener);
+    this.current.detail = op.action === 'WAIT' ? 'waiting_for_condition' : `operation:${op.action}`;
+    this.current.progress = { operation: op.action, condition: op.until ?? null };
+    let status: 'succeeded' | 'failed' | 'interrupted' = 'failed', detail = '', verified = false;
+    try {
+      const result = await this.primitive.runAndWait({ action: 'OPERATE', operation: op,
+        confidence: 1, source: 'task', reason: `operation:${op.action}` }, this.sensor.capture(this.primitive.snapshot()), 'normal', timeout);
+      check();
+      if (result.action !== 'OPERATE' || result.status === 'interrupted') throw new Error(`task_replan:operation_interrupted:${result.detail}`);
+      if (result.status !== 'succeeded') throw new Error(`operation_failed:${result.detail}`);
+      const after = observation(this.bot, op);
+      verified = verifiedEffect(op, before, after, hurt, result.detail);
+      status = 'succeeded'; detail = `${op.action}:${result.detail}:${verified ? 'effect_observed' : 'no_effect_confirmed'}`;
+      if (verified && op.action === 'PLACE' && op.position && op.item) {
+        this.memory.observe({ kind: 'placed_block', key: `${op.position.x}:${op.position.y}:${op.position.z}`, label: op.item,
+          position: op.position, scope: 'world', retention: 'stable', confidence: 1, metadata: { source: 'verified_self_action' } });
       }
-
-      case 'break_block': {
-        if (!affordance.blockTargetId || !affordance.position) {
-          throw new Error('break_affordance_missing_target');
-        }
-        const raw = this.capturePrimitiveWorld();
-        const blockName = stringSpec(affordance, 'blockName') ?? 'block';
-        const candidate: WorldCandidate = {
-          id: affordance.blockTargetId,
-          kind: 'block',
-          name: blockName,
-          distance: round1(this.bot.entity.position.distanceTo(affordance.position as any)),
-          position: { ...affordance.position },
-        };
-        if (!raw.blockCandidates.some(entry => entry.id === candidate.id)) {
-          raw.blockCandidates.unshift(candidate);
-        }
-        await this.requirePrimitiveSuccess(await this.runPrimitive({
-          action: 'MINE',
-          blockTargetId: affordance.blockTargetId,
-          confidence: 1,
-          source: 'task',
-          reason: `affordance:${affordance.id}`,
-        }, 25_000, raw), affordance);
-        break;
-      }
-
-      case 'attack_entity': {
-        if (!affordance.entityTargetId || !affordance.position) {
-          throw new Error('attack_affordance_missing_target');
-        }
-        const raw = this.capturePrimitiveWorld();
-        const candidate: WorldCandidate = {
-          id: affordance.entityTargetId,
-          kind: 'entity',
-          name: stringSpec(affordance, 'entityName') ?? 'entity',
-          distance: round1(this.bot.entity.position.distanceTo(affordance.position as any)),
-          position: { ...affordance.position },
-          hostile: Boolean(affordance.preconditions.hostile),
-        };
-        if (!raw.entityCandidates.some(entry => entry.id === candidate.id)) {
-          raw.entityCandidates.unshift(candidate);
-        }
-        await this.requirePrimitiveSuccess(await this.runPrimitive({
-          action: 'ATTACK',
-          entityTargetId: affordance.entityTargetId,
-          confidence: 1,
-          source: 'task',
-          reason: `affordance:${affordance.id}`,
-        }, 20_000, raw), affordance);
-        break;
-      }
-
-      case 'collect_drop': {
-        if (!affordance.position) throw new Error('collect_affordance_missing_position');
-        await this.requirePrimitiveSuccess(await this.runPrimitive({
-          action: 'NAVIGATE',
-          targetPosition: affordance.position,
-          confidence: 1,
-          source: 'task',
-          reason: `affordance:${affordance.id}`,
-        }, 15_000), affordance);
-        await delay(250);
-        break;
-      }
-
-      case 'use_item': {
-        if (!affordance.item) throw new Error('use_affordance_missing_item');
-        await this.requirePrimitiveSuccess(await this.runPrimitive({
-          action: 'USE_ITEM',
-          useItem: affordance.item,
-          confidence: 1,
-          source: 'task',
-          reason: `affordance:${affordance.id}`,
-        }, 20_000), affordance);
-        break;
-      }
-
-      case 'place_item': {
-        if (!affordance.item) throw new Error('place_affordance_missing_item');
-        await this.requirePrimitiveSuccess(await this.runPrimitive({
-          action: 'PLACE_ITEM',
-          placeItem: affordance.item,
-          targetPosition: affordance.position,
-          confidence: 1,
-          source: 'task',
-          reason: `affordance:${affordance.id}`,
-        }, 20_000), affordance);
-        break;
-      }
-
-      case 'craft_recipe': {
-        if (!affordance.item) throw new Error('craft_affordance_missing_item');
-        await this.requirePrimitiveSuccess(await this.runPrimitive({
-          action: 'CRAFT',
-          craftItem: affordance.item,
-          confidence: 1,
-          source: 'task',
-          reason: `affordance:${affordance.id}`,
-        }, 30_000), affordance);
-        break;
-      }
-
-      case 'process_recipe': {
-        if (!affordance.item) throw new Error('process_affordance_missing_item');
-        await this.requirePrimitiveSuccess(await this.runPrimitive({
-          action: 'PROCESS_ITEM',
-          processItem: affordance.item,
-          targetPosition: affordance.position,
-          confidence: 1,
-          source: 'task',
-          reason: `affordance:${affordance.id}`,
-        }, 35_000), affordance);
-        break;
-      }
-
-      case 'interact_block': {
-        if (!affordance.position) throw new Error('interact_affordance_missing_position');
-        await this.requirePrimitiveSuccess(await this.runPrimitive({
-          action: 'INTERACT_BLOCK',
-          targetPosition: affordance.position,
-          confidence: 1,
-          source: 'task',
-          reason: `affordance:${affordance.id}`,
-        }, 20_000), affordance);
-        break;
-      }
-
-      case 'wait_condition':
-        await this.waitForCondition(affordance);
-        break;
-    }
-
-    this.safeCheckpoint(startedGoal, `affordance_completed:${affordance.kind}`);
-    return `affordance_executed:${affordance.id}`;
-  }
-
-  private async requirePrimitiveSuccess(
-    result: Awaited<ReturnType<SkillExecutor['runAndWait']>>,
-    affordance: ExecutiveActionCapability,
-  ): Promise<void> {
-    if (result.status === 'succeeded') return;
-    if (result.status === 'interrupted') {
-      throw new Error(`task_replan:affordance_interrupted:${affordance.id}:${result.detail}`);
-    }
-    throw new Error(`affordance_failed:${affordance.id}:${result.detail}`);
-  }
-
-  private async waitForCondition(affordance: ExecutiveActionCapability): Promise<void> {
-    const condition = stringSpec(affordance, 'condition');
-    if (condition !== 'daylight' && condition !== 'night') {
-      throw new Error(`unsupported_wait_condition:${condition ?? 'none'}`);
-    }
-
-    const deadline = Date.now() + 10 * 60_000;
-    while (Date.now() < deadline) {
-      const time = this.bot.time.timeOfDay;
-      const night = time >= 12500 && time < 23500;
-      if ((condition === 'daylight' && !night) || (condition === 'night' && night)) return;
-
-      const threat = this.shared.get().threatLevel;
-      if (threat === 'danger' || threat === 'critical') {
-        throw new Error(`task_replan:wait_interrupted_by_threat:${threat}`);
-      }
-
-      this.update('waiting_for_condition', {
-        affordance: affordance.id,
-        condition,
-        timeOfDay: time,
-      });
-      await delay(1_000);
-    }
-
-    throw new Error(`wait_condition_timeout:${condition}`);
-  }
-
-  private rememberWorldOutcome(affordance: ExecutiveActionCapability): void {
-    if (affordance.kind === 'place_item' && affordance.position && affordance.item) {
-      const p = affordance.position;
-      this.memory.observe({
-        kind: 'placed_block',
-        key: `${affordance.item}:${Math.floor(p.x)}:${Math.floor(p.y)}:${Math.floor(p.z)}`,
-        label: affordance.item,
-        position: { ...p },
-        scope: 'world',
-        retention: 'stable',
-        confidence: 1,
-        metadata: {
-          blockName: stringSpec(affordance, 'blockName') ?? affordance.item,
-          source: 'self_action',
-        },
-      });
-      return;
-    }
-
-    if (affordance.kind === 'break_block' && affordance.position) {
-      this.memory.markContradictedNear(
-        affordance.position,
-        1.5,
-        ['resource_site', 'placed_block'],
-        0.55,
-      );
-      return;
-    }
-
-    if (
-      affordance.kind === 'move_to' &&
-      affordance.targetId?.startsWith('memory_target:')
-    ) {
-      this.memory.reinforce(affordance.targetId.slice('memory_target:'.length), 0.08);
-      return;
-    }
-
-    if (
-      affordance.kind === 'attack_entity' &&
-      affordance.position &&
-      affordance.entityTargetId
-    ) {
-      const match = /^entity:(\d+)$/.exec(affordance.entityTargetId);
-      const entityStillExists = match ? Boolean(this.bot.entities[Number(match[1])]) : true;
-      if (!entityStillExists) {
-        this.memory.markContradictedNear(
-          affordance.position,
-          4,
-          ['entity_sighting'],
-          0.5,
-        );
-      }
-    }
-  }
-
-  private async runPrimitive(
-    decision: TypedGameplayDecision,
-    timeoutMs: number,
-    state?: JevWorldState,
-  ) {
-    const world = state ?? this.capturePrimitiveWorld();
-    const result = await this.primitive.runAndWait(decision, world, 'normal', timeoutMs);
-    this.log('task_primitive_result', {
-      task_id: this.current.id,
-      task: this.current.task,
-      primitive_action: decision.action,
-      primitive_status: result.status,
-      primitive_detail: result.detail,
-      primitive_target: result.targetId,
-    });
-    return result;
-  }
-
-  private capturePrimitiveWorld(): JevWorldState {
-    return this.sensor.capture(this.primitive.snapshot());
-  }
-
-  private safeCheckpoint(startedGoal: string, label: string): void {
-    this.current = {
-      ...this.current,
-      updatedAt: Date.now(),
-      detail: label,
-    };
-    this.log('task_checkpoint', {
-      task_id: this.current.id,
-      task: this.current.task,
-      checkpoint: label,
-      strategy_goal: this.shared.get().currentGoal,
-    });
-
-    const latestGoal = this.shared.get().currentGoal;
-    if (startedGoal && latestGoal && latestGoal !== startedGoal) {
-      this.log('task_strategy_updated', {
-        task_id: this.current.id,
-        task: this.current.task,
-        checkpoint: label,
-        previous_goal: startedGoal,
-        latest_goal: latestGoal,
-        handling: 'defer_until_task_boundary',
+      if (verified && op.action === 'BREAK' && op.position) this.memory.markContradictedNear(op.position, 0.1, ['placed_block'], 1);
+      return { detail, verified };
+    } catch (error) {
+      detail = error instanceof Error ? error.message : String(error);
+      status = detail.startsWith('task_replan:') ? 'interrupted' : 'failed'; throw error;
+    } finally {
+      this.bot.removeListener('entityHurt', hurtListener);
+      const after = observation(this.bot, op);
+      const effect = JSON.stringify({ hp: after.hp - before.hp, hunger: after.hunger - before.hunger,
+        inventoryBefore: before.inventory, inventoryAfter: after.inventory,
+        blockBefore: before.block, blockAfter: after.block, targetHurtObserved: hurt, windowChanged: before.window !== after.window });
+      this.experience.append({ worldId, version: this.bot.version, dimension: String(this.bot.game.dimension),
+        operation: op, status, verified, detail, effect, origin, blockName, entityName, window: win });
+      // A safety interruption is not evidence that the operation itself failed.
+      if (status !== 'interrupted') this.memory.recordProcedureOutcome({
+        key: [this.bot.version, String(this.bot.game.dimension), op.action, op.item ?? '', blockName ?? '', entityName ?? ''].join('|'),
+        label: `${op.action} ${op.item ?? blockName ?? entityName ?? ''}`.trim(),
+        success: status === 'succeeded' && verified,
+        detail: status === 'succeeded' ? (verified ? 'effect_observed' : 'effect_not_confirmed') : 'operation_failed',
+        metadata: { action: op.action, item: op.item ?? null, observedEffect: effect.slice(0, 2000) },
       });
     }
   }
-
-  private update(detail: string, progress: Record<string, number | string | boolean | null>): void {
-    this.current = {
-      ...this.current,
-      updatedAt: Date.now(),
-      detail,
-      progress: {
-        ...this.current.progress,
-        ...progress,
-      },
-    };
+  private finish(status: 'succeeded' | 'failed' | 'interrupted', detail: string): void {
+    this.current = { ...this.current, status, detail, updatedAt: Date.now() };
+    this.log(`task_${status}`, { task_id: this.current.id, task: this.current.task, detail,
+      duration_ms: Date.now() - (this.current.startedAt ?? Date.now()) });
+    this.shared.pushEvent({ type: `task_${status}`, detail: `${this.current.task}: ${detail}`, importance: status === 'failed' ? 'high' : 'medium' });
   }
+  private log(kind: string, payload: Record<string, unknown>): void { console.log(JSON.stringify({ ts: new Date().toISOString(), kind, ...payload })); }
+}
 
-  private finish(
-    status: 'succeeded' | 'failed' | 'interrupted',
-    detail: string,
-  ): void {
-    this.current = {
-      ...this.current,
-      status,
-      updatedAt: Date.now(),
-      detail,
-    };
-    this.log(`task_${status}`, {
-      task_id: this.current.id,
-      task: this.current.task,
-      target_id: this.current.targetId,
-      detail,
-      duration_ms: this.current.startedAt ? Date.now() - this.current.startedAt : null,
-      progress: this.current.progress,
-    });
-    this.shared.pushEvent({
-      type: `task_${status}`,
-      detail: `${this.current.task}: ${detail}`,
-      importance: status === 'failed' ? 'high' : 'medium',
-    });
-  }
-
-  private log(kind: string, payload: Record<string, unknown>): void {
-    console.log(JSON.stringify({
-      ts: new Date().toISOString(),
-      kind,
-      ...payload,
-    }));
+function observation(bot: mineflayer.Bot, op: PrimitiveOperation) {
+  const hp = bot.health, hunger = bot.food, inventory = inventorySignature(bot), window = windowSignature(bot);
+  const b = op.position ? bot.blockAt(new Vec3(op.position.x, op.position.y, op.position.z)) : null;
+  const block = b ? `${b.name}:${b.stateId}` : null;
+  const entity = op.entityId != null ? bot.entities[op.entityId] : null;
+  return { hp, hunger, inventory, window, block, position: { x: bot.entity.position.x, y: bot.entity.position.y, z: bot.entity.position.z },
+    yaw: bot.entity.yaw, pitch: bot.entity.pitch, held: bot.heldItem?.name, sleeping: bot.isSleeping, signature: JSON.stringify({ hp, hunger, inventory, window, block,
+    position: bot.entity.position, yaw: bot.entity.yaw, pitch: bot.entity.pitch, heldItem: bot.heldItem?.name,
+    entityMetadata: entity?.metadata, entityPresent: Boolean(entity), sleeping: bot.isSleeping }) };
+}
+function affordanceOperation(a: ExecutiveActionCapability): PrimitiveOperation {
+  switch (a.kind) {
+    case 'move_to': case 'collect_drop': return parseOperation({ action: 'MOVE', position: a.position });
+    case 'break_block': return parseOperation({ action: 'BREAK', position: a.position });
+    case 'attack_entity': return parseOperation({ action: 'ATTACK', entityId: Number(a.entityTargetId?.split(':')[1]) });
+    case 'use_item': return parseOperation({ action: 'USE', item: a.item });
+    case 'place_item': return parseOperation({ action: 'PLACE', item: a.item, position: a.position });
+    case 'craft_recipe': return parseOperation({ action: 'CRAFT', item: a.item });
+    case 'interact_block': return parseOperation({ action: 'INTERACT_BLOCK', position: a.position });
+    case 'wait_condition': return parseOperation({ action: 'WAIT', durationMs: 60000, until: a.specification.condition });
+    default: throw new Error('affordance_requires_explicit_open_and_transfer');
   }
 }
 
-function idleTask(): ExecutiveTaskSnapshot {
-  return {
-    id: 0,
-    task: 'NONE',
-    targetId: null,
-    status: 'idle',
-    startedAt: null,
-    updatedAt: Date.now(),
-    detail: '',
-    progress: {},
-  };
-}
-
-function procedureLabel(affordance: ExecutiveActionCapability): string {
-  const parts = [affordance.kind];
-  if (affordance.item) parts.push(`item=${affordance.item}`);
-  if (affordance.outputItem) parts.push(`output=${affordance.outputItem}`);
-  if (affordance.station) parts.push(`station=${affordance.station}`);
-  const blockName = stringSpec(affordance, 'blockName');
-  const entityName = stringSpec(affordance, 'entityName');
-  const targetKind = stringSpec(affordance, 'targetKind');
-  if (blockName) parts.push(`block=${blockName}`);
-  if (entityName) parts.push(`entity=${entityName}`);
-  if (targetKind) parts.push(`target=${targetKind}`);
-  return parts.join(' ');
-}
-
-function sanitizeProcedureDetail(
-  message: string,
-  affordance: ExecutiveActionCapability,
-): string {
-  return message
-    .replaceAll(affordance.id, '<affordance>')
-    .replace(/-?\d+(?:\.\d+)?,-?\d+(?:\.\d+)?,-?\d+(?:\.\d+)?/g, '<position>')
-    .slice(0, 240);
-}
-
-function procedureKey(affordance: ExecutiveActionCapability): string {
-  return [
-    affordance.kind,
-    affordance.item ?? '',
-    affordance.outputItem ?? '',
-    affordance.station ?? '',
-    stringSpec(affordance, 'blockName') ?? '',
-    stringSpec(affordance, 'entityName') ?? '',
-    stringSpec(affordance, 'targetKind') ?? '',
-  ].join('|');
-}
-
-function procedureMetadata(
-  affordance: ExecutiveActionCapability,
-): Record<string, string | number | boolean | null> {
-  return {
-    kind: affordance.kind,
-    item: affordance.item ?? null,
-    outputItem: affordance.outputItem ?? null,
-    station: affordance.station ?? null,
-    blockName: stringSpec(affordance, 'blockName'),
-    entityName: stringSpec(affordance, 'entityName'),
-  };
-}
-
-function stringSpec(affordance: ExecutiveActionCapability, key: string): string | null {
-  const value = affordance.specification[key];
-  return typeof value === 'string' && value ? value : null;
-}
-
-interface LearningSnapshot {
-  hp: number;
-  hunger: number;
-  position: { x: number; y: number; z: number };
-  inventory: Record<string, number>;
-}
-
-function captureLearningSnapshot(bot: mineflayer.Bot): LearningSnapshot {
-  const inventory: Record<string, number> = {};
-  for (const item of bot.inventory.items()) {
-    inventory[item.name] = (inventory[item.name] ?? 0) + item.count;
+function verifiedEffect(op: PrimitiveOperation, before: ReturnType<typeof observation>, after: ReturnType<typeof observation>, hurt: boolean, detail: string): boolean {
+  switch (op.action) {
+    case 'ATTACK': return hurt;
+    case 'MOVE': return Math.hypot(after.position.x-before.position.x, after.position.y-before.position.y, after.position.z-before.position.z) > 0.1;
+    case 'LOOK': return Math.abs(after.yaw-before.yaw) + Math.abs(after.pitch-before.pitch) > 0.0001;
+    case 'EQUIP': return before.held !== after.held;
+    case 'BREAK': case 'PLACE': return before.block !== after.block;
+    case 'OPEN': case 'CLOSE': case 'TRANSFER': return before.window !== after.window;
+    case 'CRAFT': return before.inventory !== after.inventory;
+    case 'USE': return before.inventory !== after.inventory || before.hunger !== after.hunger || before.block !== after.block;
+    case 'INTERACT_BLOCK': case 'INTERACT_ENTITY': return before.block !== after.block || before.window !== after.window || before.sleeping !== after.sleeping;
+    case 'WAIT': return detail === 'wait_elapsed' || detail.startsWith('condition_satisfied:');
   }
-  return {
-    hp: bot.health,
-    hunger: bot.food,
-    position: {
-      x: bot.entity.position.x,
-      y: bot.entity.position.y,
-      z: bot.entity.position.z,
-    },
-    inventory,
-  };
-}
-
-function summarizeEffect(before: LearningSnapshot, after: LearningSnapshot): string {
-  const changes: string[] = [];
-  const hpDelta = after.hp - before.hp;
-  const hungerDelta = after.hunger - before.hunger;
-  if (hpDelta !== 0) changes.push(`hp:${signed(hpDelta)}`);
-  if (hungerDelta !== 0) changes.push(`hunger:${signed(hungerDelta)}`);
-
-  const names = new Set([...Object.keys(before.inventory), ...Object.keys(after.inventory)]);
-  for (const name of [...names].sort()) {
-    const delta = (after.inventory[name] ?? 0) - (before.inventory[name] ?? 0);
-    if (delta !== 0) changes.push(`inventory:${name}:${signed(delta)}`);
-  }
-
-  const moved = Math.hypot(
-    after.position.x - before.position.x,
-    after.position.y - before.position.y,
-    after.position.z - before.position.z,
-  );
-  if (moved >= 0.5) changes.push(`moved:${Math.round(moved * 10) / 10}`);
-  return changes.length > 0 ? changes.join(',') : 'no_observable_state_change';
-}
-
-function signed(value: number): string {
-  return value > 0 ? `+${value}` : String(value);
-}
-
-function round1(value: number): number {
-  return Math.round(value * 10) / 10;
-}
-
-function delay(ms: number): Promise<void> {
-  return new Promise(resolve => setTimeout(resolve, ms));
 }

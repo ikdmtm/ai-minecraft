@@ -87,6 +87,7 @@ export class StrategicPlanner {
             active_task: state.activeTask,
             semantic_targets: state.targets.slice(0, 16),
             memory: state.memory,
+            autonomy: state.autonomy,
             recent_events: state.recentEvents,
           }),
           max_output_tokens: 600,

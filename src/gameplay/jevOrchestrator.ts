@@ -1,4 +1,8 @@
+import { ExperienceMemory } from './experienceMemory.js';
+import { readFileSync, writeFileSync, mkdirSync } from 'fs';
+import { resolve, dirname } from 'path';
 import mineflayer from 'mineflayer';
+import { attachClientReadiness } from './clientReadiness.js';
 import { pathfinder } from 'mineflayer-pathfinder';
 import { SharedStateBus } from '../cognitive/sharedState.js';
 import type { RecentEvent } from '../types/gameState.js';
@@ -53,6 +57,7 @@ export class CognitiveOrchestrator {
   private readonly shared = new SharedStateBus();
   private readonly provenance = new WorldProvenance();
   private readonly memory: WorldMemory;
+  private readonly experience: ExperienceMemory;
   private bot: mineflayer.Bot | null = null;
   private sensor: WorldSensor | null = null;
   private primitive: SkillExecutor | null = null;
@@ -67,6 +72,12 @@ export class CognitiveOrchestrator {
 
   constructor(private readonly config: CognitiveOrchestratorConfig) {
     this.memory = new WorldMemory(config.dbPath);
+    this.experience = new ExperienceMemory(config.dbPath);
+    let worldId = process.env.GAMEPLAY_WORLD_ID?.trim();
+    if (!worldId) {
+      try { worldId = readFileSync(process.env.GAMEPLAY_WORLD_ID_FILE || resolve(process.env.MC_DEV_DIR || '.minecraft-dev', 'server/world/.ai-world-id'), 'utf8').trim(); } catch { /* Existing DB world ID survives restarts. */ }
+    }
+    if (worldId) this.memory.setWorldId(worldId);
   }
 
   getShared(): SharedStateBus {
@@ -134,12 +145,13 @@ export class CognitiveOrchestrator {
       username: this.config.botUsername,
       hideErrors: false,
     });
+    attachClientReadiness(this.bot);
     this.bot.loadPlugin(pathfinder);
     await waitForSpawn(this.bot);
 
     this.primitive = new SkillExecutor(this.bot, this.shared, this.provenance);
     this.sensor = new WorldSensor(this.bot, this.shared, this.provenance);
-    this.semantic = new SemanticWorldModel(this.bot, this.shared, this.provenance, this.memory);
+    this.semantic = new SemanticWorldModel(this.bot, this.shared, this.provenance, this.memory, this.experience);
     this.taskExecutor = new TaskExecutor(
       this.bot,
       this.shared,
@@ -147,6 +159,7 @@ export class CognitiveOrchestrator {
       this.sensor,
       this.semantic,
       this.memory,
+      this.experience,
     );
     this.safety = new SafetyKernel(this.bot, this.shared, this.primitive);
     this.executivePolicy = new ExecutivePolicy({
@@ -200,13 +213,21 @@ export class CognitiveOrchestrator {
 
   destroy(): void {
     this.stop();
+    // Connections stay available to in-flight operation finalizers until the process exits.
   }
 
   nextGeneration(): void {
+    if (this.running) throw new Error('stop_runtime_before_changing_world');
     this.generation++;
     this.shared.reset(this.generation);
     this.provenance.clear();
     const worldId = this.memory.startNewWorld();
+    // Keep explicit lifecycle rotation and the local world's persistent marker consistent.
+    const marker = process.env.GAMEPLAY_WORLD_ID_FILE || resolve(process.env.MC_DEV_DIR || '.minecraft-dev', 'server/world/.ai-world-id');
+    if (!process.env.GAMEPLAY_WORLD_ID) {
+      mkdirSync(dirname(marker), { recursive: true });
+      writeFileSync(marker, worldId + '\n');
+    }
     this.shared.pushEvent({
       type: 'memory_world_rotated',
       detail: `generation=${this.generation} world_id=${worldId} global_memory=preserved`,
@@ -275,6 +296,9 @@ export class CognitiveOrchestrator {
   private setupBotEvents(events: CognitiveEvents): void {
     const bot = this.bot!;
     bot.on('death', () => {
+      this.memory.observe({ kind: 'life_event', key: `death:${this.memory.getWorldId()}`,
+        label: 'A previous life ended', scope: 'global', retention: 'stable', confidence: 1,
+        metadata: { sourceWorldId: this.memory.getWorldId(), cause: 'unknown', recentOperation: this.taskExecutor?.snapshot().detail ?? '' } });
       this.shared.pushEvent({ type: 'death', detail: 'mineflayer death event', importance: 'critical' });
       events.onDeath('mineflayer death event');
     });

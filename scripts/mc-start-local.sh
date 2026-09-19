@@ -16,6 +16,24 @@ if [[ ! -f "$MC_DIR/server.jar" ]]; then
   exit 1
 fi
 
+# World identity follows the actual world directory, not its seed or a process generation.
+WORLD_ID_FILE="${GAMEPLAY_WORLD_ID_FILE:-$MC_DIR/world/.ai-world-id}"
+mkdir -p "$(dirname "$WORLD_ID_FILE")"
+if [[ ! -s "$WORLD_ID_FILE" ]]; then
+  if command -v python3 >/dev/null 2>&1; then
+    python3 -c 'import uuid; print(uuid.uuid4())' > "$WORLD_ID_FILE"
+  else
+    cat /proc/sys/kernel/random/uuid > "$WORLD_ID_FILE"
+  fi
+fi
+
+# Cached extraction is cheap on restarts. Missing Python does not silently invent recipe facts.
+if command -v python3 >/dev/null 2>&1; then
+  python3 "$ROOT_DIR/scripts/mc-export-knowledge.py" "$MC_DIR/server.jar" "${GAMEPLAY_KNOWLEDGE_FILE:-$ROOT_DIR/data/minecraft-knowledge.json}"
+else
+  echo "[mc:knowledge] python3 unavailable; registry-only knowledge." >&2
+fi
+
 if [[ -f "$PID_FILE" ]]; then
   PID="$(cat "$PID_FILE" 2>/dev/null || true)"
   if [[ -n "$PID" ]] && kill -0 "$PID" 2>/dev/null; then
