@@ -24,7 +24,14 @@ export class TaskExecutor {
     private readonly semantic: SemanticWorldModel,
     private readonly memory: WorldMemory,
     private readonly experience: ExperienceMemory = new ExperienceMemory(),
-  ) {}
+  ) {
+    this.log('run_context', { context: {
+      world_id: this.memory.getWorldId(), minecraft_version: this.bot.version ?? null,
+      registry_version: this.bot.registry?.version?.minecraftVersion ?? null,
+      dimension: this.bot.game?.dimension == null ? null : String(this.bot.game.dimension),
+      experience_session_id: this.experience.sessionId,
+    } });
+  }
   snapshot(): ExecutiveTaskSnapshot { return { ...this.current, progress: { ...this.current.progress } }; }
   async execute(decision: ExecutiveDecision): Promise<TaskExecutionResult> {
     if (this.stopped) return { status: 'interrupted', detail: 'runtime_stopped' };
@@ -34,6 +41,9 @@ export class TaskExecutor {
       status: 'running', startedAt: Date.now(), updatedAt: Date.now(), detail: '', progress: {} };
     this.log('task_started', { task_id: this.current.id, task: decision.task,
       affordance_id: decision.capabilityId ?? null, operation: decision.operation ?? null,
+      knowledge_query: decision.knowledgeQuery ?? null, knowledge_offset: decision.knowledgeOffset ?? null,
+      procedure_id: decision.procedureId ?? null, procedure_name: decision.procedureName ?? null,
+      evidence_ids: decision.evidenceIds ?? null,
       reason: decision.reason ?? null, based_on_revision: decision.basedOnRevision });
     const check = () => {
       if (this.stopped || token !== this.epoch) throw new Error('task_replan:cancelled');
@@ -132,8 +142,12 @@ export class TaskExecutor {
       const effect = JSON.stringify({ hp: after.hp - before.hp, hunger: after.hunger - before.hunger,
         inventoryBefore: before.inventory, inventoryAfter: after.inventory,
         blockBefore: before.block, blockAfter: after.block, targetHurtObserved: hurt, windowChanged: before.window !== after.window });
-      this.experience.append({ worldId, version: this.bot.version, dimension: String(this.bot.game.dimension),
+      const evidence = this.experience.append({ worldId, version: this.bot.version, dimension: String(this.bot.game.dimension),
         operation: op, status, verified, detail, effect, origin, blockName, entityName, window: win });
+      this.log('operation_evidence', { task_id: this.current.id, evidence_id: evidence.id,
+        experience_session_id: evidence.sessionId, evidence_sequence: evidence.sequence,
+        world_id: worldId, minecraft_version: this.bot.version, dimension: String(this.bot.game.dimension),
+        operation: op, status, effect_verified: verified, detail, effect });
       // A safety interruption is not evidence that the operation itself failed.
       if (status !== 'interrupted') this.memory.recordProcedureOutcome({
         key: [this.bot.version, String(this.bot.game.dimension), op.action, op.item ?? '', blockName ?? '', entityName ?? ''].join('|'),
