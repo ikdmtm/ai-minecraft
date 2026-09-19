@@ -1,8 +1,11 @@
 import type mineflayer from 'mineflayer';
 import type {
   ExecutiveCapabilitySnapshot,
+  ExecutiveActionCapability,
   SemanticTarget,
 } from './executiveTypes.js';
+
+const PROCESSING_TYPES = new Set(['furnace', 'smoker']);
 
 export class CapabilityRegistry {
   private craftCacheKey = '';
@@ -31,7 +34,6 @@ export class CapabilityRegistry {
       const resource = stringMeta(target, 'resource');
       const blockName = stringMeta(target, 'blockName');
       if (!resource || !blockName) continue;
-
       const entry = gatherByResource.get(resource) ?? {
         resource,
         targetIds: [],
@@ -45,6 +47,8 @@ export class CapabilityRegistry {
     const gather = [...gatherByResource.values()]
       .sort((a, b) => a.resource.localeCompare(b.resource))
       .slice(0, 40);
+    const craft = this.discoverCraftableItems(strategyText);
+    const recipes = this.discoverReachableRecipes(gather, strategyText);
 
     const entityActions = targets
       .filter(target => target.kind === 'entity')
@@ -58,9 +62,9 @@ export class CapabilityRegistry {
 
     return {
       gather,
-      craft: this.discoverCraftableItems(strategyText),
-      recipes: this.discoverReachableRecipes(gather, strategyText),
-      actions: this.discoverDynamicActions(targets),
+      craft,
+      recipes,
+      actions: this.discoverAffordances(targets, craft, recipes),
       entityActions,
       canExcavate: targets.some(target => target.kind === 'excavation_site'),
     };
@@ -85,10 +89,8 @@ export class CapabilityRegistry {
       item: string;
       requiresTable: boolean;
       recipeCount: number;
-      utility: ExecutiveCapabilitySnapshot['craft'][number]['utility'];
       owned: number;
-      strategyRelevant: boolean;
-      priority: number;
+      mentioned: boolean;
     }> = [];
 
     const itemsByName = this.bot.registry.itemsByName as Record<string, { id: number; name: string }>;
@@ -100,49 +102,24 @@ export class CapabilityRegistry {
         continue;
       }
       if (recipes.length === 0) continue;
-
       const readable = item.name.replace(/_/g, ' ');
-      const mentioned = strategy.includes(item.name.toLowerCase()) || strategy.includes(readable);
-      const utility = craftUtility(item.name, item as any);
-      const owned = inventoryCount(this.bot, item.name);
-      const strategyRelevant = isCraftStrategicallyRelevant(utility, item.name, strategy, mentioned);
-
-      // Do not flood the executive with every decorative/redstone variant just
-      // because it is technically craftable. Keep survival-relevant affordances
-      // and anything the strategy explicitly asks for.
-      if (!strategyRelevant) continue;
-
-      // Workstations/storage/sleep infrastructure should not be duplicated as
-      // busywork once one is already carried unless the strategy names it.
-      if (
-        owned > 0 &&
-        !mentioned &&
-        (utility === 'workstation' || utility === 'storage' || utility === 'bed')
-      ) {
-        continue;
-      }
-
       results.push({
         item: item.name,
         requiresTable: recipes.every(recipe => Boolean(recipe.requiresTable)),
         recipeCount: recipes.length,
-        utility,
-        owned,
-        strategyRelevant,
-        priority: (mentioned ? 1000 : 0) + craftUtilityPriority(utility),
+        owned: inventoryCount(this.bot, item.name),
+        mentioned: strategy.includes(item.name.toLowerCase()) || strategy.includes(readable),
       });
     }
 
     this.craftCache = results
-      .sort((a, b) => b.priority - a.priority || a.item.localeCompare(b.item))
-      .slice(0, 64)
-      .map(({ item, requiresTable, recipeCount, utility, owned, strategyRelevant }) => ({
+      .sort((a, b) => Number(b.mentioned) - Number(a.mentioned) || a.item.localeCompare(b.item))
+      .slice(0, 96)
+      .map(({ item, requiresTable, recipeCount, owned }) => ({
         item,
         requiresTable,
         recipeCount,
-        utility,
         owned,
-        strategyRelevant,
       }));
     this.craftCacheKey = cacheKey;
     return this.craftCache;
@@ -163,19 +140,14 @@ export class CapabilityRegistry {
       for (const recipe of graph) {
         if (recipe.ingredients.length === 0) continue;
         if (!recipe.ingredients.every(ingredient => reachable.has(ingredient.item))) continue;
-
         const existingDepth = reachable.get(recipe.item);
         if (existingDepth == null || depth < existingDepth) {
           reachable.set(recipe.item, depth);
           changed = true;
         }
-
         const known = discovered.get(recipe.item);
         if (!known || depth < known.reachableDepth) {
-          discovered.set(recipe.item, {
-            ...recipe,
-            reachableDepth: depth,
-          });
+          discovered.set(recipe.item, { ...recipe, reachableDepth: depth });
         }
       }
       if (!changed) break;
@@ -184,200 +156,272 @@ export class CapabilityRegistry {
     const strategy = strategyText.toLowerCase();
     return [...discovered.values()]
       .sort((a, b) => {
-        const aMentioned = strategy.includes(a.item) || strategy.includes(a.item.replace(/_/g, ' '));
-        const bMentioned = strategy.includes(b.item) || strategy.includes(b.item.replace(/_/g, ' '));
-        if (aMentioned !== bMentioned) return aMentioned ? -1 : 1;
+        const am = strategy.includes(a.item) || strategy.includes(a.item.replace(/_/g, ' '));
+        const bm = strategy.includes(b.item) || strategy.includes(b.item.replace(/_/g, ' '));
+        if (am !== bm) return am ? -1 : 1;
         return a.reachableDepth - b.reachableDepth || a.item.localeCompare(b.item);
       })
       .slice(0, 128);
   }
 
-  private discoverDynamicActions(
+  private discoverAffordances(
     targets: SemanticTarget[],
-  ): ExecutiveCapabilitySnapshot['actions'] {
-    const actions: ExecutiveCapabilitySnapshot['actions'] = [];
+    craft: ExecutiveCapabilitySnapshot['craft'],
+    recipes: ExecutiveCapabilitySnapshot['recipes'],
+  ): ExecutiveActionCapability[] {
+    const actions: ExecutiveActionCapability[] = [];
 
     for (const target of targets) {
-      if (target.kind !== 'entity' || !Boolean(target.metadata.foodAnimal)) continue;
-      const entity = stringMeta(target, 'entityName') ?? 'animal';
-      actions.push({
-        id: `hunt:${target.id}`,
-        kind: 'hunt_entity',
-        description: `Hunt observed ${entity} and collect nearby drops.`,
-        targetId: target.id,
-        utilityTags: ['food', 'survival', 'resource'],
-        preconditions: {
-          visible: true,
-          hostile: Boolean(target.metadata.hostile),
-          distance: target.distance,
-        },
-        expectedEffects: {
-          mayProduceFood: true,
-          entity: entity,
-        },
-      });
+      if (
+        target.distance > 1.5 &&
+        target.kind !== 'entity' &&
+        target.kind !== 'resource_source' &&
+        target.kind !== 'item_drop'
+      ) {
+        actions.push({
+          id: `move:${target.id}`,
+          kind: 'move_to',
+          description: `Move to semantic target ${target.id}.`,
+          targetId: target.id,
+          position: { ...target.position },
+          preconditions: {
+            distance: target.distance,
+            risk: target.risk,
+          },
+          specification: {
+            targetKind: target.kind,
+          },
+        });
+      }
+
+      if (target.kind === 'resource_source') {
+        const blockTargetId = stringMeta(target, 'blockTargetId');
+        const blockName = stringMeta(target, 'blockName');
+        if (blockTargetId && blockName) {
+          actions.push({
+            id: `break:${blockTargetId}`,
+            kind: 'break_block',
+            description: `Break visible harvestable block ${blockName}.`,
+            targetId: target.id,
+            blockTargetId,
+            position: { ...target.position },
+            preconditions: {
+              visible: true,
+              harvestableNow: Boolean(target.metadata.harvestableNow),
+              distance: target.distance,
+            },
+            specification: {
+              blockName,
+              declaredDrops: blockDropNamesAt(this.bot, target.position).join(','),
+            },
+          });
+        }
+      }
+
+      if (target.kind === 'entity') {
+        const entityTargetId = target.id;
+        const entityName = stringMeta(target, 'entityName') ?? 'unknown';
+        actions.push({
+          id: `attack:${entityTargetId}`,
+          kind: 'attack_entity',
+          description: `Attack currently observed entity ${entityName}.`,
+          targetId: target.id,
+          entityTargetId,
+          position: { ...target.position },
+          preconditions: {
+            distance: target.distance,
+            hostile: Boolean(target.metadata.hostile),
+          },
+          specification: {
+            entityName,
+            entityKind: target.metadata.entityKind ?? null,
+          },
+        });
+      }
+
+      if (target.kind === 'item_drop') {
+        actions.push({
+          id: `collect:${target.id}`,
+          kind: 'collect_drop',
+          description: 'Move to the observed dropped item so normal pickup mechanics can collect it.',
+          targetId: target.id,
+          position: { ...target.position },
+          preconditions: {
+            distance: target.distance,
+          },
+          specification: {
+            itemName: target.metadata.itemName ?? null,
+          },
+        });
+      }
     }
 
-    for (const entry of this.discoverEdibleInventory()) {
-      if (this.bot.food >= 20) break;
+    for (const item of this.bot.inventory.items()) {
+      const data = (this.bot.registry.items as any)?.[item.type] ?? {};
+      const foodPoints = Number(data.foodPoints ?? data.food_points ?? 0);
+      if (foodPoints > 0) {
+        actions.push({
+          id: `use:${item.name}`,
+          kind: 'use_item',
+          description: `Use carried item ${item.name}.`,
+          item: item.name,
+          preconditions: {
+            inventoryCount: item.count,
+          },
+          specification: {
+            foodPoints,
+            saturation: Number(data.saturation ?? data.saturationModifier ?? 0) || 0,
+          },
+        });
+      }
+
+      const placeableBlock = (this.bot.registry.blocksByName as any)?.[item.name];
+      if (placeableBlock) {
+        actions.push({
+          id: `place:${item.name}`,
+          kind: 'place_item',
+          description: `Place carried block item ${item.name} at a locally valid adjacent position.`,
+          item: item.name,
+          preconditions: {
+            inventoryCount: item.count,
+            onGround: Boolean(this.bot.entity.onGround),
+          },
+          specification: {
+            blockName: placeableBlock.name ?? item.name,
+            hardness: Number(placeableBlock.hardness ?? 0) || 0,
+          },
+        });
+      }
+    }
+
+    const recipeByItem = new Map(recipes.map(recipe => [recipe.item, recipe]));
+    for (const entry of craft) {
+      const recipe = recipeByItem.get(entry.item);
       actions.push({
-        id: `consume:${entry.item}`,
-        kind: 'consume_item',
-        description: `Consume carried ${entry.item} to restore hunger.`,
+        id: `craft:${entry.item}`,
+        kind: 'craft_recipe',
+        description: `Craft ${entry.item} using an executable Minecraft recipe.`,
         item: entry.item,
-        utilityTags: ['food', 'survival', 'recovery'],
         preconditions: {
-          inventoryCount: entry.count,
-          hunger: this.bot.food,
+          requiresTable: entry.requiresTable,
+          recipeCount: entry.recipeCount,
         },
-        expectedEffects: {
-          hungerIncreaseApprox: entry.foodPoints,
+        specification: {
+          owned: entry.owned,
+          ingredients: recipe ? recipe.ingredients.map(i => `${i.item}:${i.count}`).join(',') : null,
+          resultCount: recipe?.resultCount ?? null,
         },
       });
     }
 
-    for (const entry of this.discoverPlaceableUtilities()) {
-      actions.push({
-        id: `place:${entry.item}`,
-        kind: 'place_item',
-        description: `Place carried ${entry.item} nearby so it can be used as ${entry.role} infrastructure.`,
-        item: entry.item,
-        role: entry.role,
-        utilityTags: ['infrastructure', entry.role],
-        preconditions: {
-          inventoryCount: inventoryCount(this.bot, entry.item),
-          onGround: Boolean(this.bot.entity.onGround),
-        },
-        expectedEffects: {
-          facilityAvailable: entry.role,
-        },
-      });
-    }
+    actions.push(...this.discoverProcessingAffordances());
+    actions.push(...this.discoverInteractionAffordances());
 
-    const station = this.bot.findBlock({
-      matching: block => block.name === 'furnace' || block.name === 'smoker',
-      maxDistance: 8,
-    });
-    for (const entry of this.discoverCookableFood()) {
-      if (!station || !entry.fuelAvailable) continue;
-      actions.push({
-        id: `process:${entry.input}:${entry.output}`,
-        kind: 'process_item',
-        description: `Cook carried ${entry.input} into ${entry.output} using the nearby ${station.name}.`,
-        item: entry.input,
-        outputItem: entry.output,
-        station: station.name,
-        utilityTags: ['food', 'processing', 'survival'],
-        preconditions: {
-          inputCount: entry.count,
-          fuelAvailable: entry.fuelAvailable,
-          stationNearby: true,
-        },
-        expectedEffects: {
-          outputItem: entry.output,
-          improvesFoodValue: true,
-        },
-      });
-    }
-
-    const bed = this.bot.findBlock({
-      matching: block => block.name.endsWith('_bed'),
-      maxDistance: 16,
-    });
-    if (bed && isNight(this.bot)) {
-      actions.push({
-        id: 'sleep:nearby_bed',
-        kind: 'sleep',
-        description: 'Sleep in the nearby bed to advance through the night when Minecraft permits it.',
-        utilityTags: ['sleep', 'safety', 'time'],
-        preconditions: {
-          bedNearby: true,
-          night: true,
-        },
-        expectedEffects: {
-          advancesToDay: true,
-        },
-      });
-    }
-
-    const shelter = targets.find(target =>
-      target.kind === 'known_structure' &&
-      target.metadata.structureKind === 'shelter' &&
-      target.distance <= 3,
-    );
-    if (shelter && isNight(this.bot)) {
+    const time = this.bot.time.timeOfDay;
+    if (time >= 12500 && time < 23500) {
       actions.push({
         id: 'wait:daylight',
         kind: 'wait_condition',
-        description: 'Remain at the known shelter until daylight or until safety/needs require replanning.',
-        targetId: shelter.id,
-        utilityTags: ['safety', 'time', 'shelter'],
-        preconditions: {
-          night: true,
-          shelterNearby: true,
-        },
-        expectedEffects: {
-          advancesToDay: true,
-          avoidsNightExposure: true,
-        },
+        description: 'Wait until Minecraft daylight, while allowing safety interruptions.',
+        preconditions: { isNight: true },
+        specification: { condition: 'daylight' },
+      });
+    } else {
+      actions.push({
+        id: 'wait:night',
+        kind: 'wait_condition',
+        description: 'Wait until Minecraft night, while allowing safety interruptions.',
+        preconditions: { isNight: false },
+        specification: { condition: 'night' },
       });
     }
 
-    return actions.slice(0, 40);
+    return dedupeAffordances(actions).slice(0, 96);
   }
 
-  private discoverEdibleInventory(): Array<{ item: string; count: number; foodPoints: number }> {
-    return this.bot.inventory.items()
-      .map(item => {
-        const data = (this.bot.registry.items as any)?.[item.type] ?? {};
-        const foodPoints = Number(data.foodPoints ?? data.food_points ?? 0);
-        return {
-          item: item.name,
-          count: item.count,
-          foodPoints: Number.isFinite(foodPoints) ? foodPoints : 0,
-        };
-      })
-      .filter(entry => entry.foodPoints > 0 || FALLBACK_EDIBLE_ITEMS.has(entry.item))
-      .map(entry => ({
-        ...entry,
-        foodPoints: entry.foodPoints > 0 ? entry.foodPoints : 2,
-      }))
-      .sort((a, b) => b.foodPoints - a.foodPoints || b.count - a.count);
-  }
+  private discoverProcessingAffordances(): ExecutiveActionCapability[] {
+    const result: ExecutiveActionCapability[] = [];
+    const rawRecipes = (this.bot.registry as any)?.recipes;
+    if (!rawRecipes || typeof rawRecipes !== 'object') return result;
 
-  private discoverPlaceableUtilities(): Array<{
-    item: string;
-    role: 'workstation' | 'storage' | 'sleep' | 'utility';
-  }> {
-    const seen = new Set<string>();
-    const result: Array<{
-      item: string;
-      role: 'workstation' | 'storage' | 'sleep' | 'utility';
-    }> = [];
-    for (const item of this.bot.inventory.items()) {
-      const role = placeableRole(item.name);
-      if (!role || seen.has(item.name)) continue;
-      seen.add(item.name);
-      result.push({ item: item.name, role });
+    const nearbyStations = new Map<string, any>();
+    for (const type of PROCESSING_TYPES) {
+      const block = this.bot.findBlock({
+        matching: candidate => candidate.name === type,
+        maxDistance: 8,
+      });
+      if (block) nearbyStations.set(type, block);
+    }
+    if (nearbyStations.size === 0) return result;
+
+    const inventory = new Map(this.bot.inventory.items().map(item => [item.name, item.count]));
+    for (const raw of Object.values(rawRecipes)) {
+      const recipes = Array.isArray(raw) ? raw : [raw];
+      for (const recipe of recipes as any[]) {
+        const type = typeof recipe?.type === 'string' ? recipe.type : '';
+        if (!PROCESSING_TYPES.has(type) || !nearbyStations.has(type)) continue;
+        const inputIds = recipeItemIds(recipe?.input ?? recipe?.ingredients);
+        const outputIds = recipeItemIds(recipe?.output ?? recipe?.result);
+        for (const inputId of inputIds) {
+          const inputName = (this.bot.registry.items as any)?.[inputId]?.name as string | undefined;
+          if (!inputName || (inventory.get(inputName) ?? 0) <= 0) continue;
+          const outputName = outputIds
+            .map(id => (this.bot.registry.items as any)?.[id]?.name as string | undefined)
+            .find(Boolean);
+          result.push({
+            id: `process:${type}:${inputName}:${outputName ?? 'unknown'}`,
+            kind: 'process_recipe',
+            description: `Process ${inputName} using nearby ${type} according to Minecraft recipe data.`,
+            item: inputName,
+            outputItem: outputName,
+            station: type,
+            position: nearbyStations.get(type)?.position,
+            preconditions: {
+              inputCount: inventory.get(inputName) ?? 0,
+              stationNearby: true,
+            },
+            specification: {
+              recipeType: type,
+              outputItem: outputName ?? null,
+            },
+          });
+        }
+      }
     }
     return result;
   }
 
-  private discoverCookableFood(): Array<{
-    input: string;
-    output: string;
-    count: number;
-    fuelAvailable: boolean;
-  }> {
-    const fuelAvailable = this.bot.inventory.items().some(item => isFuelItem(item.name));
-    const inventory = new Map(this.bot.inventory.items().map(item => [item.name, item.count]));
-    return Object.entries(COOKABLE_FOOD)
-      .filter(([input]) => (inventory.get(input) ?? 0) > 0)
-      .map(([input, output]) => ({
-        input,
-        output,
-        count: inventory.get(input) ?? 0,
-        fuelAvailable,
+  private discoverInteractionAffordances(): ExecutiveActionCapability[] {
+    let positions: any[] = [];
+    try {
+      positions = this.bot.findBlocks({
+        matching: block => isInteractiveBlockName(block.name),
+        maxDistance: 10,
+        count: 24,
+      }) as any[];
+    } catch {
+      return [];
+    }
+
+    return positions
+      .map(pos => this.bot.blockAt(pos))
+      .filter((block): block is any => Boolean(block && this.bot.canSeeBlock(block)))
+      .map(block => ({
+        id: `interact:${block.name}:${block.position.x}:${block.position.y}:${block.position.z}`,
+        kind: 'interact_block' as const,
+        description: `Interact with visible block ${block.name}.`,
+        position: {
+          x: block.position.x,
+          y: block.position.y,
+          z: block.position.z,
+        },
+        preconditions: {
+          distance: Math.round(this.bot.entity.position.distanceTo(block.position) * 10) / 10,
+          visible: true,
+        },
+        specification: {
+          blockName: block.name,
+        },
       }));
   }
 
@@ -388,7 +432,6 @@ export class CapabilityRegistry {
     ingredients: Array<{ item: string; count: number }>;
   }> {
     if (this.recipeGraph) return this.recipeGraph;
-
     const recipes: Array<{
       item: string;
       requiresTable: boolean;
@@ -405,7 +448,6 @@ export class CapabilityRegistry {
       } catch {
         continue;
       }
-
       for (const recipe of known) {
         const ingredients = recipeIngredients(this.bot, recipe);
         if (ingredients.length === 0) continue;
@@ -426,11 +468,9 @@ export class CapabilityRegistry {
         });
       }
     }
-
     this.recipeGraph = recipes;
     return recipes;
   }
-
 }
 
 export function blockDropNames(bot: mineflayer.Bot, block: any): string[] {
@@ -439,22 +479,14 @@ export function blockDropNames(bot: mineflayer.Bot, block: any): string[] {
     : Array.isArray((bot.registry.blocks as any)?.[block?.type]?.drops)
       ? (bot.registry.blocks as any)[block.type].drops
       : [];
-
   const ids = new Set<number>();
   for (const raw of drops) {
     const id = dropId(raw);
     if (id != null && id > 0) ids.add(id);
   }
-
-  const names = [...ids]
+  return [...ids]
     .map(id => (bot.registry.items as any)?.[id]?.name as string | undefined)
     .filter((name): name is string => Boolean(name));
-
-  // Never infer "the block drops itself" just because an item with the same
-  // registry name exists. Leaves, grass and many special blocks can be broken
-  // without yielding themselves. Only advertise drops Minecraft data actually
-  // declares; uncertain/probabilistic loot can still appear later as item_drop.
-  return names;
 }
 
 export function canHarvestBlockNow(bot: mineflayer.Bot, block: any): boolean {
@@ -462,124 +494,29 @@ export function canHarvestBlockNow(bot: mineflayer.Bot, block: any): boolean {
   try {
     if (block.canHarvest(null)) return true;
   } catch {
-    // Fall through to held/inventory tools.
+    // Fall through.
   }
-
   for (const item of bot.inventory.items()) {
     try {
       if (block.canHarvest(item.type)) return true;
     } catch {
-      // Ignore malformed block/tool metadata.
+      // Ignore malformed metadata.
     }
   }
   return false;
 }
 
-
-const FALLBACK_EDIBLE_ITEMS = new Set([
-  'apple', 'bread', 'beef', 'porkchop', 'chicken', 'mutton', 'rabbit', 'cod', 'salmon',
-  'cooked_beef', 'cooked_porkchop', 'cooked_chicken', 'cooked_mutton', 'cooked_rabbit',
-  'cooked_cod', 'cooked_salmon', 'baked_potato', 'potato', 'carrot', 'golden_carrot',
-  'sweet_berries', 'glow_berries', 'melon_slice', 'dried_kelp', 'mushroom_stew',
-]);
-
-const COOKABLE_FOOD: Record<string, string> = {
-  beef: 'cooked_beef',
-  porkchop: 'cooked_porkchop',
-  chicken: 'cooked_chicken',
-  mutton: 'cooked_mutton',
-  rabbit: 'cooked_rabbit',
-  cod: 'cooked_cod',
-  salmon: 'cooked_salmon',
-  potato: 'baked_potato',
-  kelp: 'dried_kelp',
-};
+function blockDropNamesAt(
+  bot: mineflayer.Bot,
+  position: { x: number; y: number; z: number },
+): string[] {
+  return blockDropNames(bot, bot.blockAt(position as any));
+}
 
 function inventoryCount(bot: mineflayer.Bot, name: string): number {
   return bot.inventory.items()
     .filter(item => item.name === name)
     .reduce((sum, item) => sum + item.count, 0);
-}
-
-function craftUtility(
-  name: string,
-  data: any,
-): ExecutiveCapabilitySnapshot['craft'][number]['utility'] {
-  if (Number(data?.foodPoints ?? data?.food_points ?? 0) > 0 || FALLBACK_EDIBLE_ITEMS.has(name)) return 'food';
-  if (name.endsWith('_pickaxe') || name.endsWith('_axe') || name.endsWith('_shovel') || name.endsWith('_hoe')) return 'tool';
-  if (name.endsWith('_sword') || name === 'bow' || name === 'crossbow' || name === 'shield') return 'weapon';
-  if (
-    name.endsWith('_helmet') || name.endsWith('_chestplate') ||
-    name.endsWith('_leggings') || name.endsWith('_boots')
-  ) return 'armor';
-  if (name.endsWith('_bed')) return 'bed';
-  if (['crafting_table', 'furnace', 'smoker', 'blast_furnace', 'campfire'].includes(name)) return 'workstation';
-  if (['chest', 'trapped_chest', 'barrel', 'shulker_box'].includes(name) || name.endsWith('_shulker_box')) return 'storage';
-  if (['bucket', 'shears', 'fishing_rod', 'flint_and_steel', 'compass', 'clock'].includes(name)) return 'utility';
-  if (name === 'stick' || name.endsWith('_planks') || name === 'torch' || name.endsWith('_door')) return 'material';
-  if (
-    name.endsWith('_slab') || name.endsWith('_stairs') || name.endsWith('_fence') ||
-    name.endsWith('_wall') || name.endsWith('_log') || name === 'cobblestone' || name === 'dirt'
-  ) return 'building';
-  return 'misc';
-}
-
-function craftUtilityPriority(
-  utility: ExecutiveCapabilitySnapshot['craft'][number]['utility'],
-): number {
-  switch (utility) {
-    case 'food': return 140;
-    case 'tool': return 130;
-    case 'weapon': return 120;
-    case 'armor': return 115;
-    case 'bed': return 110;
-    case 'workstation': return 100;
-    case 'utility': return 90;
-    case 'storage': return 75;
-    case 'material': return 70;
-    case 'building': return 40;
-    default: return 0;
-  }
-}
-
-function isCraftStrategicallyRelevant(
-  utility: ExecutiveCapabilitySnapshot['craft'][number]['utility'],
-  name: string,
-  strategy: string,
-  mentioned: boolean,
-): boolean {
-  if (mentioned) return true;
-  if (['food', 'tool', 'weapon', 'armor', 'bed', 'workstation', 'utility'].includes(utility)) return true;
-  if (utility === 'storage') return /(storage|store|cache|chest|barrel|base)/.test(strategy);
-  if (utility === 'material') return true;
-  if (utility === 'building') return /(build|shelter|base|repair|structure)/.test(strategy);
-  // Redstone/decorative/misc items stay hidden unless the current strategy
-  // explicitly names them. This preserves open-ended crafting without letting
-  // "anything craftable" become fake progress.
-  return false;
-}
-
-function placeableRole(name: string): ExecutiveCapabilitySnapshot['place'][number]['role'] | null {
-  if (['crafting_table', 'furnace', 'smoker', 'blast_furnace', 'campfire'].includes(name)) return 'workstation';
-  if (['chest', 'trapped_chest', 'barrel'].includes(name) || name.endsWith('_shulker_box')) return 'storage';
-  if (name.endsWith('_bed')) return 'sleep';
-  return null;
-}
-
-function isFuelItem(name: string): boolean {
-  return (
-    name === 'coal' ||
-    name === 'charcoal' ||
-    name === 'stick' ||
-    name.endsWith('_log') ||
-    name.endsWith('_wood') ||
-    name.endsWith('_planks')
-  );
-}
-
-function isNight(bot: mineflayer.Bot): boolean {
-  const time = bot.time.timeOfDay;
-  return time >= 12500 && time < 23500;
 }
 
 function recipeIngredients(
@@ -588,7 +525,6 @@ function recipeIngredients(
 ): Array<{ item: string; count: number }> {
   const byName = new Map<string, number>();
   const delta = Array.isArray(recipe?.delta) ? recipe.delta : [];
-
   for (const part of delta) {
     const count = Number(part?.count) || 0;
     const id = Number(part?.id);
@@ -597,10 +533,45 @@ function recipeIngredients(
     if (!name) continue;
     byName.set(name, (byName.get(name) ?? 0) + Math.abs(count));
   }
-
   return [...byName.entries()]
     .map(([item, count]) => ({ item, count }))
     .sort((a, b) => a.item.localeCompare(b.item));
+}
+
+function recipeItemIds(raw: any): number[] {
+  if (raw == null) return [];
+  if (typeof raw === 'number') return [raw];
+  if (Array.isArray(raw)) return raw.flatMap(recipeItemIds);
+  if (typeof raw === 'object') {
+    if (typeof raw.id === 'number') return [raw.id];
+    if (typeof raw.type === 'number') return [raw.type];
+  }
+  return [];
+}
+
+function isInteractiveBlockName(name: string): boolean {
+  return (
+    name === 'crafting_table' ||
+    name === 'furnace' ||
+    name === 'smoker' ||
+    name === 'blast_furnace' ||
+    name === 'chest' ||
+    name === 'trapped_chest' ||
+    name === 'barrel' ||
+    name.endsWith('_bed') ||
+    name.endsWith('_door') ||
+    name.endsWith('_button') ||
+    name.endsWith('_lever')
+  );
+}
+
+function dedupeAffordances(actions: ExecutiveActionCapability[]): ExecutiveActionCapability[] {
+  const seen = new Set<string>();
+  return actions.filter(action => {
+    if (seen.has(action.id)) return false;
+    seen.add(action.id);
+    return true;
+  });
 }
 
 function dropId(raw: any): number | null {
