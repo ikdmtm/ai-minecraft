@@ -49,7 +49,7 @@ export class WorldSensor {
       },
       inventory,
       strategy: {
-        mainGoal: this.shared.get().currentGoal || 'Survive and make normal Minecraft progress.',
+        mainGoal: this.shared.get().currentGoal || 'Survive as long as possible in this Hardcore world while continuing to live actively.',
         subGoals: [...this.shared.get().subGoals],
       },
       currentSkill,
