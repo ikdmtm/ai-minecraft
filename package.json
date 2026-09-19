@@ -24,7 +24,8 @@
     "lint": "tsc --noEmit",
     "test:gameplay": "jest src/gameplay --runInBand",
     "test:knowledge-export": "python3 scripts/test-export-knowledge.py",
-    "test:gameplay-smoke": "tsx scripts/gameplay-smoke.ts"
+    "test:gameplay-smoke": "tsx scripts/gameplay-smoke.ts && tsx scripts/evaluation-smoke.ts",
+    "test:evaluation-smoke": "tsx scripts/evaluation-smoke.ts"
   },
   "engines": {
     "node": ">=22"
