@@ -1,11 +1,13 @@
 import type { PrimitiveOperation } from './primitiveOperations.js';
 import type { CraftItem } from './typedActions.js';
+import type { MemoryNoteInput } from './memoryConsolidation.js';
 
 export type ExecutiveTaskType =
   | 'EXECUTE_AFFORDANCE'
   | 'EXECUTE_OPERATION'
   | 'LOOKUP_KNOWLEDGE'
   | 'RECALL_MEMORY'
+  | 'CONSOLIDATE_MEMORY'
   | 'SAVE_PROCEDURE'
   | 'RUN_PROCEDURE'
   | 'WAIT';
@@ -175,6 +177,7 @@ export interface ExecutiveDecision {
   knowledgeOffset?: number;
   memoryQuery?: string;
   memoryCursor?: string;
+  memoryNote?: MemoryNoteInput;
   procedureName?: string;
   evidenceIds?: string[];
   procedureId?: string;
@@ -197,7 +200,7 @@ export interface TaskExecutionResult {
 }
 
 export const EXECUTIVE_TASKS: ExecutiveTaskType[] = [
-  'EXECUTE_OPERATION', 'LOOKUP_KNOWLEDGE', 'RECALL_MEMORY', 'SAVE_PROCEDURE', 'RUN_PROCEDURE',
+  'EXECUTE_OPERATION', 'LOOKUP_KNOWLEDGE', 'RECALL_MEMORY', 'CONSOLIDATE_MEMORY', 'SAVE_PROCEDURE', 'RUN_PROCEDURE',
   'EXECUTE_AFFORDANCE',
   'WAIT',
 ];
