@@ -53,8 +53,6 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     env:
-      # The fixture and download stay on the hosted runner, not the user's world.
-      MC_DEV_DIR: ${{ runner.temp }}/autonomy-smoke-server
       MC_VERSION: '1.21.4'
     steps:
       - uses: actions/checkout@v4
@@ -71,8 +69,13 @@ jobs:
           distribution: temurin
           java-version: 21
       - name: Download fixture server
+        env:
+          # The download stays on the hosted runner, not the user's world.
+          MC_DEV_DIR: ${{ runner.temp }}/autonomy-smoke-server
         run: bash scripts/mc-setup-local.sh
       - name: Disposable-world adapter smoke test (no LLM requests)
+        env:
+          MC_DEV_DIR: ${{ runner.temp }}/autonomy-smoke-server
         run: timeout -k 10s 240s npm run test:gameplay-smoke
       - name: Retain smoke diagnostics
         if: always()
