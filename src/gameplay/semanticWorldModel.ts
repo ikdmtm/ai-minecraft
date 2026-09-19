@@ -153,7 +153,7 @@ export class SemanticWorldModel {
         if (!stand) continue;
 
         const floor = this.bot.blockAt(new Vec3(stand.x, stand.y - 1, stand.z));
-        if (!isExcavationMaterial(floor)) continue;
+        if (!isSafeExcavationSupport(floor)) continue;
 
         const direction = this.findSafeExcavationDirection(stand);
         if (!direction) continue;
