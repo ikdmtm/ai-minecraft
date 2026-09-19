@@ -8,6 +8,11 @@ import type {
   SemanticTarget,
 } from './executiveTypes.js';
 import type { WorldProvenance } from './worldProvenance.js';
+import {
+  CapabilityRegistry,
+  blockDropNames,
+  canHarvestBlockNow,
+} from './capabilityRegistry.js';
 
 const LOG_NAMES = new Set([
   'oak_log', 'birch_log', 'spruce_log', 'jungle_log', 'acacia_log',
@@ -28,18 +33,31 @@ const EXCAVATION_BLOCKS = new Set([
 export class SemanticWorldModel {
   private revision = 0;
   private lastFingerprint = '';
+  private readonly capabilityRegistry: CapabilityRegistry;
 
   constructor(
     private readonly bot: mineflayer.Bot,
     private readonly shared: SharedStateBus,
     private readonly provenance?: WorldProvenance,
-  ) {}
+  ) {
+    this.capabilityRegistry = new CapabilityRegistry(bot);
+  }
 
   capture(activeTask: ExecutiveTaskSnapshot): ExecutiveWorldState {
     const position = this.bot.entity.position;
     const inventory = inventoryMap(this.bot);
     const inWater = isInWater(this.bot);
     const onSolidGround = isSolidStand(this.bot.blockAt(position.offset(0, -1, 0)));
+
+    const targets = this.buildTargets();
+    const strategy = {
+      mainGoal: this.shared.get().currentGoal || 'Survive as long as possible in this Hardcore world while continuing to live actively.',
+      subGoals: [...this.shared.get().subGoals],
+    };
+    const capabilities = this.capabilityRegistry.capture(
+      targets,
+      [strategy.mainGoal, ...strategy.subGoals].join(' '),
+    );
 
     const stateWithoutRevision = {
       capturedAt: Date.now(),
@@ -68,12 +86,10 @@ export class SemanticWorldModel {
         bedNearby: Boolean(this.bot.findBlock({ matching: block => block.name.endsWith('_bed'), maxDistance: 16 })),
         shelterNearby: Boolean(this.provenance?.hasStructureNearby('shelter', position, 24)),
       },
-      strategy: {
-        mainGoal: this.shared.get().currentGoal || 'Survive and make normal Minecraft progress.',
-        subGoals: [...this.shared.get().subGoals],
-      },
+      capabilities,
+      strategy,
       activeTask,
-      targets: this.buildTargets(),
+      targets,
       recentEvents: this.shared.getRecentEvents(25_000).slice(-16).map(event => ({
         type: event.type,
         detail: event.detail,
@@ -103,11 +119,10 @@ export class SemanticWorldModel {
       ...this.findShelterSites(),
       ...this.findExcavationSites(),
       ...this.findLandTargets(),
-      ...this.findTreeClusters(),
-      ...this.findStoneSources(),
-      ...this.findFoodSources(),
+      ...this.findResourceSources(),
+      ...this.findEntityTargets(),
       ...this.findItemDrops(),
-    ].sort((a, b) => b.score - a.score).slice(0, 24);
+    ].sort((a, b) => b.score - a.score).slice(0, 36);
   }
 
   private findKnownStructures(): SemanticTarget[] {
@@ -328,6 +343,107 @@ export class SemanticWorldModel {
     return null;
   }
 
+  private findResourceSources(): SemanticTarget[] {
+    let positions: any[] = [];
+    try {
+      positions = this.bot.findBlocks({
+        matching: block =>
+          Boolean(block?.diggable) &&
+          block.name !== 'air' &&
+          block.name !== 'water' &&
+          block.name !== 'lava',
+        maxDistance: 20,
+        count: 1024,
+      }) as any[];
+    } catch {
+      return [];
+    }
+
+    const origin = this.bot.entity.position;
+    const nearestByResource = new Map<string, SemanticTarget>();
+
+    for (const pos of positions) {
+      const block = this.bot.blockAt(pos);
+      if (!block || !block.diggable) continue;
+      if (this.provenance?.isPlayerPlaced(block.position)) continue;
+      if (!this.bot.canSeeBlock(block)) continue;
+      if (!canHarvestBlockNow(this.bot, block)) continue;
+
+      const resources = blockDropNames(this.bot, block);
+      if (resources.length === 0) continue;
+      const distance = origin.distanceTo(block.position);
+
+      for (const resource of resources) {
+        const existing = nearestByResource.get(resource);
+        if (existing && existing.distance <= distance) continue;
+        nearestByResource.set(resource, {
+          id: `resource_source:${resource}:${block.position.x}:${block.position.y}:${block.position.z}`,
+          kind: 'resource_source',
+          position: {
+            x: block.position.x,
+            y: block.position.y,
+            z: block.position.z,
+          },
+          distance: round1(distance),
+          score: 190 - distance * 2,
+          risk: distance <= 12 ? 'low' : 'medium',
+          metadata: {
+            resource,
+            blockName: block.name,
+            blockTargetId: `block:${block.name}:${block.position.x}:${block.position.y}:${block.position.z}`,
+            harvestableNow: true,
+          },
+        });
+      }
+    }
+
+    return [...nearestByResource.values()]
+      .sort((a, b) => b.score - a.score)
+      .slice(0, 20);
+  }
+
+  private findEntityTargets(): SemanticTarget[] {
+    const origin = this.bot.entity.position;
+    return Object.values(this.bot.entities)
+      .filter(entity =>
+        Boolean(
+          entity &&
+          entity !== this.bot.entity &&
+          entity.name &&
+          entity.name !== 'item' &&
+          entity.position &&
+          ((entity as any).type === 'mob' || String((entity as any).kind ?? '').toLowerCase().includes('mob')),
+        ),
+      )
+      .map(entity => {
+        const distance = origin.distanceTo(entity.position);
+        const kind = String((entity as any).kind ?? '');
+        const kindLower = kind.toLowerCase();
+        const hostile = kindLower.includes('hostile') || kindLower.includes('monster');
+        return {
+          id: `entity:${entity.id}`,
+          kind: 'entity' as const,
+          position: {
+            x: entity.position.x,
+            y: entity.position.y,
+            z: entity.position.z,
+          },
+          distance: round1(distance),
+          score: 145 - distance,
+          risk: hostile && distance <= 12 ? 'high' as const : distance <= 20 ? 'low' as const : 'medium' as const,
+          metadata: {
+            entityId: entity.id,
+            entityName: entity.name ?? 'unknown',
+            entityKind: kind || null,
+            hostile,
+          },
+        };
+      })
+      .filter(target => target.distance <= 32)
+      .sort((a, b) => b.score - a.score)
+      .slice(0, 16);
+  }
+
   private findTreeClusters(): SemanticTarget[] {
     let positions: any[] = [];
     try {
@@ -471,6 +587,13 @@ export class SemanticWorldModel {
           metadata: {
             entityId: entity.id,
             collectible: true,
+            itemName: (() => {
+              try {
+                return (entity as any).getDroppedItem?.()?.name ?? null;
+              } catch {
+                return null;
+              }
+            })(),
           },
         };
       })
@@ -575,6 +698,9 @@ function semanticFingerprint(state: Omit<ExecutiveWorldState, 'revision'>): stri
     state.facilities.furnaceNearby ? 1 : 0,
     state.facilities.bedNearby ? 1 : 0,
     state.facilities.shelterNearby ? 1 : 0,
+    state.capabilities.gather.map(entry => entry.resource).sort().join(','),
+    state.capabilities.craft.map(entry => entry.item).sort().join(','),
+    state.capabilities.entityActions.map(entry => entry.targetId).sort().join(','),
     state.strategy.mainGoal,
     state.activeTask.id,
     state.activeTask.status,
