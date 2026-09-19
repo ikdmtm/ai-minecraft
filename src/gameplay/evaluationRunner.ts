@@ -23,6 +23,11 @@ function writeReport(p: PreparedEvaluation): void {
   fs.writeFileSync(path + '.tmp', JSON.stringify(makeRedactor(p.env)(p.report), null, 2) + '\n', { mode: 0o600, flush: true });
   fs.renameSync(path + '.tmp', path);
 }
+/** Java and the knowledge exporter have no need for model credentials. */
+export function evaluationToolEnvironment(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  return Object.fromEntries(['PATH', 'HOME', 'JAVA_HOME', 'TMPDIR', 'TMP', 'TEMP', 'LANG', 'LC_ALL']
+    .filter(key => env[key] != null).map(key => [key, env[key]]));
+}
 
 /** Preparation never starts Java, connects to Minecraft, or calls a model.
  * All destinations are created with a fresh directory; there is no reset/delete,
@@ -120,14 +125,25 @@ function killOwned(child: ChildProcess, signal: NodeJS.Signals): void {
   try { process.kill(-child.pid, signal); } catch { /* Owned process already gone. */ }
 }
 
+export interface EvaluationProcessFixture {
+  /** Test-only injection from repository code, never from an LLM or CLI argument. */
+  args: string[];
+  label: string;
+}
+
 /** Explicit paid-request opt-in. Uses a freshly owned server, never an operator's
  * configured endpoint. POSIX/WSL only; native Windows group cleanup is unverified.
+ * A supplied repository-test process is permanently labeled as a fixture result.
  */
-export async function runIsolatedEvaluation(p: PreparedEvaluation, allowPaidRequests = false): Promise<number> {
-  if (!allowPaidRequests) throw new Error('evaluation_explicit_run_required');
+export async function runIsolatedEvaluation(p: PreparedEvaluation, allowPaidRequests = false,
+  fixture?: EvaluationProcessFixture): Promise<number> {
+  if (!allowPaidRequests && !fixture) throw new Error('evaluation_explicit_run_required');
   if (process.platform === 'win32') throw new Error('evaluation_requires_posix_or_wsl');
   if (p.report.phase !== 'prepared_not_run' || !inspectEvaluationProvider(p.env).ready) throw new Error('evaluation_not_prepared');
-  p.report.phase = 'launching'; writeReport(p);
+  p.report.phase = 'launching';
+  p.report.executionMode = fixture ? 'repository_process_fixture' : 'configured_gameplay_runtime';
+  if (fixture) p.report.fixtureLabel = fixture.label;
+  writeReport(p);
   let server: ChildProcess | undefined, serverClosed = false, serverFailure = false;
   let serverLog: number | undefined, recorder: RunRecorder | undefined;
   let result = 1;
@@ -137,7 +153,7 @@ export async function runIsolatedEvaluation(p: PreparedEvaluation, allowPaidRequ
   try {
     const exported = spawnSync('python3', [join(p.cwd, 'scripts/mc-export-knowledge.py'),
       join(p.serverDirectory, 'server.jar'), p.env.GAMEPLAY_KNOWLEDGE_FILE!],
-    { cwd: p.cwd, env: p.env, encoding: 'utf8', timeout: 30000, maxBuffer: 2 * 1024 * 1024 });
+    { cwd: p.cwd, env: evaluationToolEnvironment(p.env), encoding: 'utf8', timeout: 30000, maxBuffer: 2 * 1024 * 1024 });
     fs.writeFileSync(join(p.directory, 'knowledge-export.log'), String(makeRedactor(p.env)(
       (exported.stdout || '') + (exported.stderr || ''))), { mode: 0o600 });
     if (exported.error || exported.status !== 0) throw new Error('evaluation_knowledge_export_failed');
@@ -148,7 +164,7 @@ export async function runIsolatedEvaluation(p: PreparedEvaluation, allowPaidRequ
     fs.writeFileSync(join(p.serverDirectory, 'server.properties'), evaluationServerProperties(port), { flag: 'wx', mode: 0o600 });
     serverLog = fs.openSync(join(p.directory, 'server.log'), 'wx+', 0o600);
     server = spawn('java', ['-Xms256M', '-Xmx1G', '-jar', 'server.jar', 'nogui'],
-      { cwd: p.serverDirectory, env: p.env, detached: true, stdio: ['pipe', serverLog, serverLog] });
+      { cwd: p.serverDirectory, env: evaluationToolEnvironment(p.env), detached: true, stdio: ['pipe', serverLog, serverLog] });
     server.stdin?.on('error', () => {});
     server.once('error', () => { serverFailure = true; cancellation.abort(); });
     server.once('close', () => { serverClosed = true; cancellation.abort(); });
@@ -167,12 +183,14 @@ export async function runIsolatedEvaluation(p: PreparedEvaluation, allowPaidRequ
     if (cancellation.signal.aborted) throw new Error('evaluation_cancelled');
     recorder = new RunRecorder(p.cwd, p.env);
     recorder.manifest.evaluation = { directory: p.directory, durationMs: p.options.durationMs,
-      providerPreflight: p.report.preflight, isolatedMemory: p.report.memory, accepted: false };
+      providerPreflight: p.report.preflight, isolatedMemory: p.report.memory,
+      executionMode: p.report.executionMode, accepted: false };
     await recorder.prepare();
     p.report.phase = 'running'; p.report.runId = recorder.runId;
-    p.report.liveModelInvoked = 'unknown_until_runtime_log'; writeReport(p);
+    p.report.liveModelInvoked = fixture ? false : 'unknown_until_runtime_log'; writeReport(p);
     const extension = extname(__filename);
-    const args = extension === '.ts' ? ['--import', 'tsx', join(__dirname, 'jevMain.ts')] : [join(__dirname, 'jevMain.js')];
+    const args = fixture?.args ?? (extension === '.ts'
+      ? ['--import', 'tsx', join(__dirname, 'jevMain.ts')] : [join(__dirname, 'jevMain.js')]);
     result = await runRecordedChild(recorder, args, process.execPath,
       { maxDurationMs: p.options.durationMs, signal: cancellation.signal });
     p.report.termination = recorder.manifest.termination;
@@ -218,6 +236,8 @@ export function parseEvaluationArgs(args: string[]): EvaluationOptions & { run: 
 }
 async function main(): Promise<void> {
   require('dotenv').config({ quiet: true });
+  // Broken terminal output must not orphan the owned server or gameplay child.
+  process.stdout.on('error', () => {});
   const options = parseEvaluationArgs(process.argv.slice(2));
   const p = await prepareIsolatedEvaluation(process.cwd(), process.env, options);
   process.stdout.write(JSON.stringify({ kind: 'evaluation_prepared', directory: p.directory, runRequested: options.run }) + '\n');
