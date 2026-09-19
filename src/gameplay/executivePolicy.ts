@@ -225,7 +225,6 @@ function executiveInstructions(): string {
     'World-scoped memory contains observations tied to the current world. Global procedure memory survives world resets and contains empirical successes/failures from earlier play; use it as experience, not as an absolute rule.',
     'A remembered coordinate is evidence about the current world only. Global memories without coordinates are learned experience that can transfer to new worlds.',
     'Choose EXECUTE_AFFORDANCE only with an affordance_id that is currently exposed. One affordance is one bodily/world operation; after it completes the world is re-observed and you can choose the next operation.',
-    'CONTINUE_TASK is only valid while a task is actually running.',
     'WAIT is appropriate only when there is no useful executable operation now. Prefer condition-based wait affordances over repeated short WAIT decisions when one is available.',
     'Use observed outcomes and procedure-memory success/failure rates to change tactics after failures instead of blindly repeating them.',
     'The deterministic safety kernel may interrupt dangerous actions. Survival is the objective, but strategy and problem solving remain yours.',
@@ -246,7 +245,6 @@ function capabilityReference(state: ExecutiveWorldState): Record<string, unknown
 
 function taskCriteria(): Record<ExecutiveTaskType, string> {
   return {
-    CONTINUE_TASK: 'Continue the currently running operation only when one is still active.',
     EXECUTE_AFFORDANCE: 'Execute one currently available Minecraft affordance and then re-observe the world.',
     WAIT: 'Briefly do nothing only when no useful affordance should be executed now.',
   };
@@ -285,10 +283,6 @@ function normalizeDecision(
   state: ExecutiveWorldState,
   decision: ExecutiveDecision,
 ): ExecutiveDecision {
-  if (decision.task === 'CONTINUE_TASK' && state.activeTask.status !== 'running') {
-    return asWait(decision, 'invalid_task:no_running_task');
-  }
-
   if (decision.task === 'EXECUTE_AFFORDANCE') {
     const action = decision.capabilityId
       ? state.capabilities.actions.find(entry => entry.id === decision.capabilityId)
