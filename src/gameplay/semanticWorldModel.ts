@@ -16,7 +16,7 @@ import {
   blockDropNames,
   canHarvestBlockNow,
 } from './capabilityRegistry.js';
-import { WorldMemory } from './worldMemory.js';
+import { WorldMemory, normalizeMemoryDimension } from './worldMemory.js';
 
 const WATERLIKE = new Set([
   'water', 'bubble_column', 'seagrass', 'tall_seagrass', 'kelp', 'kelp_plant',
@@ -29,6 +29,7 @@ export class SemanticWorldModel {
   private lastFingerprint = '';
   private readonly capabilityRegistry: CapabilityRegistry;
   private lastSurfaceAnchor: SemanticPosition | null = null;
+  private spatialContext: string;
 
   constructor(
     private readonly bot: mineflayer.Bot,
@@ -39,9 +40,20 @@ export class SemanticWorldModel {
   ) {
     this.capabilityRegistry = new CapabilityRegistry(bot);
     this.knowledge = new MinecraftKnowledge(bot);
+    this.spatialContext = this.spatialContextKey();
   }
 
   capture(activeTask: ExecutiveTaskSnapshot): ExecutiveWorldState {
+    // Scope before collecting any observations or consulting physical provenance.
+    const context = this.spatialContextKey();
+    if (context !== this.spatialContext) {
+      this.provenance?.clear();
+      this.lastSurfaceAnchor = null;
+      this.knowledgeResults = [];
+      this.lastFingerprint = '';
+      this.spatialContext = context;
+    }
+    const dimension = normalizeMemoryDimension(this.bot.game.dimension);
     const position = this.bot.entity.position;
     const inventory = inventoryMap(this.bot);
     const inWater = isInWater(this.bot);
@@ -95,7 +107,9 @@ export class SemanticWorldModel {
         version: this.bot.version, dimension: String(this.bot.game.dimension), worldId: this.memory.getWorldId(),
         window: windowSnapshot(this.bot),
         localGrid: localGridSnapshot(this.bot),
-        recentExperience: this.experience?.recent(24).filter(e => e.worldId === this.memory.getWorldId()) ?? [],
+        recentExperience: this.experience?.recent(24).filter(e =>
+          dimension != null && e.worldId === this.memory.getWorldId() && normalizeMemoryDimension(e.dimension) === dimension,
+        ) ?? [],
         learnedProcedures: this.experience?.list(this.bot.version, String(this.bot.game.dimension)).map(p => ({
           id: p.id, name: p.name, status: p.status, successes: p.successes, failures: p.failures,
           steps: p.steps, evidenceIds: p.evidenceIds,
@@ -108,9 +122,10 @@ export class SemanticWorldModel {
       memory: [
         ...this.memory.recall({
           origin: position,
+          dimension,
           minConfidence: 0.1,
           limit: 12,
-          includeWorld: true,
+          includeWorld: dimension != null,
           includeGlobal: false,
         }),
         ...this.memory.recall({
@@ -124,6 +139,7 @@ export class SemanticWorldModel {
         kind: record.kind,
         label: record.label,
         position: record.position ? { ...record.position } : undefined,
+        dimension: record.dimension,
         confidence: Math.round(record.confidence * 100) / 100,
         lastSeenAt: record.lastSeenAt,
         observations: record.observations,
@@ -148,6 +164,10 @@ export class SemanticWorldModel {
       revision: this.revision,
       ...stateWithoutRevision,
     };
+  }
+
+  private spatialContextKey(): string {
+    return JSON.stringify([this.memory.getWorldId(), normalizeMemoryDimension(this.bot.game.dimension)]);
   }
 
   lookupKnowledge(query: string, offset = 0): Record<string, unknown> {
@@ -522,6 +542,7 @@ export class SemanticWorldModel {
     }
 
     const origin = this.bot.entity.position;
+    const dimension = normalizeMemoryDimension(this.bot.game.dimension);
     const nearestByResource = new Map<string, SemanticTarget>();
 
     for (const pos of positions) {
@@ -542,10 +563,11 @@ export class SemanticWorldModel {
       for (const resource of resources) {
         const existing = nearestByResource.get(resource);
         if (existing && existing.distance <= distance) continue;
-        this.memory.observe({
+        if (dimension != null) this.memory.observe({
           kind: 'resource_site',
           key: resourceMemoryKey(resource, block.position),
           label: resource,
+          dimension,
           position: {
             x: block.position.x,
             y: block.position.y,
@@ -587,6 +609,7 @@ export class SemanticWorldModel {
 
   private findEntityTargets(): SemanticTarget[] {
     const origin = this.bot.entity.position;
+    const dimension = normalizeMemoryDimension(this.bot.game.dimension);
     return Object.values(this.bot.entities)
       .filter(entity =>
         Boolean(
@@ -609,12 +632,13 @@ export class SemanticWorldModel {
           z: entity.position.z,
         };
 
-        if (distance <= 32) {
+        if (distance <= 32 && dimension != null) {
           this.memory.observe({
             kind: 'entity_sighting',
             key: entityMemoryKey(entity.name ?? 'entity', position),
             label: entity.name ?? 'entity',
             position,
+            dimension,
             scope: 'world',
             retention: 'session',
             confidence: 0.9,
@@ -648,9 +672,12 @@ export class SemanticWorldModel {
   }
 
   private findRememberedLocations(): SemanticTarget[] {
+    const dimension = normalizeMemoryDimension(this.bot.game.dimension);
+    if (dimension == null) return [];
     const origin = this.bot.entity.position;
     return this.memory.recall({
       origin,
+      dimension,
       minConfidence: 0.18,
       limit: 16,
       includeWorld: true,
@@ -670,6 +697,7 @@ export class SemanticWorldModel {
           metadata: {
             memoryId: record.id,
             memoryKind: record.kind,
+            dimension: record.dimension,
             label: record.label,
             confidence: Math.round(record.confidence * 100) / 100,
             lastSeenAt: record.lastSeenAt,
@@ -697,7 +725,7 @@ export class SemanticWorldModel {
           },
           distance: round1(distance),
           score: 170 - distance * 3,
-          risk: distance <= 8 ? 'low' as const : 'medium' as const,
+          risk: distance <= 8 ? 'low' : 'medium',
           metadata: {
             entityId: entity.id,
             collectible: true,
@@ -777,6 +805,8 @@ function semanticFingerprint(state: Omit<ExecutiveWorldState, 'revision'>): stri
   // the model is thinking. Revision tracks semantic changes that can invalidate
   // a decision: safety context, inventory, strategy, or task lifecycle.
   return [
+    state.autonomy.worldId,
+    normalizeMemoryDimension(state.autonomy.dimension),
     state.player.inWater ? 1 : 0,
     state.player.onSolidGround ? 1 : 0,
     Math.round(state.player.hp * 2) / 2,
