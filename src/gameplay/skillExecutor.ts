@@ -175,6 +175,7 @@ export class SkillExecutor {
       target_id: targetId,
       craft_item: decision.craftItem ?? null,
       direction: decision.direction ?? null,
+      excavation_mode: decision.excavationMode ?? null,
       target_position: decision.targetPosition ?? null,
       source: decision.source,
       confidence: decision.confidence,
