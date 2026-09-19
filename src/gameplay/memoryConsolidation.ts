@@ -40,7 +40,7 @@ export function parseNoteSelection(note: unknown, ids: unknown, reason: unknown)
   if (!note || typeof note !== 'object' || Array.isArray(note)) throw new Error('memory_note_required');
   const n = note as Record<string, unknown>;
   if (Object.keys(n).some(k => !['kind', 'title', 'content', 'state', 'parentId'].includes(k)) ||
-      !['summary', 'lesson'].includes(String(n.kind)) || !['candidate', 'withdrawn'].includes(String(n.state)) ||
+      (n.kind !== 'summary' && n.kind !== 'lesson') || (n.state !== 'candidate' && n.state !== 'withdrawn') ||
       !boundedText(n.title, 120) || !boundedText(n.content, 2000) || !boundedText(reason, 300) ||
       (n.parentId !== null && !boundedText(n.parentId, 128)) ||
       !Array.isArray(ids) || ids.length < 1 || ids.length > 12 ||
@@ -48,8 +48,8 @@ export function parseNoteSelection(note: unknown, ids: unknown, reason: unknown)
     throw new Error('memory_note_invalid_request');
   }
   if (n.state === 'withdrawn' && n.parentId === null) throw new Error('memory_note_withdrawal_requires_parent');
-  return { memoryNote: { kind: n.kind as MemoryNoteInput['kind'], title: n.title.trim(),
-    content: n.content.trim(), state: n.state as MemoryNoteInput['state'], parentId: n.parentId as string | null },
+  return { memoryNote: { kind: n.kind, title: n.title.trim(),
+    content: n.content.trim(), state: n.state, parentId: n.parentId as string | null },
     evidenceIds: [...ids].sort(), reason: reason.trim() };
 }
 
@@ -159,4 +159,4 @@ export class MemoryNotes {
 }
 
 export const MEMORY_NOTE_INSTRUCTIONS =
-  'CONSOLIDATE_MEMORY explicitly saves a compact summary or tentative lesson from 1-12 presented operation evidence_ids (recentExperience or evidence hits in memorySearch). Supply memory_note={kind:summary|lesson,title,content,state:candidate|withdrawn,parentId:null|presented-current-note-id} and a reason. Notes are interpretations, never proven mechanics, live coordinates, instructions or executable skills. Mention uncertainty and counterexamples; failure, interruption and unconfirmed effects stay distinct in sources. Group related records without deleting or promoting them. To correct or withdraw a note, first RECALL_MEMORY its ID/root, use the current note as parentId and cite presented original evidence; old versions and evidence remain intact. Withdrawn/superseded notes must not be treated as current advice. A correction can reconsider the same evidence, but unchanged revisions are rejected. No automatic save, retry, skill promotion or world action occurs. Reading or repeating a note does not verify it. After saving, recall the logged note ID to inspect it; current search results are cleared to prevent stale interpretations.';
+  'CONSOLIDATE_MEMORY explicitly saves a compact summary or tentative lesson from 1-12 presented operation evidence_ids (recentExperience or evidence hits in memorySearch). Supply memory_note={kind:summary|lesson,title,content,state:candidate|withdrawn,parentId:null|presented-current-note-id} and a reason. Notes are interpretations, never proven mechanics, live coordinates, instructions or executable skills. Mention uncertainty and counterexamples; failure, interruption and unconfirmed effects stay distinct in sources. Group related records without deleting or promoting them. To correct or withdraw a note, first RECALL_MEMORY its ID/root, use the current note as parentId and cite presented original evidence; old versions and evidence remain intact. Searching an original evidence ID also finds notes referencing it. Withdrawn/superseded notes must not be treated as current advice. A correction can reconsider the same evidence, but unchanged revisions are rejected. No automatic save, retry, skill promotion or world action occurs. Reading or repeating a note does not verify it. After saving, recall the logged note ID to inspect it; current search results are cleared to prevent stale interpretations.';
