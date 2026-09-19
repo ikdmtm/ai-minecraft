@@ -2,6 +2,7 @@ import { ExperienceMemory } from './experienceMemory.js';
 import { resolveGameplayWorldIdentity, advanceGameplayWorldIdentity, type GameplayWorldIdentity } from './worldIdentity.js';
 import mineflayer from 'mineflayer';
 import { attachClientReadiness } from './clientReadiness.js';
+import { SpatialRuntimeContext } from './spatialRuntimeContext.js';
 import { pathfinder } from 'mineflayer-pathfinder';
 import { SharedStateBus } from '../cognitive/sharedState.js';
 import type { RecentEvent } from '../types/gameState.js';
@@ -66,12 +67,13 @@ export class CognitiveOrchestrator {
   private safety: SafetyKernel | null = null;
   private executivePolicy: ExecutivePolicy | null = null;
   private planner: StrategicPlanner | null = null;
+  private spatial: SpatialRuntimeContext | null = null;
+  private detachReadiness: (() => void) | null = null;
   private executiveLoopPromise: Promise<void> | null = null;
   private running = false;
   private generation = 1;
 
   constructor(private readonly config: CognitiveOrchestratorConfig) {
-    // Resolve before opening the DB; invalid explicit identity must not change it.
     this.worldIdentity = resolveGameplayWorldIdentity(config);
     this.memory = new WorldMemory(config.dbPath, this.worldIdentity.memoryWorldId);
     this.experience = new ExperienceMemory(config.dbPath);
@@ -90,17 +92,9 @@ export class CognitiveOrchestrator {
     }));
   }
 
-  getShared(): SharedStateBus {
-    return this.shared;
-  }
-
-  getGeneration(): number {
-    return this.generation;
-  }
-
-  isRunning(): boolean {
-    return this.running;
-  }
+  getShared(): SharedStateBus { return this.shared; }
+  getGeneration(): number { return this.generation; }
+  isRunning(): boolean { return this.running; }
 
   getBotForDebug(): mineflayer.Bot {
     if (!this.bot) throw new Error('Bot is not connected');
@@ -108,103 +102,117 @@ export class CognitiveOrchestrator {
   }
 
   getGameplaySnapshot(): GameplayRuntimeSnapshot | null {
-    if (!this.bot) return null;
+    if (!this.bot || !this.spatial?.isReady()) return null;
     const inventory: Record<string, number> = {};
-    for (const item of this.bot.inventory.items()) {
-      inventory[item.name] = (inventory[item.name] ?? 0) + item.count;
-    }
+    for (const item of this.bot.inventory.items()) inventory[item.name] = (inventory[item.name] ?? 0) + item.count;
     const state = this.shared.get();
     return {
-      timestamp: Date.now(),
-      goal: state.currentGoal,
-      reflexState: state.reflexState,
-      threatLevel: state.threatLevel,
-      hp: this.bot.health,
-      hunger: this.bot.food,
-      position: {
-        x: this.bot.entity.position.x,
-        y: this.bot.entity.position.y,
-        z: this.bot.entity.position.z,
-      },
+      timestamp: Date.now(), goal: state.currentGoal, reflexState: state.reflexState,
+      threatLevel: state.threatLevel, hp: this.bot.health, hunger: this.bot.food,
+      position: { x: this.bot.entity.position.x, y: this.bot.entity.position.y, z: this.bot.entity.position.z },
       inventory,
     };
   }
 
   getJevWorldState(): JevWorldState | null {
-    if (!this.sensor || !this.primitive) return null;
+    if (!this.sensor || !this.primitive || !this.spatial?.isReady()) return null;
     return this.sensor.capture(this.primitive.snapshot());
   }
 
   getExecutiveWorldState(): ExecutiveWorldState | null {
-    if (!this.semantic || !this.taskExecutor) return null;
+    if (!this.semantic || !this.taskExecutor || !this.spatial?.isReady()) return null;
     return this.semantic.capture(this.taskExecutor.snapshot());
+  }
+
+  private attachSpatialContext(bot: mineflayer.Bot): SpatialRuntimeContext {
+    const spatial = new SpatialRuntimeContext(bot, () => this.memory.getWorldId(), {
+      invalidate: reason => {
+        if (this.spatial !== spatial) return;
+        this.safety?.stop();
+        this.planner?.stop();
+        this.taskExecutor?.interruptSpatialTransition(reason);
+        this.primitive?.stop();
+        this.provenance.clear();
+        // Spatial plans are transient; persistent experiences/procedures are not cleared.
+        this.shared.setGoal('');
+        this.shared.setSubGoals([]);
+        try { if (bot.currentWindow) bot.closeWindow(bot.currentWindow); } catch { /* old UI only */ }
+        console.log(JSON.stringify({ ts: new Date().toISOString(), kind: 'spatial_transition',
+          reason, spatial_epoch: spatial.getEpoch(), world_id: this.memory.getWorldId() }));
+      },
+      ready: () => {
+        if (!this.running || this.spatial !== spatial || this.bot !== bot) return;
+        this.safety?.start();
+        this.planner?.start();
+        console.log(JSON.stringify({ ts: new Date().toISOString(), kind: 'spatial_ready',
+          spatial_epoch: spatial.getEpoch(), dimension: String(bot.game.dimension), world_id: this.memory.getWorldId() }));
+      },
+    });
+    this.spatial = spatial;
+    return spatial;
   }
 
   async start(events: CognitiveEvents): Promise<void> {
     if (this.running) return;
+    if (!this.config.openaiApiKey) throw new Error('OPENAI_API_KEY is required for executive policy and strategic planning');
     this.refreshWorldIdentity();
     this.running = true;
+    let ownedBot: mineflayer.Bot | null = null;
+    try {
+      const bot = mineflayer.createBot({
+        host: this.config.mcHost, port: this.config.mcPort,
+        username: this.config.botUsername, hideErrors: false,
+      });
+      ownedBot = bot;
+      this.bot = bot;
+      const spatial = this.attachSpatialContext(bot);
+      this.detachReadiness = attachClientReadiness(bot);
+      bot.loadPlugin(pathfinder);
+      await spatial.waitUntilReady();
+      if (!this.running || this.bot !== bot || this.spatial !== spatial) throw new Error('spatial_start_cancelled');
 
-    const typesafeApiKey = process.env.TYPESAFE_API_KEY?.trim();
-    if (!this.config.openaiApiKey) {
-      throw new Error('OPENAI_API_KEY is required for executive policy and strategic planning');
+      const primitive = new SkillExecutor(bot, this.shared, this.provenance);
+      const sensor = new WorldSensor(bot, this.shared, this.provenance);
+      const semantic = new SemanticWorldModel(bot, this.shared, this.provenance, this.memory, this.experience);
+      const task = new TaskExecutor(bot, this.shared, primitive, sensor, semantic, this.memory, this.experience, spatial);
+      this.primitive = primitive;
+      this.sensor = sensor;
+      this.semantic = semantic;
+      this.taskExecutor = task;
+      this.safety = new SafetyKernel(bot, this.shared, primitive);
+      this.executivePolicy = new ExecutivePolicy({
+        typesafeApiKey: process.env.TYPESAFE_API_KEY?.trim(), openaiApiKey: this.config.openaiApiKey,
+        provider: parsePolicyProvider(process.env.POLICY_PROVIDER),
+        jevModel: process.env.JEV_MODEL?.trim() || 'jev-latest',
+        openaiModel: process.env.OPENAI_POLICY_MODEL?.trim() || 'gpt-5.6-luna',
+        typesafeBaseUrl: process.env.TYPESAFE_BASE_URL?.trim() || undefined,
+        timeoutMs: parsePositiveInt(process.env.OPENAI_POLICY_TIMEOUT_MS, 8_000),
+      });
+      this.planner = new StrategicPlanner(this.shared, this.config.openaiApiKey, this.config.strategicModel,
+        () => {
+          spatial.ticket();
+          return semantic.capture(task.snapshot());
+        }, goal => events.onGoalChanged(goal), spatial);
+      this.setupBotEvents(events);
+      this.safety.start();
+      this.planner.start();
+      this.executiveLoopPromise = this.runExecutiveLoop();
+      this.shared.pushEvent({ type: 'executive_runtime_started',
+        detail: `provider=${this.executivePolicy.getProvider()} model=${this.executivePolicy.getModel()} mode=event_driven`,
+        importance: 'medium' });
+    } catch (error) {
+      // An abandoned start must not tear down a newer connection.
+      if (this.bot === ownedBot) this.stop();
+      throw error;
     }
-
-    this.bot = mineflayer.createBot({
-      host: this.config.mcHost,
-      port: this.config.mcPort,
-      username: this.config.botUsername,
-      hideErrors: false,
-    });
-    attachClientReadiness(this.bot);
-    this.bot.loadPlugin(pathfinder);
-    await waitForSpawn(this.bot);
-
-    this.primitive = new SkillExecutor(this.bot, this.shared, this.provenance);
-    this.sensor = new WorldSensor(this.bot, this.shared, this.provenance);
-    this.semantic = new SemanticWorldModel(this.bot, this.shared, this.provenance, this.memory, this.experience);
-    this.taskExecutor = new TaskExecutor(
-      this.bot,
-      this.shared,
-      this.primitive,
-      this.sensor,
-      this.semantic,
-      this.memory,
-      this.experience,
-    );
-    this.safety = new SafetyKernel(this.bot, this.shared, this.primitive);
-    this.executivePolicy = new ExecutivePolicy({
-      typesafeApiKey,
-      openaiApiKey: this.config.openaiApiKey,
-      provider: parsePolicyProvider(process.env.POLICY_PROVIDER),
-      jevModel: process.env.JEV_MODEL?.trim() || 'jev-latest',
-      openaiModel: process.env.OPENAI_POLICY_MODEL?.trim() || 'gpt-5.6-luna',
-      typesafeBaseUrl: process.env.TYPESAFE_BASE_URL?.trim() || undefined,
-      timeoutMs: parsePositiveInt(process.env.OPENAI_POLICY_TIMEOUT_MS, 8_000),
-    });
-    this.planner = new StrategicPlanner(
-      this.shared,
-      this.config.openaiApiKey,
-      this.config.strategicModel,
-      () => this.semantic!.capture(this.taskExecutor!.snapshot()),
-      goal => events.onGoalChanged(goal),
-    );
-
-    this.setupBotEvents(events);
-    this.safety.start();
-    this.planner.start();
-    this.executiveLoopPromise = this.runExecutiveLoop();
-
-    this.shared.pushEvent({
-      type: 'executive_runtime_started',
-      detail: `provider=${this.executivePolicy.getProvider()} model=${this.executivePolicy.getModel()} mode=event_driven`,
-      importance: 'medium',
-    });
   }
 
   stop(): void {
     if (!this.running) return;
     this.running = false;
+    this.spatial?.dispose();
+    this.detachReadiness?.();
+    this.detachReadiness = null;
     this.safety?.stop();
     this.planner?.stop();
     this.taskExecutor?.stop();
@@ -219,6 +227,7 @@ export class CognitiveOrchestrator {
     this.safety = null;
     this.executivePolicy = null;
     this.planner = null;
+    this.spatial = null;
     this.executiveLoopPromise = null;
   }
 
@@ -235,116 +244,76 @@ export class CognitiveOrchestrator {
     this.generation++;
     this.shared.reset(this.generation);
     this.provenance.clear();
-    this.shared.pushEvent({
-      type: 'memory_world_rotated',
-      detail: `generation=${this.generation} world_id=${selected.memoryWorldId} global_memory=preserved`,
-      importance: 'medium',
-    });
+    this.shared.pushEvent({ type: 'memory_world_rotated',
+      detail: `generation=${this.generation} world_id=${selected.memoryWorldId} global_memory=preserved`, importance: 'medium' });
   }
 
   saveEpisode(deathCause: string): void {
-    this.shared.pushEvent({
-      type: 'episode_ended',
+    this.shared.pushEvent({ type: 'episode_ended',
       detail: `generation=${this.generation} cause=${deathCause} survival_minutes=${this.shared.getSurvivalMinutes().toFixed(1)}`,
-      importance: 'high',
-    });
+      importance: 'high' });
   }
 
   private async runExecutiveLoop(): Promise<void> {
-    while (this.running) {
+    // Capture ownership once. An old pending policy response can never use the
+    // new connection's task executor even if running becomes true again.
+    const semantic = this.semantic, task = this.taskExecutor, policy = this.executivePolicy, spatial = this.spatial;
+    if (!semantic || !task || !policy || !spatial) return;
+    const owner = () => this.running && this.spatial === spatial;
+    while (owner()) {
       try {
-        if (!this.semantic || !this.taskExecutor || !this.executivePolicy) break;
-
-        // Policy is invoked only at task boundaries. This is intentionally
-        // event-driven: no 400ms micromanagement while a task is in flight.
-        const before = this.semantic.capture(this.taskExecutor.snapshot());
-        const decision = await this.executivePolicy.decide(before);
-        if (!this.running) break;
-
-        // Re-capture meaningful state before executing. If inventory, safety
-        // context, strategy, or task state changed while the model was thinking,
-        // discard the stale answer instead of acting on an old world.
-        const afterThink = this.semantic.capture(this.taskExecutor.snapshot());
-        if (decision.basedOnRevision !== afterThink.revision) {
-          console.log(JSON.stringify({
-            ts: new Date().toISOString(),
-            kind: 'executive_stale_decision',
-            based_on_revision: decision.basedOnRevision,
-            current_revision: afterThink.revision,
-            task: decision.task,
-            target_id: decision.targetId ?? null,
-          }));
-          await delay(50);
+        if (!spatial.isReady()) { await delay(100); continue; }
+        const ticket = spatial.ticket();
+        const before = semantic.capture(task.snapshot());
+        const decision = await policy.decide(before);
+        if (!owner()) break;
+        if (!spatial.matches(ticket)) {
+          console.log(JSON.stringify({ ts: new Date().toISOString(), kind: 'executive_stale_decision',
+            reason: 'spatial_transition', spatial_epoch: ticket.epoch, current_epoch: spatial.getEpoch() }));
           continue;
         }
-
+        const afterThink = semantic.capture(task.snapshot());
+        if (decision.basedOnRevision !== afterThink.revision) {
+          console.log(JSON.stringify({ ts: new Date().toISOString(), kind: 'executive_stale_decision',
+            based_on_revision: decision.basedOnRevision, current_revision: afterThink.revision,
+            task: decision.task, target_id: decision.targetId ?? null }));
+          await delay(50); continue;
+        }
         this.shared.markTacticalUpdate();
-        const result = await this.taskExecutor.execute(decision);
-        console.log(JSON.stringify({
-          ts: new Date().toISOString(),
-          kind: 'executive_task_result',
-          task: decision.task,
-          target_id: decision.targetId ?? null,
-          status: result.status,
-          detail: result.detail,
-        }));
+        const result = await task.execute(decision);
+        console.log(JSON.stringify({ ts: new Date().toISOString(), kind: 'executive_task_result',
+          task: decision.task, target_id: decision.targetId ?? null, status: result.status, detail: result.detail }));
       } catch (error) {
-        console.log(JSON.stringify({
-          ts: new Date().toISOString(),
-          kind: 'executive_loop_error',
-          message: error instanceof Error ? error.message : String(error),
-        }));
+        if (owner()) console.log(JSON.stringify({ ts: new Date().toISOString(), kind: 'executive_loop_error',
+          message: error instanceof Error ? error.message : String(error) }));
       }
-
       await delay(100);
     }
   }
 
   private setupBotEvents(events: CognitiveEvents): void {
     const bot = this.bot!;
+    const sourceWorldId = this.memory.getWorldId();
+    const current = () => this.running && this.bot === bot;
     bot.on('death', () => {
-      this.memory.observe({ kind: 'life_event', key: `death:${this.memory.getWorldId()}`,
+      if (!current()) return;
+      this.memory.observe({ kind: 'life_event', key: `death:${sourceWorldId}`,
         label: 'A previous life ended', scope: 'global', retention: 'stable', confidence: 1,
-        metadata: { sourceWorldId: this.memory.getWorldId(), cause: 'unknown', recentOperation: this.taskExecutor?.snapshot().detail ?? '' } });
+        metadata: { sourceWorldId, cause: 'unknown', recentOperation: this.taskExecutor?.snapshot().detail ?? '' } });
       this.shared.pushEvent({ type: 'death', detail: 'mineflayer death event', importance: 'critical' });
       events.onDeath('mineflayer death event');
     });
     bot.on('entityHurt', entity => {
-      if (entity !== bot.entity) return;
-      this.shared.pushEvent({
-        type: 'took_damage',
-        detail: `hp=${bot.health}`,
-        importance: bot.health <= 8 ? 'critical' : 'high',
-      });
+      if (!current() || !this.spatial?.isReady() || entity !== bot.entity) return;
+      this.shared.pushEvent({ type: 'took_damage', detail: `hp=${bot.health}`,
+        importance: bot.health <= 8 ? 'critical' : 'high' });
     });
     bot.on('playerCollect', (collector, collected) => {
-      if (collector !== bot.entity) return;
-      this.shared.pushEvent({
-        type: 'collected_item',
-        detail: collected?.name ?? 'item',
-        importance: 'low',
-      });
+      if (!current() || !this.spatial?.isReady() || collector !== bot.entity) return;
+      this.shared.pushEvent({ type: 'collected_item', detail: collected?.name ?? 'item', importance: 'low' });
     });
+    bot.on('end', () => { if (current()) this.stop(); });
   }
-}
-
-function waitForSpawn(bot: mineflayer.Bot): Promise<void> {
-  return new Promise((resolve, reject) => {
-    const onSpawn = () => {
-      cleanup();
-      resolve();
-    };
-    const onError = (error: Error) => {
-      cleanup();
-      reject(error);
-    };
-    const cleanup = () => {
-      bot.removeListener('spawn', onSpawn);
-      bot.removeListener('error', onError);
-    };
-    bot.once('spawn', onSpawn);
-    bot.once('error', onError);
-  });
 }
 
 function parsePositiveInt(raw: string | undefined, fallback: number): number {
@@ -352,13 +321,9 @@ function parsePositiveInt(raw: string | undefined, fallback: number): number {
   const value = Number.parseInt(raw, 10);
   return Number.isFinite(value) && value > 0 ? value : fallback;
 }
-
 function parsePolicyProvider(raw: string | undefined): 'auto' | 'jev' | 'openai' {
   const value = raw?.trim().toLowerCase();
   if (value === 'jev' || value === 'openai') return value;
   return 'auto';
 }
-
-function delay(ms: number): Promise<void> {
-  return new Promise(resolve => setTimeout(resolve, ms));
-}
+function delay(ms: number): Promise<void> { return new Promise(resolve => setTimeout(resolve, ms)); }
