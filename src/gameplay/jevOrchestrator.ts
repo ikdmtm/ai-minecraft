@@ -146,6 +146,7 @@ export class CognitiveOrchestrator {
       this.primitive,
       this.sensor,
       this.semantic,
+      this.memory,
     );
     this.safety = new SafetyKernel(this.bot, this.shared, this.primitive);
     this.executivePolicy = new ExecutivePolicy({
