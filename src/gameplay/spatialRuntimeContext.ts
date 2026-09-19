@@ -47,6 +47,7 @@ export class SpatialRuntimeContext {
     listen(bot, 'game', () => this.refresh());
     listen(bot, 'death', () => { this.begin('death'); this.ended = true; });
     listen(bot, 'end', () => { this.begin('disconnect'); this.ended = true; });
+    listen(bot, 'error', () => { this.begin('connection_error'); this.ended = true; });
     // Some chunk writes finish after the event callback; never assume a timeout
     // implies readiness. This is an observation gate, not an LLM polling loop.
     this.timer = setInterval(() => this.refresh(), 100);
