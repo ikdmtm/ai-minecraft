@@ -52,7 +52,7 @@ export interface GameplayRuntimeSnapshot {
 export class CognitiveOrchestrator {
   private readonly shared = new SharedStateBus();
   private readonly provenance = new WorldProvenance();
-  private readonly memory = new WorldMemory();
+  private readonly memory: WorldMemory;
   private bot: mineflayer.Bot | null = null;
   private sensor: WorldSensor | null = null;
   private primitive: SkillExecutor | null = null;
@@ -65,7 +65,9 @@ export class CognitiveOrchestrator {
   private running = false;
   private generation = 1;
 
-  constructor(private readonly config: CognitiveOrchestratorConfig) {}
+  constructor(private readonly config: CognitiveOrchestratorConfig) {
+    this.memory = new WorldMemory(config.dbPath);
+  }
 
   getShared(): SharedStateBus {
     return this.shared;
@@ -202,7 +204,12 @@ export class CognitiveOrchestrator {
   nextGeneration(): void {
     this.generation++;
     this.shared.reset(this.generation);
-    this.memory.clear();
+    const worldId = this.memory.startNewWorld();
+    this.shared.pushEvent({
+      type: 'memory_world_rotated',
+      detail: `generation=${this.generation} world_id=${worldId} global_memory=preserved`,
+      importance: 'medium',
+    });
   }
 
   saveEpisode(deathCause: string): void {
