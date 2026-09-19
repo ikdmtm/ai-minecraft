@@ -11,8 +11,23 @@ VIEWER_CANVAS_VERSION="${GAMEPLAY_VIEWER_CANVAS_VERSION:-3.1.0}"
 MODE="${1:-reset}"
 RESET_SEED="${2:-8675309}"
 
+# Keep reset/start semantics. Old run.sh versions already forward "check" and
+# re-exec this updated script after pulling; no separate manual git step needed.
+case "$MODE" in
+  reset|start|check|eval) ;;
+  *) printf 'ERROR: Unknown mode %s. Use bash run.sh [continue|check|eval|reset SEED].\n' "$MODE" >&2; exit 64 ;;
+esac
+
 cd "$ROOT_DIR"
 mkdir -p "$STATE_DIR"
+
+# Also runs on failed preflight or failed evaluation; share one existing run log.
+report_log() {
+  if [[ -n "${AI_MC_RUN_LOG:-}" ]]; then
+    printf '\n[AI Minecraft] 共有するログファイル: %s\n' "$AI_MC_RUN_LOG"
+  fi
+}
+trap report_log EXIT
 
 log() {
   printf '\n[AI Minecraft] %s\n' "$*"
@@ -58,6 +73,7 @@ ensure_system_dependencies() {
   command -v curl >/dev/null 2>&1 || missing+=(curl)
   command -v jq >/dev/null 2>&1 || missing+=(jq)
   command -v java >/dev/null 2>&1 || missing+=(openjdk-21-jre-headless)
+  command -v python3 >/dev/null 2>&1 || missing+=(python3)
   if (( ${#missing[@]} > 0 )); then
     log "Installing system dependencies: ${missing[*]}"
     sudo apt-get update
@@ -141,7 +157,7 @@ ensure_secret() {
     echo
   fi
   if [[ -z "$key" ]]; then
-    echo "ERROR: ${name} is required for Jev gameplay mode." >&2
+    echo "ERROR: ${name} is required for gameplay mode." >&2
     exit 1
   fi
   set_env_value "$name" "$key"
@@ -153,17 +169,72 @@ ensure_env() {
     log "First-time setup: creating .env"
     cp .env.example .env
   fi
-  set_env_value LLM_PROVIDER openai
   ensure_secret OPENAI_API_KEY
+  # The policy resolves .env and inherited environment itself. Never overwrite
+  # an explicit provider/model or disguise missing capabilities as a fallback.
+  log "Keeping configured provider and models unchanged"
+}
 
-  local typesafe_key
-  typesafe_key="$(sed -n 's/^TYPESAFE_API_KEY=//p' .env | head -n1 || true)"
-  if is_placeholder "$typesafe_key"; then
-    set_env_value POLICY_PROVIDER auto
-    log "TypeSafe/Jev access is not configured; using OpenAI typed policy for now"
+check_gameplay() {
+  log "Checking configured gameplay capabilities before any world/server changes"
+  local report status alternative reply
+  if report="$(npm run --silent check:gameplay)"; then
+    printf '%s\n' "$report"
+    log "Static interface check passed; remote authentication and gameplay are not yet verified"
+    return 0
   else
-    log "TypeSafe/Jev key detected; POLICY_PROVIDER=auto will prefer Jev"
+    status=$?
   fi
+  printf '%s\n' "$report"
+
+  # Only the isolated trial offers an explicitly confirmed, process-local
+  # alternative. Never rewrite .env or silently downgrade the configured path.
+  if [[ "$MODE" == "eval" && "$status" == "2" ]] &&
+      jq -e '.effectiveProvider == "jev" and .issues == ["configured_adapter_missing_autonomy_tasks"]' \
+        >/dev/null 2>&1 <<< "$report"; then
+    if alternative="$(POLICY_PROVIDER=openai npm run --silent check:gameplay)"; then
+      printf '\n%s\n' \
+        '[AI Minecraft] 現在のJEV接続実装では、手順保存・記憶検索などが未対応です。' \
+        '今回の隔離60秒テストだけ、設定済みOpenAIモデルで実行することはできます。' \
+        '.envや通常起動の設定は変更しません。モデルAPIの利用料金は発生し得ます。' \
+        '時間制限は金額の上限ではありません。'
+      printf '%s\n' "$alternative"
+      printf '[AI Minecraft] 今回だけOpenAI経路を使用しますか？ [y/N]: '
+      if read -r reply && [[ "$reply" == "y" || "$reply" == "Y" ]]; then
+        export POLICY_PROVIDER=openai
+        log "Operator approved OpenAI for this isolated trial only; .env unchanged"
+        return 0
+      fi
+      log "接続経路を変更せず停止します（明示的な承認なし）。"
+    fi
+  fi
+
+  printf '\n[AI Minecraft] 起動前確認で停止しました（終了コード %s）。\n' "$status" >&2
+  printf '%s\n' \
+    'ワールドのリセット・サーバーの起動/停止・AIの起動は行っていません。記憶DBも変更していません。' \
+    '上の issues / missingTasks と、この実行ログを共有してください。' \
+    '.env やAPIキーそのものは共有不要です。' >&2
+  return "$status"
+}
+
+run_evaluation() {
+  log "Starting isolated 60-second trial; the existing world and memory DB are not modified"
+  log "Uses configured model APIs; the time bound is not a spending limit"
+  # eval:gameplay owns its fresh server/port, memory backup, diagnostics and
+  # cleanup. Do not call mc:setup/reset/start or stop_previous_gameplay here.
+  local status
+  if npm run eval:gameplay -- --run --seconds=60; then
+    log "試験プロセスが終了しました。自律プレイの成功判定はログ確認後です。"
+    return 0
+  else
+    status=$?
+  fi
+  if [[ "$status" == "124" ]]; then
+    log "60秒の試験時間上限で終了しました（正常に遊べたという判定ではありません）。"
+  else
+    log "試験が停止しました（終了コード $status）。ログを共有してください。"
+  fi
+  return "$status"
 }
 
 ensure_minecraft_server() {
@@ -204,18 +275,30 @@ stop_previous_gameplay() {
 
 run_gameplay() {
   stop_previous_gameplay
-  log "Launching typed-policy gameplay AI (Jev when available, OpenAI fallback otherwise)"
+  log "Launching gameplay AI with the checked provider and model settings"
   log "Close this terminal or press Ctrl+C to stop the AI. Minecraft server stays running."
   [[ -n "${AI_MC_RUN_LOG:-}" ]] && log "Share this run log when reporting behavior: $AI_MC_RUN_LOG"
   echo "$$" > "$GAMEPLAY_PID_FILE"
-  trap 'rm -f "$GAMEPLAY_PID_FILE"' EXIT INT TERM
+  trap 'rm -f "$GAMEPLAY_PID_FILE"; report_log' EXIT INT TERM
   npm run start:gameplay
 }
 
 sync_repository
 ensure_system_dependencies
 ensure_node_modules
-ensure_viewer_dependencies
+# check is update-and-inspect only: no .env creation, secret prompt, viewer,
+# world setup/reset/start, previous-runtime stop, or gameplay launch.
+if [[ "$MODE" == "check" ]]; then
+  check_gameplay
+  log "確認のみ完了しました。ゲームは開始していません。"
+  exit 0
+fi
 ensure_env
+check_gameplay
+if [[ "$MODE" == "eval" ]]; then
+  run_evaluation
+  exit 0
+fi
+ensure_viewer_dependencies
 ensure_minecraft_server
 run_gameplay
