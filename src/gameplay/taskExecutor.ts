@@ -1,4 +1,5 @@
 import type mineflayer from 'mineflayer';
+import { randomUUID } from 'crypto';
 import { Vec3 } from 'vec3';
 import type { SharedStateBus } from '../cognitive/sharedState.js';
 import { SemanticWorldModel } from './semanticWorldModel.js';
@@ -6,7 +7,7 @@ import { SkillExecutor } from './skillExecutor.js';
 import type { WorldSensor } from './worldSensor.js';
 import type { ExecutiveActionCapability, ExecutiveDecision, ExecutiveTaskSnapshot, TaskExecutionResult } from './executiveTypes.js';
 import { normalizeMemoryDimension, type WorldMemory } from './worldMemory.js';
-import { ExperienceMemory, bindProcedureStep, completeProcedureStepBinding, ProcedureBindingError, procedureEnvironmentMatches } from './experienceMemory.js';
+import { ExperienceMemory, bindProcedureStep, completeProcedureStepBinding, ProcedureBindingError, procedureEnvironmentMatches, type Evidence, type ReplayOutcome } from './experienceMemory.js';
 import { parseOperation, windowSnapshot, type PrimitiveOperation } from './primitiveOperations.js';
 import { observeOperation as observation, assessOperationEffect, type EffectAssessment } from './operationEvidence.js';
 import type { SpatialRuntimeContext } from './spatialRuntimeContext.js';
@@ -77,10 +78,13 @@ export class TaskExecutor {
           detail = 'knowledge_query_completed'; break;
         }
         case 'SAVE_PROCEDURE': {
-          const procedure = this.experience.save(decision.procedureName ?? '', decision.evidenceIds ?? []);
+          const procedure = decision.procedureId
+            ? this.experience.revise(decision.procedureId, decision.procedureName ?? '', decision.evidenceIds ?? [], decision.reason ?? '')
+            : this.experience.save(decision.procedureName ?? '', decision.evidenceIds ?? []);
           detail = `procedure_saved:${procedure.id}:${procedure.status}`;
           this.log('procedure_saved', { task_id: this.current.id, procedure_id: procedure.id,
             procedure_name: procedure.name, procedure_status: procedure.status,
+            parent_procedure_id: procedure.parentId ?? null, revision: procedure.revision ?? 1,
             evidence_ids: procedure.evidenceIds, source: decision.source,
             based_on_revision: decision.basedOnRevision });
           break;
@@ -90,30 +94,45 @@ export class TaskExecutor {
           if (!procedure) throw new Error('procedure_not_found');
           if (!procedureEnvironmentMatches(procedure, this.bot.version, this.bot.game.dimension)) throw new Error('procedure_environment_mismatch');
           const anchor = this.bot.entity.position.floored(), bindings = new Map<string, number>();
-          const deadline = Date.now() + 60000, startedGoal = this.shared.get().currentGoal;
+          const startedAt = Date.now(), deadline = startedAt + 60000, startedGoal = this.shared.get().currentGoal;
+          const attemptId = randomUUID(), replayTaskId = this.current.id, replayVersion = this.bot.version;
+          const traces: Evidence[] = [];
+          let replayOutcome: ReplayOutcome = 'interrupted', replayDetail = 'replay_not_completed';
           try {
             for (const [stepIndex, step] of procedure.steps.entries()) {
               check();
               if (this.shared.get().currentGoal !== startedGoal || Date.now() >= deadline) throw new Error('task_replan:procedure_boundary_changed');
               const op = bindProcedureStep(step, this.bot, anchor, bindings);
-              this.log('procedure_step_bound', { task_id: this.current.id, procedure_id: procedure.id,
-                step_index: stepIndex, operation: op, world_id: taskWorldId, dimension: taskDimension,
+              this.log('procedure_step_bound', { task_id: replayTaskId, procedure_id: procedure.id,
+                replay_id: attemptId, step_index: stepIndex, operation: op, world_id: taskWorldId, dimension: taskDimension,
                 evidence_id: procedure.evidenceIds[stepIndex] ?? null });
-              const outcome = await this.operate(op, check, Math.max(100, deadline - Date.now()));
+              const outcome = await this.operate(op, check, Math.max(100, deadline - Date.now()), trace => traces.push(trace));
               // Missing confirmation calls for re-observation/replanning, not
               // a false failure of this skill or blind execution of its next step.
               if (!outcome.verified) throw new Error('task_replan:procedure_step_effect_unconfirmed');
               completeProcedureStepBinding(step, this.bot, bindings);
             }
-            check();
-            this.experience.recordReplay(procedure.id, true);
+            check(); replayOutcome = 'succeeded'; replayDetail = 'all_step_postconditions_verified';
           } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
             if (error instanceof ProcedureBindingError) {
-              this.log('procedure_rebind_required', { task_id: this.current.id, procedure_id: procedure.id, reason: error.message });
-              throw new Error(`task_replan:${error.message}`);
+              replayOutcome = 'interrupted'; replayDetail = message;
+              this.log('procedure_rebind_required', { task_id: replayTaskId, procedure_id: procedure.id, reason: message });
+              throw new Error(`task_replan:${message}`);
             }
-            if (!(error instanceof Error && error.message.startsWith('task_replan:'))) this.experience.recordReplay(procedure.id, false);
+            replayDetail = message;
+            replayOutcome = message === 'task_replan:procedure_step_effect_unconfirmed' ? 'unconfirmed'
+              : message.startsWith('task_replan:') || this.stopped || token !== this.epoch ? 'interrupted'
+                : traces.at(-1)?.status === 'failed' ? 'failed' : 'interrupted';
             throw error;
+          } finally {
+            const record = this.experience.recordReplayAttempt(procedure.id, {
+              id: attemptId, outcome: replayOutcome, evidenceIds: traces.map(trace => trace.id), detail: replayDetail,
+              worldId: taskWorldId, version: replayVersion, dimension: taskDimension!, startedAt,
+            });
+            this.log('procedure_replay_recorded', { task_id: replayTaskId, replay_id: record.id,
+              procedure_id: procedure.id, outcome: record.outcome, evidence_ids: record.evidenceIds,
+              world_id: record.worldId, dimension: record.dimension, before: record.before, after: record.after });
           }
           detail = `procedure_replayed:${procedure.id}`; break;
         }
@@ -138,7 +157,7 @@ export class TaskExecutor {
     this.stopped = true; this.epoch++; this.primitive.stop();
     if (this.current.status === 'running') this.finish('interrupted', 'runtime_stop');
   }
-  private async operate(op: PrimitiveOperation, check: () => void, timeout = 70000): Promise<{ detail: string; verified: boolean }> {
+  private async operate(op: PrimitiveOperation, check: () => void, timeout = 70000, onEvidence?: (evidence: Evidence) => void): Promise<{ detail: string; verified: boolean }> {
     check();
     const taskId = this.current.id, operationEpoch = this.epoch;
     const ticket = this.spatial?.ticket();
@@ -206,6 +225,7 @@ export class TaskExecutor {
       }
       const evidence = this.experience.append({ worldId, version, dimension,
         operation: op, status, verified, detail, effect, origin, blockName, entityName, window: win });
+      onEvidence?.(evidence);
       this.log('operation_evidence', { task_id: taskId, evidence_id: evidence.id,
         experience_session_id: evidence.sessionId, evidence_sequence: evidence.sequence,
         world_id: worldId, minecraft_version: version, dimension, spatial_epoch: ticket?.epoch ?? null,
