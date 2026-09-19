@@ -5,6 +5,8 @@ export type GameplayActionType =
   | 'MINE'
   | 'DIG_STAIRCASE'
   | 'CRAFT'
+  | 'PLACE_ITEM'
+  | 'COOK_FOOD'
   | 'BUILD_SHELTER'
   | 'HUNT_FOOD'
   | 'EAT'
@@ -22,6 +24,8 @@ export interface TypedGameplayDecision {
   blockTargetId?: string;
   entityTargetId?: string;
   craftItem?: CraftItem;
+  placeItem?: string;
+  cookItem?: string;
   direction?: CompassDirection;
   excavationMode?: 'down' | 'up';
   targetPosition?: { x: number; y: number; z: number };
@@ -85,6 +89,8 @@ export const GAMEPLAY_ACTIONS: GameplayActionType[] = [
   'MINE',
   'DIG_STAIRCASE',
   'CRAFT',
+  'PLACE_ITEM',
+  'COOK_FOOD',
   'BUILD_SHELTER',
   'HUNT_FOOD',
   'EAT',
