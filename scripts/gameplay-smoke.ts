@@ -143,15 +143,26 @@ async function main() {
     console.log(JSON.stringify({ phase: 'use_verified', item: 'cooked_chicken', hunger_before: hungerBefore, hunger_after: bot.food }));
     console.log('REAL_SERVER_USE_PASSED: selected food consumed and hunger increased');
 
-    command(`summon minecraft:pig ${ox+2.5} 201 ${oz} {NoAI:1b,PersistenceRequired:1b}`);
-    command(`summon minecraft:pig ${ox-2.5} 201 ${oz} {NoAI:1b,PersistenceRequired:1b}`);
-    await until(() => Object.values(bot!.entities).filter((entity: any) => entity.name === 'pig').length >= 2, 'fixture_pigs');
-
-    const pigs = Object.values(bot.entities)
+    const attackPigPosition = new Vec3(ox + 2.5, 201, oz + 0.5);
+    const interactPigPosition = new Vec3(ox - 2.5, 201, oz + 0.5);
+    command(`summon minecraft:pig ${attackPigPosition.x} ${attackPigPosition.y} ${attackPigPosition.z} {NoAI:1b,PersistenceRequired:1b}`);
+    command(`summon minecraft:pig ${interactPigPosition.x} ${interactPigPosition.y} ${interactPigPosition.z} {NoAI:1b,PersistenceRequired:1b}`);
+    const nearestPig = (position: Vec3) => Object.values(bot!.entities)
       .filter((entity: any) => entity.name === 'pig')
-      .sort((a: any, b: any) => a.position.x - b.position.x) as any[];
-    const interactPig = pigs[0];
-    const attackPig = pigs[pigs.length - 1];
+      .sort((a: any, b: any) => a.position.distanceTo(position) - b.position.distanceTo(position))[0] as any | undefined;
+    await until(() => {
+      const attack = nearestPig(attackPigPosition);
+      const interact = nearestPig(interactPigPosition);
+      return Boolean(
+        attack && interact && attack.id !== interact.id &&
+        attack.position.distanceTo(attackPigPosition) < 1 &&
+        interact.position.distanceTo(interactPigPosition) < 1,
+      );
+    }, 'fixture_pigs');
+    const attackPig = nearestPig(attackPigPosition)!;
+    const interactPig = nearestPig(interactPigPosition)!;
+    assert.ok(bot.entity.position.distanceTo(attackPig.position) <= 3.5);
+    assert.ok(bot.entity.position.distanceTo(interactPig.position) <= 3.5);
 
     await run({ action: 'EQUIP', item: 'wooden_pickaxe' });
     assert.equal(bot.heldItem?.name, 'wooden_pickaxe');
