@@ -737,10 +737,10 @@ export class SkillExecutor {
     // First try the player's 2x2 inventory crafting grid exactly as Minecraft
     // exposes it. Do not synthesize prerequisite items here; deciding to make
     // ingredients is an executive decision.
+    await this.prepareCraftingState();
     let recipes = this.bot.recipesFor(itemId, null, 1, null);
     if (recipes.length > 0) {
-      await this.bot.craft(recipes[0], 1);
-      this.shared.pushEvent({ type: 'crafted', detail: item, importance: 'low' });
+      await this.craftRecipeWithRecovery(item, recipes[0], null);
       return;
     }
 
@@ -770,17 +770,97 @@ export class SkillExecutor {
       throw new Error(`no_recipe:${item}`);
     }
 
-    await this.bot.craft(recipes[0], 1, table);
-    this.shared.pushEvent({ type: 'crafted', detail: item, importance: 'low' });
+    await this.craftRecipeWithRecovery(item, recipes[0], table);
   }
 
   private async craftNamed(itemName: string, table: any | null): Promise<void> {
     const itemId = this.bot.registry.itemsByName[itemName]?.id;
     if (!itemId) throw new Error(`unknown_item:${itemName}`);
+
+    await this.prepareCraftingState();
     const recipes = this.bot.recipesFor(itemId, null, 1, table ?? null);
     if (recipes.length === 0) throw new Error(`no_recipe:${itemName}`);
-    await this.bot.craft(recipes[0], 1, table ?? undefined);
+    await this.craftRecipeWithRecovery(itemName, recipes[0], table);
+  }
+
+  private async craftRecipeWithRecovery(
+    itemName: string,
+    recipe: any,
+    table: any | null,
+  ): Promise<void> {
+    const before = this.inventoryCount(itemName);
+    try {
+      await this.bot.craft(recipe, 1, table ?? undefined);
+    } catch (error) {
+      await this.reconcileCraftingState();
+
+      // Mineflayer 1.21.x crafting can time out waiting for updateSlot even
+      // after the server accepted the craft. Trust the resynchronised server
+      // inventory rather than immediately issuing the recipe a second time.
+      if (this.inventoryCount(itemName) > before) {
+        this.shared.pushEvent({
+          type: 'crafted_reconciled',
+          detail: itemName,
+          importance: 'medium',
+        });
+        return;
+      }
+
+      throw error;
+    }
+
     this.shared.pushEvent({ type: 'crafted', detail: itemName, importance: 'low' });
+  }
+
+  private async prepareCraftingState(): Promise<void> {
+    const currentWindow = this.bot.currentWindow;
+    if (currentWindow) {
+      try {
+        const sync = (this.bot as any)._syncWindow?.(currentWindow);
+        if (sync) await withTimeout(Promise.resolve(sync), 3_000, 'craft_window_sync_timeout');
+      } catch {
+        // Best effort; close the stale GUI even if its model cannot be synced.
+      }
+      try {
+        await this.bot.closeWindow(currentWindow);
+      } catch {
+        // Best effort.
+      }
+    }
+
+    await this.syncPlayerInventory();
+  }
+
+  private async reconcileCraftingState(): Promise<void> {
+    const currentWindow = this.bot.currentWindow;
+    if (currentWindow) {
+      try {
+        const sync = (this.bot as any)._syncWindow?.(currentWindow);
+        if (sync) await withTimeout(Promise.resolve(sync), 3_000, 'craft_reconcile_window_timeout');
+      } catch {
+        // Continue with the authoritative player-inventory refresh below.
+      }
+      try {
+        await this.bot.closeWindow(currentWindow);
+      } catch {
+        // Best effort.
+      }
+    }
+
+    // Give late server slot packets a short chance to land, then explicitly
+    // request a full window-0 inventory snapshot.
+    await delay(150);
+    await this.syncPlayerInventory();
+    await delay(100);
+  }
+
+  private async syncPlayerInventory(): Promise<void> {
+    try {
+      const sync = (this.bot as any)._syncWindow?.(this.bot.inventory);
+      if (sync) await withTimeout(Promise.resolve(sync), 3_000, 'inventory_sync_timeout');
+    } catch {
+      // A sync failure should not itself wedge the skill executor.
+    }
   }
 
   private async ensurePlanks(): Promise<void> {
