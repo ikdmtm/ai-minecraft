@@ -75,6 +75,8 @@ export class ExecutivePolicy {
 
     try {
       const targetIds = ['none', ...state.targets.map(target => target.id)];
+      const resourceOptions = dynamicResourceOptions(state);
+      const craftOptions = dynamicCraftOptions(state);
       const response = await fetch('https://api.openai.com/v1/responses', {
         method: 'POST',
         headers: {
@@ -89,7 +91,7 @@ export class ExecutivePolicy {
           instructions: executiveInstructions(),
           input: JSON.stringify({
             ...state,
-            capability_reference: capabilityReference(),
+            capability_reference: capabilityReference(state),
           }),
           max_output_tokens: 512,
           text: {
@@ -103,8 +105,8 @@ export class ExecutivePolicy {
                 properties: {
                   task: { type: 'string', enum: EXECUTIVE_TASKS },
                   target_id: { type: 'string', enum: targetIds },
-                  resource: { type: 'string', enum: EXECUTIVE_RESOURCES },
-                  craft_item: { type: 'string', enum: CRAFT_ITEMS },
+                  resource: { type: 'string', enum: resourceOptions },
+                  craft_item: { type: 'string', enum: craftOptions },
                   structure: { type: 'string', enum: EXECUTIVE_STRUCTURES },
                   amount: { type: 'integer', minimum: 1, maximum: 32 },
                   confidence: { type: 'number', minimum: 0, maximum: 1 },
@@ -145,8 +147,8 @@ export class ExecutivePolicy {
       const decision = normalizeDecisionParameters(state, {
         task: validateTask(parsed.task),
         targetId: validateTargetId(parsed.target_id, state.targets),
-        resource: validateResource(parsed.resource),
-        craftItem: validateCraftItem(parsed.craft_item),
+        resource: validateResource(parsed.resource, state),
+        craftItem: validateCraftItem(parsed.craft_item, state),
         structure: validateStructure(parsed.structure),
         amount: clampAmount(parsed.amount),
         confidence: clampConfidence(parsed.confidence),
@@ -179,7 +181,7 @@ export class ExecutivePolicy {
           model: this.jevModel,
           state: {
             ...state,
-            capability_reference: capabilityReference(),
+            capability_reference: capabilityReference(state),
           },
           questions: {
             task: {
@@ -195,12 +197,12 @@ export class ExecutivePolicy {
             resource: {
               type: 'choice',
               instructions: 'Choose the resource for GATHER_RESOURCE, otherwise none.',
-              criteria: resourceCriteria(),
+              criteria: resourceCriteria(state),
             },
             craft_item: {
               type: 'choice',
               instructions: 'Choose the concrete item for CRAFT_ITEM, otherwise none.',
-              criteria: craftCriteria(),
+              criteria: craftCriteria(state),
             },
             structure: {
               type: 'choice',
@@ -220,8 +222,8 @@ export class ExecutivePolicy {
       const decision = normalizeDecisionParameters(state, {
         task: validateTask(answers.task?.choice ?? 'WAIT'),
         targetId: validateTargetId(answers.target?.choice, state.targets),
-        resource: validateResource(answers.resource?.choice),
-        craftItem: validateCraftItem(answers.craft_item?.choice),
+        resource: validateResource(answers.resource?.choice, state),
+        craftItem: validateCraftItem(answers.craft_item?.choice, state),
         structure: validateStructure(answers.structure?.choice),
         amount: defaultAmount(),
         confidence: clampConfidence(answers.task?.confidence),
