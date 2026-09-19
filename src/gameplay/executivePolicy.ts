@@ -235,7 +235,10 @@ function executiveInstructions(): string {
 function capabilityReference(state: ExecutiveWorldState): Record<string, unknown> {
   return {
     affordances: state.capabilities.actions,
+    item_specs: state.capabilities.itemSpecs,
+    block_specs: state.capabilities.blockSpecs,
     reachable_recipes: state.capabilities.recipes,
+    currently_craftable: state.capabilities.craft,
     observed_resource_drops: state.capabilities.gather,
     memory: state.memory,
   };
