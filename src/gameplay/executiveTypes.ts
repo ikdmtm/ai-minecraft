@@ -1,7 +1,6 @@
 import type { CraftItem } from './typedActions.js';
 
 export type ExecutiveTaskType =
-  | 'CONTINUE_TASK'
   | 'EXECUTE_AFFORDANCE'
   | 'WAIT';
 
@@ -183,7 +182,6 @@ export interface TaskExecutionResult {
 }
 
 export const EXECUTIVE_TASKS: ExecutiveTaskType[] = [
-  'CONTINUE_TASK',
   'EXECUTE_AFFORDANCE',
   'WAIT',
 ];
