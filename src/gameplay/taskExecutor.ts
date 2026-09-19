@@ -272,26 +272,29 @@ export class TaskExecutor {
 
     const direction = excavationDirection(target);
     if (!direction) throw new Error('excavate_target_missing_direction');
+    const mode = excavationMode(target);
 
     this.update('excavating_target', {
       target: target.id,
       distance: target.distance,
       direction,
+      mode,
     });
 
     const result = await this.runPrimitive({
       action: 'DIG_STAIRCASE',
       direction,
+      excavationMode: mode,
       targetPosition: target.position,
       confidence: 1,
       source: 'task',
-      reason: `executive_excavate:${target.id}`,
+      reason: `executive_excavate:${mode}:${target.id}`,
     }, 40_000);
     if (result.status === 'interrupted') throw new Error('task_replan:excavation_interrupted');
     if (result.status !== 'succeeded') throw new Error(`excavate_failed:${result.detail}`);
 
     this.safeCheckpoint(startedGoal, 'excavation_segment_completed');
-    return `excavated:${target.id}`;
+    return `excavated:${mode}:${target.id}`;
   }
 
   private async attackTarget(
@@ -642,6 +645,10 @@ function excavationDirection(target: SemanticTarget): 'N' | 'E' | 'S' | 'W' | nu
   return value === 'N' || value === 'E' || value === 'S' || value === 'W'
     ? value
     : null;
+}
+
+function excavationMode(target: SemanticTarget): 'down' | 'up' {
+  return target.metadata.mode === 'up' ? 'up' : 'down';
 }
 
 function delay(ms: number): Promise<void> {
