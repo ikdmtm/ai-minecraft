@@ -14,20 +14,8 @@ import {
   canHarvestBlockNow,
 } from './capabilityRegistry.js';
 
-const LOG_NAMES = new Set([
-  'oak_log', 'birch_log', 'spruce_log', 'jungle_log', 'acacia_log',
-  'dark_oak_log', 'cherry_log', 'mangrove_log',
-]);
-
-const FOOD_ANIMALS = new Set(['cow', 'pig', 'chicken', 'sheep', 'rabbit']);
 const WATERLIKE = new Set([
   'water', 'bubble_column', 'seagrass', 'tall_seagrass', 'kelp', 'kelp_plant',
-]);
-
-const EXCAVATION_BLOCKS = new Set([
-  'grass_block', 'dirt', 'coarse_dirt', 'podzol', 'mycelium',
-  'stone', 'andesite', 'diorite', 'granite', 'tuff', 'calcite',
-  'deepslate',
 ]);
 
 export class SemanticWorldModel {
@@ -214,11 +202,11 @@ export class SemanticWorldModel {
         const support = this.bot.blockAt(next.offset(0, -1, 0));
         const feet = this.bot.blockAt(next);
         const head = this.bot.blockAt(next.offset(0, 1, 0));
-        if (!isExcavationMaterial(support)) {
+        if (!isSafeExcavationSupport(support)) {
           safe = false;
           break;
         }
-        if (!isExcavatableVolume(feet) || !isExcavatableVolume(head)) {
+        if (!isExcavatableVolume(this.bot, feet) || !isExcavatableVolume(this.bot, head)) {
           safe = false;
           break;
         }
@@ -444,129 +432,6 @@ export class SemanticWorldModel {
       .slice(0, 16);
   }
 
-  private findTreeClusters(): SemanticTarget[] {
-    let positions: any[] = [];
-    try {
-      positions = this.bot.findBlocks({
-        matching: block => LOG_NAMES.has(block.name),
-        maxDistance: 40,
-        count: 64,
-      }) as any[];
-    } catch {
-      return [];
-    }
-
-    const logs = positions
-      .map(pos => this.bot.blockAt(pos))
-      .filter((block): block is NonNullable<typeof block> => Boolean(block && LOG_NAMES.has(block.name)))
-      .filter(block => !this.provenance?.isPlayerPlaced(block.position));
-
-    const groups: Array<{ blocks: typeof logs; cx: number; cz: number }> = [];
-    for (const block of logs) {
-      let group = groups.find(entry => Math.hypot(block.position.x - entry.cx, block.position.z - entry.cz) <= 6);
-      if (!group) {
-        group = { blocks: [], cx: block.position.x, cz: block.position.z };
-        groups.push(group);
-      }
-      group.blocks.push(block);
-      group.cx = group.blocks.reduce((sum, item) => sum + item.position.x, 0) / group.blocks.length;
-      group.cz = group.blocks.reduce((sum, item) => sum + item.position.z, 0) / group.blocks.length;
-    }
-
-    const origin = this.bot.entity.position;
-    const result: SemanticTarget[] = [];
-    for (const group of groups) {
-      const nearest = [...group.blocks].sort(
-        (a, b) => origin.distanceTo(a.position) - origin.distanceTo(b.position),
-      )[0];
-      if (!nearest) continue;
-      const stand = this.findAdjacentStand(nearest.position.x, nearest.position.y, nearest.position.z);
-      const targetPosition = stand ?? {
-        x: nearest.position.x,
-        y: nearest.position.y,
-        z: nearest.position.z,
-      };
-      const distance = distance3(origin, targetPosition);
-      result.push({
-        id: `tree_cluster:${Math.round(group.cx)}:${Math.round(group.cz)}`,
-        kind: 'tree_cluster',
-        position: targetPosition,
-        distance: round1(distance),
-        score: 120 + Math.min(40, group.blocks.length * 4) - distance * 2,
-        risk: 'low',
-        metadata: {
-          logCount: group.blocks.length,
-          nearestLogX: nearest.position.x,
-          nearestLogY: nearest.position.y,
-          nearestLogZ: nearest.position.z,
-        },
-      });
-    }
-
-    return result.sort((a, b) => b.score - a.score).slice(0, 6);
-  }
-
-  private findAdjacentStand(x: number, y: number, z: number): SemanticPosition | null {
-    const offsets = [
-      [1, 0], [-1, 0], [0, 1], [0, -1],
-      [1, 1], [1, -1], [-1, 1], [-1, -1],
-    ] as const;
-    for (const [dx, dz] of offsets) {
-      for (let dy = 2; dy >= -4; dy--) {
-        const standY = y + dy;
-        const floor = this.bot.blockAt(new Vec3(x + dx, standY - 1, z + dz));
-        const feet = this.bot.blockAt(new Vec3(x + dx, standY, z + dz));
-        const head = this.bot.blockAt(new Vec3(x + dx, standY + 1, z + dz));
-        if (
-          isSolidStand(floor) &&
-          isStableTreeApproachGround(floor) &&
-          isPassable(feet) &&
-          isPassable(head)
-        ) {
-          return { x: x + dx, y: standY, z: z + dz };
-        }
-      }
-    }
-    return null;
-  }
-
-  private findStoneSources(): SemanticTarget[] {
-    let positions: any[] = [];
-    try {
-      positions = this.bot.findBlocks({
-        matching: block => block.name === 'stone' || block.name === 'cobblestone',
-        maxDistance: 32,
-        count: 32,
-      }) as any[];
-    } catch {
-      return [];
-    }
-
-    const origin = this.bot.entity.position;
-    return positions
-      .map(pos => this.bot.blockAt(pos))
-      .filter((block): block is NonNullable<typeof block> => Boolean(block))
-      .filter(block => this.bot.canSeeBlock(block))
-      .map(block => {
-        const distance = origin.distanceTo(block.position);
-        return {
-          id: `stone_source:${block.position.x}:${block.position.y}:${block.position.z}`,
-          kind: 'stone_source' as const,
-          position: {
-            x: block.position.x,
-            y: block.position.y,
-            z: block.position.z,
-          },
-          distance: round1(distance),
-          score: 110 - distance * 2,
-          risk: 'low' as const,
-          metadata: { block: block.name },
-        };
-      })
-      .sort((a, b) => b.score - a.score)
-      .slice(0, 5);
-  }
-
   private findItemDrops(): SemanticTarget[] {
     const origin = this.bot.entity.position;
     return Object.values(this.bot.entities)
@@ -602,33 +467,7 @@ export class SemanticWorldModel {
       .slice(0, 8);
   }
 
-  private findFoodSources(): SemanticTarget[] {
-    const origin = this.bot.entity.position;
-    return Object.values(this.bot.entities)
-      .filter(entity => Boolean(entity && entity.name && FOOD_ANIMALS.has(entity.name) && entity.position))
-      .map(entity => {
-        const distance = origin.distanceTo(entity.position);
-        return {
-          id: `food_source:${entity.id}`,
-          kind: 'food_source' as const,
-          position: {
-            x: entity.position.x,
-            y: entity.position.y,
-            z: entity.position.z,
-          },
-          distance: round1(distance),
-          score: 80 - distance,
-          risk: distance <= 18 ? 'low' as const : 'medium' as const,
-          metadata: {
-            entityId: entity.id,
-            animal: entity.name ?? 'animal',
-          },
-        };
-      })
-      .filter(target => target.distance <= 32)
-      .sort((a, b) => b.score - a.score)
-      .slice(0, 5);
-  }
+
 }
 
 function inventoryMap(bot: mineflayer.Bot): Record<string, number> {
@@ -708,26 +547,16 @@ function semanticFingerprint(state: Omit<ExecutiveWorldState, 'revision'>): stri
 }
 
 
-function isExcavationMaterial(block: any | null): boolean {
+function isSafeExcavationSupport(block: any | null): boolean {
   if (!block) return false;
-  const name = block.name ?? '';
-  return EXCAVATION_BLOCKS.has(name) ||
-    name.endsWith('_ore') ||
-    name.startsWith('deepslate_');
+  if (WATERLIKE.has(block.name) || block.name === 'lava') return false;
+  return block.boundingBox === 'block';
 }
 
-function isExcavatableVolume(block: any | null): boolean {
+function isExcavatableVolume(bot: mineflayer.Bot, block: any | null): boolean {
   if (!block) return false;
   if (block.name === 'air' || block.boundingBox === 'empty') return true;
   if (WATERLIKE.has(block.name) || block.name === 'lava') return false;
-  return isExcavationMaterial(block);
-}
-
-
-function isStableTreeApproachGround(block: any | null): boolean {
-  if (!block) return false;
-  const name = block.name ?? '';
-  if (name.endsWith('_leaves') || name.endsWith('_log') || name.endsWith('_wood')) return false;
-  if (name === 'scaffolding' || name === 'vine' || name === 'ladder') return false;
-  return true;
+  if (!block.diggable || block.boundingBox !== 'block') return false;
+  return canHarvestBlockNow(bot, block);
 }
