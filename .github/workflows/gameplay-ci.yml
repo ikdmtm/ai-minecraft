@@ -22,51 +22,45 @@ jobs:
         with:
           node-version: 22
           cache: npm
-      - name: Apply exact locally verified source changes
+      - name: Apply exact verified source and supplemental changes
         run: |
           python3 - <<'PY'
           from pathlib import Path
           import base64, hashlib, json, lzma
           parts = sorted(Path('scripts/.autonomy-update').glob('part-*.b64'))
-          if len(parts) != 4:
-              raise SystemExit('Expected four verified update parts')
+          if len(parts) != 4: raise SystemExit('Expected four update parts')
           raw = lzma.decompress(base64.b64decode(b''.join(p.read_bytes().strip() for p in parts), validate=True))
           if hashlib.sha256(raw).hexdigest() != '83bccfbbef4bd6606495d3729043627e2dfb6e004ecc3805f872e9d5d08825a3':
-              raise SystemExit('Update checksum mismatch; nothing changed')
-          update = json.loads(raw)
+              raise SystemExit('Update checksum mismatch')
+          extra = Path('scripts/.autonomy-update/supplement.json').read_bytes()
+          if hashlib.sha256(extra).hexdigest() != 'df4c1a5f676214f601ea9c74702333065bfb688925da2db0ef901298b0547304':
+              raise SystemExit('Supplement checksum mismatch')
           def blob(data):
               return hashlib.sha1(b'blob ' + str(len(data)).encode() + b'\0' + data).hexdigest()
-          prepared = []
-          seen = set()
-          for entry in update['files']:
-              p = Path(entry['path'])
-              if p.is_absolute() or '..' in p.parts or p.is_symlink() or str(p) in seen:
-                  raise SystemExit('Invalid update path')
-              if not (str(p).startswith(('src/gameplay/', 'docs/', 'scripts/')) or str(p) in {
-                  'package.json', 'src/cognitive/tacticalLayer.test.ts', 'src/dashboard/server.test.ts', 'src/youtube/api.test.ts'
-              }):
-                  raise SystemExit('Path outside this reviewed change')
-              seen.add(str(p))
-              previous = p.read_bytes() if p.exists() else b''
-              if (blob(previous) if p.exists() else None) != entry['before']:
-                  raise SystemExit('Concurrent source change: ' + str(p))
-              text = previous.decode('utf8')
-              cursor = 0
-              chunks = []
-              for start, end, replacement in entry['edits']:
-                  if not (cursor <= start <= end <= len(text)):
-                      raise SystemExit('Invalid edit offsets')
-                  chunks.extend((text[cursor:start], replacement))
-                  cursor = end
-              chunks.append(text[cursor:])
-              result = ''.join(chunks).encode('utf8')
-              if blob(result) != entry['after']:
-                  raise SystemExit('Source result checksum mismatch: ' + str(p))
-              prepared.append((p, result))
-          for p, content in prepared:
-              p.parent.mkdir(parents=True, exist_ok=True)
-              p.write_bytes(content)
-          Path('/tmp/autonomy-changed-paths.txt').write_text('\n'.join(str(p) for p, _ in prepared) + '\n')
+          prepared = {}
+          for update in [json.loads(raw), json.loads(extra)]:
+              seen = set()
+              for entry in update['files']:
+                  p = Path(entry['path'])
+                  if p.is_absolute() or '..' in p.parts or p.is_symlink() or str(p) in seen:
+                      raise SystemExit('Invalid update path')
+                  if not (str(p).startswith(('src/gameplay/', 'docs/', 'scripts/')) or str(p) in {
+                      'package.json', 'src/cognitive/tacticalLayer.test.ts', 'src/dashboard/server.test.ts', 'src/youtube/api.test.ts'
+                  }): raise SystemExit('Path outside reviewed change')
+                  seen.add(str(p))
+                  previous = prepared.get(p, p.read_bytes() if p.exists() else None)
+                  if (blob(previous) if previous is not None else None) != entry['before']:
+                      raise SystemExit('Concurrent source change: ' + str(p))
+                  text = (previous or b'').decode('utf8'); cursor = 0; chunks = []
+                  for start, end, replacement in entry['edits']:
+                      if not (cursor <= start <= end <= len(text)): raise SystemExit('Invalid offsets')
+                      chunks.extend((text[cursor:start], replacement)); cursor = end
+                  chunks.append(text[cursor:]); result = ''.join(chunks).encode('utf8')
+                  if blob(result) != entry['after']: raise SystemExit('Result checksum mismatch: ' + str(p))
+                  prepared[p] = result
+          for p, content in prepared.items():
+              p.parent.mkdir(parents=True, exist_ok=True); p.write_bytes(content)
+          Path('/tmp/autonomy-changed-paths.txt').write_text('\n'.join(str(p) for p in prepared) + '\n')
           print('Applied and verified', len(prepared), 'source files')
           PY
       - name: Install dependencies
@@ -95,7 +89,15 @@ jobs:
           path: data/autonomy-smoke-server.log
           retention-days: 3
           if-no-files-found: ignore
-      - name: Publish only the verified changes without overwriting concurrent work
+      - name: Retain exact server fixture for offline reproduction
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: autonomy-server-fixture
+          path: ${{ runner.temp }}/autonomy-smoke-server/server/server.jar
+          retention-days: 1
+          if-no-files-found: ignore
+      - name: Publish only verified changes without overwriting concurrent work
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
