@@ -101,6 +101,10 @@ export class WorldMemory {
     return recalled;
   }
 
+  clear(): void {
+    this.records.clear();
+  }
+
   markContradicted(id: string, strength = 0.35): void {
     const record = this.records.get(id);
     if (!record) return;
