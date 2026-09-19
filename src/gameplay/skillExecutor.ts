@@ -514,16 +514,11 @@ export class SkillExecutor {
 
     await delay(250);
     this.assertActive(token);
-    try {
-      await withTimeout(
-        this.bot.pathfinder.goto(new goals.GoalNear(pos.x, pos.y, pos.z, 1)),
-        4_000,
-        'pickup_path_timeout',
-        () => this.bot.pathfinder.stop(),
-      );
-    } catch {
-      // Picking up the drop is best effort; mining already succeeded.
-    }
+    // Follow the actual dropped item rather than walking into the block that
+    // was just removed. Targeting the old block position made the bot step
+    // down into freshly dug floor holes and climb tree canopies after mining
+    // upper logs, unintentionally turning ordinary gathering into excavation.
+    await this.collectNearbyDrops(token, 4);
   }
 
   private async moveToExactAnchor(
@@ -561,7 +556,12 @@ export class SkillExecutor {
       this.bot.pathfinder.setMovements(movements);
       try {
         await withTimeout(
-          this.bot.pathfinder.goto(new goals.GoalNear(item.position.x, item.position.y, item.position.z, 1)),
+          this.bot.pathfinder.goto(new goals.GoalNear(
+            item.position.x,
+            item.position.y + 1,
+            item.position.z,
+            1.6,
+          )),
           2_500,
           'drop_collect_timeout',
           () => this.bot.pathfinder.stop(),
