@@ -195,7 +195,7 @@ export class SkillExecutor {
           await this.digStaircase(decision.direction ?? 'E', token, decision.targetPosition);
           break;
         case 'CRAFT':
-          await this.craft(decision.craftItem ?? 'planks', token);
+          await this.craft(decision.craftItem ?? 'none', token);
           break;
         case 'BUILD_SHELTER':
           await this.buildShelter(token, decision.targetPosition);
@@ -728,70 +728,50 @@ export class SkillExecutor {
   }
 
   private async craft(item: CraftItem, token: number): Promise<void> {
-    if (item === 'none') throw new Error('no_craft_item_selected');
+    if (!item || item === 'none') throw new Error('no_craft_item_selected');
     this.updateDetail(`crafting ${item}`);
 
-    if (item === 'planks') {
-      const log = this.bot.inventory.items().find(entry => entry.name.endsWith('_log'));
-      if (!log) throw new Error('no_log_for_planks');
-      const planks = `${log.name.slice(0, -4)}_planks`;
-      await this.craftNamed(planks, null);
+    const itemId = this.bot.registry.itemsByName[item]?.id;
+    if (!itemId) throw new Error(`unknown_item:${item}`);
+
+    // First try the player's 2x2 inventory crafting grid exactly as Minecraft
+    // exposes it. Do not synthesize prerequisite items here; deciding to make
+    // ingredients is an executive decision.
+    let recipes = this.bot.recipesFor(itemId, null, 1, null);
+    if (recipes.length > 0) {
+      await this.bot.craft(recipes[0], 1);
+      this.shared.pushEvent({ type: 'crafted', detail: item, importance: 'low' });
       return;
     }
 
-    if (item === 'sticks') {
-      await this.ensurePlankCount(2);
-      await this.craftNamed('stick', null);
-      return;
+    // If the recipe needs a crafting table, using an existing table is a body
+    // mechanic. A table already carried may be placed, but this skill will not
+    // craft a missing table or missing ingredients on the AI's behalf.
+    let table = this.bot.findBlock({
+      matching: block => block.name === 'crafting_table',
+      maxDistance: 8,
+    });
+    if (!table) {
+      const tableItem = this.bot.inventory.items().find(entry => entry.name === 'crafting_table');
+      if (tableItem) table = await this.placeAdjacent(tableItem, token);
     }
 
-    if (item === 'crafting_table') {
-      const nearby = this.bot.findBlock({ matching: block => block.name === 'crafting_table', maxDistance: 8 });
-      const inInventory = this.bot.inventory.items().some(entry => entry.name === 'crafting_table');
-      if (nearby || inInventory) return;
-      await this.ensurePlankCount(4);
-      await this.craftNamed('crafting_table', null);
-      return;
+    if (!table) {
+      const tableRecipes = this.bot.recipesAll(itemId, null, true);
+      if (tableRecipes.length > 0) throw new Error(`crafting_table_required:${item}`);
+      throw new Error(`no_recipe:${item}`);
     }
 
-    if (item.startsWith('wooden_')) {
-      const tableAlreadyAvailable = Boolean(
-        this.bot.findBlock({ matching: block => block.name === 'crafting_table', maxDistance: 8 }) ||
-        this.bot.inventory.items().some(entry => entry.name === 'crafting_table'),
-      );
-      await this.ensurePlankCount(tableAlreadyAvailable ? 5 : 9);
-      const table = await this.ensureCraftingTable(token);
-      await this.ensureStickCount(2);
-      await this.ensurePlankCount(item === 'wooden_sword' ? 2 : 3);
-      await this.craftNamed(item, table);
-      return;
+    this.assertActive(token);
+    recipes = this.bot.recipesFor(itemId, null, 1, table);
+    if (recipes.length === 0) {
+      const knownRecipes = this.bot.recipesAll(itemId, null, table);
+      if (knownRecipes.length > 0) throw new Error(`missing_recipe_ingredients:${item}`);
+      throw new Error(`no_recipe:${item}`);
     }
 
-    if (item.startsWith('stone_')) {
-      const neededStone = item === 'stone_sword' ? 2 : 3;
-      if (this.inventoryCount('cobblestone') < neededStone) {
-        throw new Error(`insufficient_cobblestone:${this.inventoryCount('cobblestone')}/${neededStone}`);
-      }
-      const table = await this.ensureCraftingTable(token);
-      await this.ensureStickCount(2);
-      await this.craftNamed(item, table);
-      return;
-    }
-
-    if (item === 'furnace') {
-      const nearby = this.bot.findBlock({ matching: block => block.name === 'furnace', maxDistance: 8 });
-      const inInventory = this.bot.inventory.items().some(entry => entry.name === 'furnace');
-      if (nearby || inInventory) return;
-      if (this.inventoryCount('cobblestone') < 8) {
-        throw new Error(`insufficient_cobblestone:${this.inventoryCount('cobblestone')}/8`);
-      }
-      const table = await this.ensureCraftingTable(token);
-      await this.craftNamed('furnace', table);
-      return;
-    }
-
-    const table = await this.ensureCraftingTable(token);
-    await this.craftNamed(item, table);
+    await this.bot.craft(recipes[0], 1, table);
+    this.shared.pushEvent({ type: 'crafted', detail: item, importance: 'low' });
   }
 
   private async craftNamed(itemName: string, table: any | null): Promise<void> {
