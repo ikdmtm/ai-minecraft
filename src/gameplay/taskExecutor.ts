@@ -78,7 +78,11 @@ export class TaskExecutor {
         }
         case 'SAVE_PROCEDURE': {
           const procedure = this.experience.save(decision.procedureName ?? '', decision.evidenceIds ?? []);
-          detail = `procedure_saved:${procedure.id}:candidate`;
+          detail = `procedure_saved:${procedure.id}:${procedure.status}`;
+          this.log('procedure_saved', { task_id: this.current.id, procedure_id: procedure.id,
+            procedure_name: procedure.name, procedure_status: procedure.status,
+            evidence_ids: procedure.evidenceIds, source: decision.source,
+            based_on_revision: decision.basedOnRevision });
           break;
         }
         case 'RUN_PROCEDURE': {
