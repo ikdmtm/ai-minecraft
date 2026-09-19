@@ -13,7 +13,6 @@ import {
   blockDropNames,
   canHarvestBlockNow,
 } from './capabilityRegistry.js';
-import { isFoodAnimal } from './worldSensor.js';
 import { WorldMemory } from './worldMemory.js';
 
 const WATERLIKE = new Set([
@@ -96,10 +95,12 @@ export class SemanticWorldModel {
         id: record.id,
         kind: record.kind,
         label: record.label,
-        position: { ...record.position },
+        position: record.position ? { ...record.position } : undefined,
         confidence: Math.round(record.confidence * 100) / 100,
         lastSeenAt: record.lastSeenAt,
         observations: record.observations,
+        scope: record.scope,
+        worldId: record.worldId,
         metadata: { ...record.metadata },
       })),
       recentEvents: this.shared.getRecentEvents(25_000).slice(-16).map(event => ({
@@ -126,12 +127,12 @@ export class SemanticWorldModel {
   }
 
   private buildTargets(): SemanticTarget[] {
-    // Observe entities first so food sightings can survive temporary loss of
-    // line-of-sight/chunk visibility as short-lived semantic memories.
+    // Observe entities first so sightings can survive temporary loss of
+    // line-of-sight/chunk visibility as confidence-decaying world memories.
     const entities = this.findEntityTargets().slice(0, 10);
     const spatial = [
       ...this.findKnownStructures(),
-      ...this.findRememberedFoodSources(),
+      ...this.findRememberedLocations(),
       ...this.findShelterSites(),
       ...this.findExcavationSites(),
       ...this.findLandTargets(),
@@ -554,8 +555,7 @@ export class SemanticWorldModel {
 
   private findEntityTargets(): SemanticTarget[] {
     const origin = this.bot.entity.position;
-    const now = Date.now();
-    const targets = Object.values(this.bot.entities)
+    return Object.values(this.bot.entities)
       .filter(entity =>
         Boolean(
           entity &&
@@ -571,24 +571,25 @@ export class SemanticWorldModel {
         const kind = String((entity as any).kind ?? '');
         const kindLower = kind.toLowerCase();
         const hostile = kindLower.includes('hostile') || kindLower.includes('monster');
-        const foodAnimal = Boolean(entity.name && isFoodAnimal(entity.name));
         const position = {
           x: entity.position.x,
           y: entity.position.y,
           z: entity.position.z,
         };
 
-        if (foodAnimal && distance <= 32) {
-          const key = foodMemoryKey(entity.name ?? 'animal', position);
+        if (distance <= 32) {
           this.memory.observe({
-            kind: 'food_source',
-            key,
-            label: entity.name ?? 'animal',
+            kind: 'entity_sighting',
+            key: entityMemoryKey(entity.name ?? 'entity', position),
+            label: entity.name ?? 'entity',
             position,
+            scope: 'world',
             retention: 'session',
-            confidence: 0.95,
+            confidence: 0.9,
             metadata: {
-              entityName: entity.name ?? 'animal',
+              entityName: entity.name ?? 'unknown',
+              entityKind: kind || null,
+              hostile,
               source: 'visual_entity',
             },
           });
@@ -599,52 +600,53 @@ export class SemanticWorldModel {
           kind: 'entity' as const,
           position,
           distance: round1(distance),
-          score: (foodAnimal ? 165 : 145) - distance,
+          score: 145 - distance,
           risk: hostile && distance <= 12 ? 'high' as const : distance <= 20 ? 'low' as const : 'medium' as const,
           metadata: {
             entityId: entity.id,
             entityName: entity.name ?? 'unknown',
             entityKind: kind || null,
             hostile,
-            foodAnimal,
           },
         };
       })
       .filter(target => target.distance <= 32)
       .sort((a, b) => b.score - a.score)
       .slice(0, 16);
-
-    return targets;
   }
 
-  private findRememberedFoodSources(): SemanticTarget[] {
+  private findRememberedLocations(): SemanticTarget[] {
     const origin = this.bot.entity.position;
     return this.memory.recall({
-      kind: 'food_source',
       origin,
       minConfidence: 0.18,
-      limit: 8,
+      limit: 16,
+      includeWorld: true,
+      includeGlobal: false,
     })
+      .filter(record => Boolean(record.position))
       .map(record => {
-        const distance = distance3(origin, record.position);
+        const position = record.position!;
+        const distance = distance3(origin, position);
         return {
           id: `memory_target:${record.id}`,
-          kind: 'food_source' as const,
-          position: { ...record.position },
+          kind: 'remembered_location' as const,
+          position: { ...position },
           distance: round1(distance),
-          score: 195 + record.confidence * 20 - distance * 1.5,
+          score: 175 + record.confidence * 25 - distance,
           risk: distance <= 24 ? 'low' as const : 'medium' as const,
           metadata: {
             memoryId: record.id,
-            entityName: record.metadata.entityName ?? record.label,
-            confidence: record.confidence,
+            memoryKind: record.kind,
+            label: record.label,
+            confidence: Math.round(record.confidence * 100) / 100,
             lastSeenAt: record.lastSeenAt,
             observations: record.observations,
-            currentlyVisible: false,
           },
         };
       })
-      .sort((a, b) => b.score - a.score);
+      .sort((a, b) => b.score - a.score)
+      .slice(0, 12);
   }
 
   private findItemDrops(): SemanticTarget[] {
@@ -868,12 +870,10 @@ function resourceMemoryKey(
   return `${resource}:${x}:${y}:${z}`;
 }
 
-function foodMemoryKey(
+function entityMemoryKey(
   entityName: string,
   position: { x: number; y: number; z: number },
 ): string {
-  // Coarse cells merge a small group of animals into one remembered area while
-  // avoiding an ever-growing list of transient entity IDs.
   const x = Math.round(position.x / 4) * 4;
   const y = Math.round(position.y);
   const z = Math.round(position.z / 4) * 4;
