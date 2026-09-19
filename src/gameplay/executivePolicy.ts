@@ -438,15 +438,40 @@ function normalizeDecisionParameters(
       }
     }
   } else if (decision.task === 'EXCAVATE_TARGET') {
+    const excavationTargets = state.targets.filter(candidate => candidate.kind === 'excavation_site');
+    if (excavationTargets.length === 0) {
+      return {
+        ...decision,
+        task: 'WAIT',
+        targetId: undefined,
+        resource: 'none',
+        craftItem: 'none',
+        structure: 'none',
+        amount: 1,
+        reason: 'capability_unavailable:no_excavation_site',
+      };
+    }
     if (target?.kind !== 'excavation_site') targetId = undefined;
   } else if (decision.task === 'ATTACK_TARGET') {
     if (target?.kind !== 'entity') targetId = undefined;
   } else if (
     decision.task === 'BUILD_STRUCTURE' &&
-    decision.structure === 'shelter' &&
-    target?.kind !== 'shelter_site'
+    decision.structure === 'shelter'
   ) {
-    targetId = undefined;
+    const shelterTargets = state.targets.filter(candidate => candidate.kind === 'shelter_site');
+    if (shelterTargets.length === 0) {
+      return {
+        ...decision,
+        task: 'WAIT',
+        targetId: undefined,
+        resource: 'none',
+        craftItem: 'none',
+        structure: 'none',
+        amount: 1,
+        reason: 'capability_unavailable:no_shelter_site',
+      };
+    }
+    if (target?.kind !== 'shelter_site') targetId = undefined;
   }
 
   return { ...decision, targetId };
