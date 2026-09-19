@@ -1,12 +1,8 @@
 import {
-  EXECUTIVE_STRUCTURES,
   EXECUTIVE_TASKS,
   type ExecutiveDecision,
-  type ExecutiveResource,
-  type ExecutiveStructure,
   type ExecutiveTaskType,
   type ExecutiveWorldState,
-  type SemanticTarget,
 } from './executiveTypes.js';
 
 interface ExecutivePolicyConfig {
@@ -74,10 +70,7 @@ export class ExecutivePolicy {
     const timer = setTimeout(() => controller.abort(), this.timeoutMs);
 
     try {
-      const targetIds = ['none', ...state.targets.map(target => target.id)];
-      const resourceOptions = dynamicResourceOptions(state);
-      const craftOptions = dynamicCraftOptions(state);
-      const capabilityOptions = dynamicCapabilityOptions(state);
+      const affordanceIds = ['none', ...state.capabilities.actions.map(action => action.id)];
       const response = await fetch('https://api.openai.com/v1/responses', {
         method: 'POST',
         headers: {
@@ -92,37 +85,23 @@ export class ExecutivePolicy {
           instructions: executiveInstructions(),
           input: JSON.stringify({
             ...state,
-            capability_reference: capabilityReference(state),
+            affordance_reference: capabilityReference(state),
           }),
-          max_output_tokens: 512,
+          max_output_tokens: 256,
           text: {
             format: {
               type: 'json_schema',
-              name: 'minecraft_executive_task',
+              name: 'minecraft_executive_affordance',
               strict: true,
               schema: {
                 type: 'object',
                 additionalProperties: false,
                 properties: {
                   task: { type: 'string', enum: EXECUTIVE_TASKS },
-                  target_id: { type: 'string', enum: targetIds },
-                  resource: { type: 'string', enum: resourceOptions },
-                  craft_item: { type: 'string', enum: craftOptions },
-                  capability_id: { type: 'string', enum: capabilityOptions },
-                  structure: { type: 'string', enum: EXECUTIVE_STRUCTURES },
-                  amount: { type: 'integer', minimum: 1, maximum: 32 },
+                  affordance_id: { type: 'string', enum: affordanceIds },
                   confidence: { type: 'number', minimum: 0, maximum: 1 },
                 },
-                required: [
-                  'task',
-                  'target_id',
-                  'resource',
-                  'craft_item',
-                  'capability_id',
-                  'structure',
-                  'amount',
-                  'confidence',
-                ],
+                required: ['task', 'affordance_id', 'confidence'],
               },
             },
           },
@@ -139,23 +118,13 @@ export class ExecutivePolicy {
       }
       const parsed = JSON.parse(extractOpenAIResponseText(data)) as {
         task: string;
-        target_id: string;
-        resource: string;
-        craft_item: string;
-        capability_id: string;
-        structure: string;
-        amount: number;
+        affordance_id: string;
         confidence: number;
       };
 
-      const decision = normalizeDecisionParameters(state, {
+      const decision = normalizeDecision(state, {
         task: validateTask(parsed.task),
-        targetId: validateTargetId(parsed.target_id, state.targets),
-        resource: validateResource(parsed.resource, state),
-        craftItem: validateCraftItem(parsed.craft_item, state),
-        capabilityId: validateCapabilityId(parsed.capability_id, state),
-        structure: validateStructure(parsed.structure),
-        amount: clampAmount(parsed.amount),
+        capabilityId: validateAffordanceId(parsed.affordance_id, state),
         confidence: clampConfidence(parsed.confidence),
         source: 'openai',
         basedOnRevision: state.revision,
@@ -186,7 +155,7 @@ export class ExecutivePolicy {
           model: this.jevModel,
           state: {
             ...state,
-            capability_reference: capabilityReference(state),
+            affordance_reference: capabilityReference(state),
           },
           questions: {
             task: {
@@ -194,30 +163,10 @@ export class ExecutivePolicy {
               instructions: executiveInstructions(),
               criteria: taskCriteria(),
             },
-            target: {
+            affordance: {
               type: 'choice',
-              instructions: 'Choose a semantic target only when it is useful for the selected task. Otherwise choose none.',
-              criteria: targetCriteria(state.targets),
-            },
-            resource: {
-              type: 'choice',
-              instructions: 'Choose the resource for GATHER_RESOURCE, otherwise none.',
-              criteria: resourceCriteria(state),
-            },
-            craft_item: {
-              type: 'choice',
-              instructions: 'Choose the concrete item for CRAFT_ITEM, otherwise none.',
-              criteria: craftCriteria(state),
-            },
-            capability: {
-              type: 'choice',
-              instructions: 'Choose a currently exposed dynamic capability for EXECUTE_CAPABILITY, otherwise none.',
-              criteria: capabilityCriteria(state),
-            },
-            structure: {
-              type: 'choice',
-              instructions: 'Choose the structure for BUILD_STRUCTURE, otherwise none.',
-              criteria: structureCriteria(),
+              instructions: 'Choose one currently exposed affordance for EXECUTE_AFFORDANCE, otherwise none.',
+              criteria: affordanceCriteria(state),
             },
           },
         }),
@@ -229,14 +178,9 @@ export class ExecutivePolicy {
 
       const data = (await response.json()) as JevResponse;
       const answers = data.answers ?? {};
-      const decision = normalizeDecisionParameters(state, {
+      const decision = normalizeDecision(state, {
         task: validateTask(answers.task?.choice ?? 'WAIT'),
-        targetId: validateTargetId(answers.target?.choice, state.targets),
-        resource: validateResource(answers.resource?.choice, state),
-        craftItem: validateCraftItem(answers.craft_item?.choice, state),
-        capabilityId: validateCapabilityId(answers.capability?.choice, state),
-        structure: validateStructure(answers.structure?.choice),
-        amount: defaultAmount(),
+        capabilityId: validateAffordanceId(answers.affordance?.choice, state),
         confidence: clampConfidence(answers.task?.confidence),
         source: 'jev',
         basedOnRevision: state.revision,
@@ -253,17 +197,12 @@ export class ExecutivePolicy {
   private fallback(state: ExecutiveWorldState, started: number, error: unknown): ExecutiveDecision {
     const decision: ExecutiveDecision = {
       task: 'WAIT',
-      resource: 'none',
-      craftItem: 'none',
-      capabilityId: 'none',
-      structure: 'none',
-      amount: 1,
+      capabilityId: undefined,
       confidence: 0,
       source: 'fallback',
       basedOnRevision: state.revision,
       reason: error instanceof Error ? error.message : String(error),
     };
-
     console.log(JSON.stringify({
       ts: new Date().toISOString(),
       kind: 'executive_policy_error',
@@ -280,321 +219,104 @@ export class ExecutivePolicy {
 function executiveInstructions(): string {
   return [
     'You are the executive controller of an autonomous Minecraft Hardcore player.',
-    'Decide the next action from the current world state, inventory, long-horizon strategy, recent failures, semantic targets, and dynamically discovered capabilities.',
-    'Capabilities are affordances, not a progression script. Do not assume wood->stone->shelter or any other canonical route.',
-    'Choose one executable task and its parameters. The body handles pathfinding, physical mining, crafting execution, and short certified excavation segments.',
-    'For GATHER_RESOURCE choose a concrete resource exposed by state.capabilities.gather. amount is the desired TOTAL inventory count.',
-    'For CRAFT_ITEM choose only an item exposed by state.capabilities.craft. These are currently executable recipes ranked by semantic utility, not a prescribed progression. amount means desired TOTAL inventory count.',
-    'For EXECUTE_CAPABILITY choose one capability_id from state.capabilities.actions. Capabilities describe currently executable affordances with preconditions and expected effects; use them as building blocks, not as a scripted sequence.',
-    'Infer what to do from needs, strategy, observations, remembered world knowledge, recent outcomes, and capability effects. For example, do not assume a fixed food routine: choose whatever available capabilities best solve the current state.',
-    'EXCAVATE_TARGET opens one short world-model-certified excavation segment to discover or access terrain; it is not tied to any specific resource.',
-    'ATTACK_TARGET acts on a concrete observed entity. Decide yourself whether attacking it serves the current plan and survival objective.',
-    'Use semantic target IDs when a location, resource source, or entity matters. Never invent coordinates or target IDs.',
-    'resource_source targets identify visible harvestable blocks and the inventory resource their Minecraft drop data produces.',
-    'item_drop targets are recoverable dropped items. known_structure targets are persistent remembered places.',
-    'state.memory contains confidence-decaying remembered observations. It is evidence, not guaranteed current truth: navigate to useful remembered places and re-observe before relying on them.',
-    'land targets are concrete walkable terrain. shelter_site targets are footprints the body can reach and prepare, including clearing soft foliage before construction.',
-    'excavation_site metadata.mode may be down or up. An up site with purpose=surface_return is a certified short ascent toward a previously observed natural surface; prefer it over passive waiting when the strategy calls for leaving an underground dead end.',
-    'For any task that needs a target, select a compatible target_id. Do not choose NAVIGATE_TARGET, EXCAVATE_TARGET, or BUILD_STRUCTURE with target_id=none when a compatible semantic target is present.',
-    'WAIT is only for situations where no useful executable action improves the state. If recentEvents contains gameplay_no_progress, change approach rather than repeating WAIT while safe affordances exist.',
-    'For BUILD_STRUCTURE(shelter), use a shelter_site only when a new shelter is actually useful. The current shelter body requires one wooden door and at least eight structural blocks already in inventory; satisfy those prerequisites explicitly with CRAFT_ITEM/GATHER_RESOURCE instead of expecting BUILD_STRUCTURE to craft them.',
-    'Reuse existing facilities and remembered structures. Do not duplicate work without a reason.',
-    'Use recent failures to change approach instead of blindly repeating the same failed task. If BUILD_STRUCTURE has just failed for a systemic crafting/material reason, do not retry the same build unchanged until the missing prerequisite or execution state has changed.',
-    'Safety emergencies are handled by a separate deterministic reflex layer; still avoid obviously unreasonable voluntary risks.',
+    'The code does not provide a progression script. Infer what to do from the current state, Minecraft specifications, long-horizon strategy, remembered experience, and currently executable affordances.',
+    'Affordances are mechanically derived from Minecraft state and data: movement to known locations, breaking visible harvestable blocks, attacking observed entities, collecting drops, using or placing carried items, crafting executable recipes, processing recipes exposed by data, interacting with visible blocks, and waiting for a world-time condition.',
+    'Do not assume canonical sequences such as wood->stone->shelter or hunt->cook->eat. Compose actions yourself from their preconditions and specifications.',
+    'World-scoped memory contains observations tied to the current world. Global procedure memory survives world resets and contains empirical successes/failures from earlier play; use it as experience, not as an absolute rule.',
+    'A remembered coordinate is evidence about the current world only. Global memories without coordinates are learned experience that can transfer to new worlds.',
+    'Choose EXECUTE_AFFORDANCE only with an affordance_id that is currently exposed. One affordance is one bodily/world operation; after it completes the world is re-observed and you can choose the next operation.',
+    'CONTINUE_TASK is only valid while a task is actually running.',
+    'WAIT is appropriate only when there is no useful executable operation now. Prefer condition-based wait affordances over repeated short WAIT decisions when one is available.',
+    'Use observed outcomes and procedure-memory success/failure rates to change tactics after failures instead of blindly repeating them.',
+    'The deterministic safety kernel may interrupt dangerous actions. Survival is the objective, but strategy and problem solving remain yours.',
   ].join(' ');
 }
 
 function capabilityReference(state: ExecutiveWorldState): Record<string, unknown> {
-  const woodenDoors = Object.entries(state.inventory)
-    .filter(([name]) => name.endsWith('_door') && name !== 'iron_door')
-    .reduce((sum, [, count]) => sum + count, 0);
-  const structuralBlocks = Object.entries(state.inventory)
-    .filter(([name]) =>
-      name === 'dirt' ||
-      name === 'cobblestone' ||
-      name.endsWith('_planks') ||
-      name.endsWith('_log'),
-    )
-    .reduce((sum, [, count]) => sum + count, 0);
-
   return {
-    NAVIGATE_TARGET: 'Move to a supplied semantic target.',
-    GATHER_RESOURCE: state.capabilities.gather,
-    EXCAVATE_TARGET: state.capabilities.canExcavate
-      ? 'Open one short certified excavation segment at an excavation_site, then re-observe.'
-      : 'Unavailable: no certified excavation site.',
-    ATTACK_TARGET: state.capabilities.entityActions,
-    EXECUTE_CAPABILITY: state.capabilities.actions,
-    CRAFT_ITEM: state.capabilities.craft,
-    BUILD_STRUCTURE: {
-      shelter: {
-        description: 'Build the current compact enclosed shelter template at a shelter_site.',
-        prerequisites: {
-          woodenDoorRequired: 1,
-          structuralBlocksRequired: 8,
-        },
-        available: {
-          woodenDoors,
-          structuralBlocks,
-        },
-      },
-    },
-    CONTINUE_TASK: 'Continue a running task when it remains appropriate.',
-    WAIT: 'Do nothing briefly when no useful executable action is available.',
+    affordances: state.capabilities.actions,
+    reachable_recipes: state.capabilities.recipes,
+    observed_resource_drops: state.capabilities.gather,
+    memory: state.memory,
   };
 }
 
 function taskCriteria(): Record<ExecutiveTaskType, string> {
   return {
-    CONTINUE_TASK: 'Keep the currently running task.',
-    NAVIGATE_TARGET: 'Move to a selected semantic target for positioning, approach, retreat, or relocation.',
-    GATHER_RESOURCE: 'Acquire a dynamically available concrete resource to a desired inventory total.',
-    EXCAVATE_TARGET: 'Open one short certified excavation segment to discover or access terrain.',
-    ATTACK_TARGET: 'Attack a selected observed entity when that serves the current plan.',
-    EXECUTE_CAPABILITY: 'Execute one currently available affordance selected from the dynamic capability registry.',
-    CRAFT_ITEM: 'Craft a currently executable, semantically useful item selected from Minecraft recipe data.',
-    BUILD_STRUCTURE: 'Build a selected structure at a suitable semantic target.',
-    WAIT: 'Briefly wait when acting would not improve the situation.',
+    CONTINUE_TASK: 'Continue the currently running operation only when one is still active.',
+    EXECUTE_AFFORDANCE: 'Execute one currently available Minecraft affordance and then re-observe the world.',
+    WAIT: 'Briefly do nothing only when no useful affordance should be executed now.',
   };
 }
 
-function targetCriteria(targets: SemanticTarget[]): Record<string, string> {
-  const result: Record<string, string> = {
-    none: 'No semantic target is needed.',
-  };
-  for (const target of targets) {
-    result[target.id] = [
-      target.kind,
-      `distance=${target.distance}`,
-      `risk=${target.risk}`,
-      `score=${Math.round(target.score)}`,
-      JSON.stringify(target.metadata),
+function affordanceCriteria(state: ExecutiveWorldState): Record<string, string> {
+  const result: Record<string, string> = { none: 'No affordance selected.' };
+  for (const action of state.capabilities.actions) {
+    result[action.id] = [
+      action.kind,
+      action.description,
+      `preconditions=${JSON.stringify(action.preconditions)}`,
+      `specification=${JSON.stringify(action.specification)}`,
     ].join(' ');
   }
   return result;
-}
-
-function resourceCriteria(state: ExecutiveWorldState): Record<string, string> {
-  const result: Record<string, string> = { none: 'No resource parameter.' };
-  for (const capability of state.capabilities.gather) {
-    result[capability.resource] =
-      `Harvest ${capability.resource} from observed source blocks: ${capability.sourceBlocks.join(', ')}`;
-  }
-  return result;
-}
-
-function craftCriteria(state: ExecutiveWorldState): Record<string, string> {
-  const result: Record<string, string> = { none: 'No craft item.' };
-  for (const capability of state.capabilities.craft) {
-    result[capability.item] =
-      `Craft ${capability.item}; utility=${capability.utility}; owned=${capability.owned}; strategyRelevant=${capability.strategyRelevant}; requiresTable=${capability.requiresTable}; executableRecipeCount=${capability.recipeCount}`;
-  }
-  return result;
-}
-
-function capabilityCriteria(state: ExecutiveWorldState): Record<string, string> {
-  const result: Record<string, string> = { none: 'No dynamic capability.' };
-  for (const capability of state.capabilities.actions) {
-    result[capability.id] = [
-      capability.kind,
-      capability.description,
-      `utility=${capability.utilityTags.join(',')}`,
-      `preconditions=${JSON.stringify(capability.preconditions)}`,
-      `effects=${JSON.stringify(capability.expectedEffects)}`,
-    ].join(' ');
-  }
-  return result;
-}
-
-function structureCriteria(): Record<ExecutiveStructure, string> {
-  return {
-    none: 'No structure parameter.',
-    shelter: 'Compact enclosed shelter with a usable entrance.',
-  };
 }
 
 function validateTask(value: string): ExecutiveTaskType {
-  return (EXECUTIVE_TASKS as string[]).includes(value) ? value as ExecutiveTaskType : 'WAIT';
+  return (EXECUTIVE_TASKS as string[]).includes(value)
+    ? value as ExecutiveTaskType
+    : 'WAIT';
 }
 
-function validateResource(value: string | undefined, state: ExecutiveWorldState): ExecutiveResource {
-  if (!value || value === 'none') return 'none';
-  return state.capabilities.gather.some(entry => entry.resource === value) ? value : 'none';
-}
-
-function validateCraftItem(value: string | undefined, state: ExecutiveWorldState): string {
-  if (!value || value === 'none') return 'none';
-  return state.capabilities.craft.some(entry => entry.item === value) ? value : 'none';
-}
-
-function validateCapabilityId(
+function validateAffordanceId(
   value: string | undefined,
   state: ExecutiveWorldState,
 ): string | undefined {
   if (!value || value === 'none') return undefined;
-  return state.capabilities.actions.some(capability => capability.id === value)
+  return state.capabilities.actions.some(action => action.id === value)
     ? value
     : undefined;
 }
 
-function validateStructure(value: string | undefined): ExecutiveStructure {
-  return (EXECUTIVE_STRUCTURES as string[]).includes(value ?? '') ? value as ExecutiveStructure : 'none';
-}
-
-function validateTargetId(value: string | undefined, targets: SemanticTarget[]): string | undefined {
-  if (!value || value === 'none') return undefined;
-  return targets.some(target => target.id === value) ? value : undefined;
-}
-
-function clampAmount(value: number | undefined): number {
-  if (!Number.isFinite(value)) return defaultAmount();
-  return Math.max(1, Math.min(32, Math.round(value as number)));
-}
-
-function defaultAmount(): number {
-  return 4;
-}
-
-function clampConfidence(value: number | undefined): number {
-  if (!Number.isFinite(value)) return 0.5;
-  return Math.max(0, Math.min(1, value as number));
-}
-
-function normalizeDecisionParameters(
+function normalizeDecision(
   state: ExecutiveWorldState,
   decision: ExecutiveDecision,
 ): ExecutiveDecision {
-  let targetId = decision.targetId;
-  let target = targetId ? state.targets.find(candidate => candidate.id === targetId) : undefined;
-  let reason = decision.reason;
-
-  // Event-driven Executive decisions are made at task boundaries. Repair a
-  // missing location parameter from the matching affordance kind when the
-  // intent is otherwise executable; do not turn a good high-level choice into
-  // a WAIT loop merely because the model emitted target_id=none.
   if (decision.task === 'CONTINUE_TASK' && state.activeTask.status !== 'running') {
     return asWait(decision, 'invalid_task:no_running_task');
   }
 
-  if (decision.task === 'NAVIGATE_TARGET' && !target) {
-    const rebound = bestNavigationTarget(state.targets);
-    if (!rebound) return asWait(decision, 'invalid_target:navigate_requires_target');
-    target = rebound;
-    targetId = rebound.id;
-    reason = `auto_bound_target:${rebound.kind}`;
-  }
-
-  if (decision.task === 'EXECUTE_CAPABILITY') {
-    const capability = decision.capabilityId
+  if (decision.task === 'EXECUTE_AFFORDANCE') {
+    const action = decision.capabilityId
       ? state.capabilities.actions.find(entry => entry.id === decision.capabilityId)
       : undefined;
-    if (!capability) return asWait(decision, 'invalid_capability:execute_requires_available_capability');
-    if (!targetId && capability.targetId) targetId = capability.targetId;
-  } else if (decision.task === 'GATHER_RESOURCE') {
-    const resource = decision.resource ?? 'none';
-    if (target) {
-      const targetResource = typeof target.metadata.resource === 'string'
-        ? target.metadata.resource
-        : typeof target.metadata.itemName === 'string'
-          ? target.metadata.itemName
-          : null;
-      if (
-        !['resource_source', 'item_drop'].includes(target.kind) ||
-        (targetResource && targetResource !== resource)
-      ) {
-        targetId = undefined;
-      }
-    }
-  } else if (decision.task === 'EXCAVATE_TARGET') {
-    const excavationTargets = state.targets
-      .filter(candidate => candidate.kind === 'excavation_site')
-      .sort((a, b) => b.score - a.score);
-    if (excavationTargets.length === 0) {
-      return {
-        ...decision,
-        task: 'WAIT',
-        targetId: undefined,
-        resource: 'none',
-        craftItem: 'none',
-        structure: 'none',
-        amount: 1,
-        reason: 'capability_unavailable:no_excavation_site',
-      };
-    }
-    if (target?.kind !== 'excavation_site') {
-      target = excavationTargets[0];
-      targetId = target.id;
-      reason = 'auto_bound_target:excavation_site';
-    }
-  } else if (decision.task === 'ATTACK_TARGET') {
-    if (target?.kind !== 'entity') {
-      return asWait(decision, 'invalid_target:attack_requires_entity');
-    }
-  } else if (
-    decision.task === 'BUILD_STRUCTURE' &&
-    decision.structure === 'shelter'
-  ) {
-    const shelterTargets = state.targets
-      .filter(candidate => candidate.kind === 'shelter_site')
-      .sort((a, b) => b.score - a.score);
-    if (shelterTargets.length === 0) {
-      return {
-        ...decision,
-        task: 'WAIT',
-        targetId: undefined,
-        resource: 'none',
-        craftItem: 'none',
-        structure: 'none',
-        amount: 1,
-        reason: 'capability_unavailable:no_shelter_site',
-      };
-    }
-    if (target?.kind !== 'shelter_site') {
-      target = shelterTargets[0];
-      targetId = target.id;
-      reason = 'auto_bound_target:shelter_site';
-    }
+    if (!action) return asWait(decision, 'invalid_affordance:not_currently_available');
+    return {
+      ...decision,
+      targetId: action.targetId,
+    };
   }
 
-  return { ...decision, targetId, reason };
+  return asWait(decision, decision.reason);
 }
 
-function bestNavigationTarget(targets: SemanticTarget[]): SemanticTarget | undefined {
-  const preferredKinds = new Set(['known_structure', 'land', 'shelter_site']);
-  const candidates = targets
-    .filter(target =>
-      preferredKinds.has(target.kind) &&
-      target.risk !== 'high' &&
-      target.distance > 2.25,
-    )
-    .sort((a, b) => b.score - a.score || a.distance - b.distance);
-  return candidates[0];
-}
-
-function asWait(decision: ExecutiveDecision, reason: string): ExecutiveDecision {
+function asWait(decision: ExecutiveDecision, reason?: string): ExecutiveDecision {
   return {
     ...decision,
     task: 'WAIT',
     targetId: undefined,
-    resource: 'none',
-    craftItem: 'none',
+    resource: undefined,
+    craftItem: undefined,
     capabilityId: undefined,
-    structure: 'none',
+    structure: undefined,
     amount: 1,
     reason,
   };
 }
 
-function dynamicResourceOptions(state: ExecutiveWorldState): string[] {
-  return ['none', ...new Set(state.capabilities.gather.map(entry => entry.resource))];
-}
-
-function dynamicCraftOptions(state: ExecutiveWorldState): string[] {
-  return ['none', ...new Set(state.capabilities.craft.map(entry => entry.item))];
-}
-
-function dynamicCapabilityOptions(state: ExecutiveWorldState): string[] {
-  return ['none', ...new Set(state.capabilities.actions.map(entry => entry.id))];
+function clampConfidence(value: number | undefined): number {
+  if (!Number.isFinite(value)) return 0.5;
+  return Math.max(0, Math.min(1, value as number));
 }
 
 function normalizeSecret(value: string | undefined): string | null {
@@ -631,12 +353,8 @@ function logDecision(
     latency_ms: Date.now() - started,
     state_revision: state.revision,
     task: decision.task,
+    affordance_id: decision.capabilityId ?? null,
     target_id: decision.targetId ?? null,
-    resource: decision.resource ?? null,
-    craft_item: decision.craftItem ?? null,
-    capability_id: decision.capabilityId ?? null,
-    structure: decision.structure ?? null,
-    amount: decision.amount ?? null,
     confidence: decision.confidence,
     reason: decision.reason ?? null,
     active_task: state.activeTask,
