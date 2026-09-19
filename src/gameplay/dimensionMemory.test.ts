@@ -199,11 +199,15 @@ describe('T04a-2a dimension memory and evidence (temporary SQLite; mocked physic
     const semantic = new SemanticWorldModel(bot, new SharedStateBus(), undefined, mem, exp);
     const overworld = semantic.capture(idle);
     expect(overworld.autonomy).toBeDefined();
-    expect(overworld.autonomy!.recentExperience.map(e => e.dimension)).toEqual(['overworld']);
+    expect(overworld.autonomy?.recentExperience).toEqual([
+      expect.objectContaining({ worldId: 'fixture-world', dimension: 'overworld' }),
+    ]);
     bot.game.dimension = 'the_nether';
     const nether = semantic.capture(idle);
     expect(nether.autonomy).toBeDefined();
-    expect(nether.autonomy!.recentExperience.map(e => e.dimension)).toEqual(['the_nether']);
+    expect(nether.autonomy?.recentExperience).toEqual([
+      expect.objectContaining({ worldId: 'fixture-world', dimension: 'the_nether' }),
+    ]);
     expect(exp.recent()).toHaveLength(2);
   });
 
