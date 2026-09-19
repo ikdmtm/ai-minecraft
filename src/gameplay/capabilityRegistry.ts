@@ -7,6 +7,12 @@ import type {
 export class CapabilityRegistry {
   private craftCacheKey = '';
   private craftCache: ExecutiveCapabilitySnapshot['craft'] = [];
+  private recipeGraph: Array<{
+    item: string;
+    requiresTable: boolean;
+    resultCount: number;
+    ingredients: Array<{ item: string; count: number }>;
+  }> | null = null;
 
   constructor(private readonly bot: mineflayer.Bot) {}
 
@@ -53,6 +59,7 @@ export class CapabilityRegistry {
     return {
       gather,
       craft: this.discoverCraftableItems(strategyText),
+      recipes: this.discoverReachableRecipes(gather, strategyText),
       entityActions,
       canExcavate: targets.some(target => target.kind === 'excavation_site'),
     };
@@ -111,6 +118,101 @@ export class CapabilityRegistry {
     this.craftCacheKey = cacheKey;
     return this.craftCache;
   }
+
+  private discoverReachableRecipes(
+    gather: ExecutiveCapabilitySnapshot['gather'],
+    strategyText: string,
+  ): ExecutiveCapabilitySnapshot['recipes'] {
+    const graph = this.getRecipeGraph();
+    const reachable = new Map<string, number>();
+    for (const item of this.bot.inventory.items()) reachable.set(item.name, 0);
+    for (const source of gather) reachable.set(source.resource, 0);
+
+    const discovered = new Map<string, ExecutiveCapabilitySnapshot['recipes'][number]>();
+    for (let depth = 1; depth <= 4; depth++) {
+      let changed = false;
+      for (const recipe of graph) {
+        if (recipe.ingredients.length === 0) continue;
+        if (!recipe.ingredients.every(ingredient => reachable.has(ingredient.item))) continue;
+
+        const existingDepth = reachable.get(recipe.item);
+        if (existingDepth == null || depth < existingDepth) {
+          reachable.set(recipe.item, depth);
+          changed = true;
+        }
+
+        const known = discovered.get(recipe.item);
+        if (!known || depth < known.reachableDepth) {
+          discovered.set(recipe.item, {
+            ...recipe,
+            reachableDepth: depth,
+          });
+        }
+      }
+      if (!changed) break;
+    }
+
+    const strategy = strategyText.toLowerCase();
+    return [...discovered.values()]
+      .sort((a, b) => {
+        const aMentioned = strategy.includes(a.item) || strategy.includes(a.item.replace(/_/g, ' '));
+        const bMentioned = strategy.includes(b.item) || strategy.includes(b.item.replace(/_/g, ' '));
+        if (aMentioned !== bMentioned) return aMentioned ? -1 : 1;
+        return a.reachableDepth - b.reachableDepth || a.item.localeCompare(b.item);
+      })
+      .slice(0, 128);
+  }
+
+  private getRecipeGraph(): Array<{
+    item: string;
+    requiresTable: boolean;
+    resultCount: number;
+    ingredients: Array<{ item: string; count: number }>;
+  }> {
+    if (this.recipeGraph) return this.recipeGraph;
+
+    const recipes: Array<{
+      item: string;
+      requiresTable: boolean;
+      resultCount: number;
+      ingredients: Array<{ item: string; count: number }>;
+    }> = [];
+    const seen = new Set<string>();
+    const itemsByName = this.bot.registry.itemsByName as Record<string, { id: number; name: string }>;
+
+    for (const item of Object.values(itemsByName)) {
+      let known: any[] = [];
+      try {
+        known = this.bot.recipesAll(item.id, null, true);
+      } catch {
+        continue;
+      }
+
+      for (const recipe of known) {
+        const ingredients = recipeIngredients(this.bot, recipe);
+        if (ingredients.length === 0) continue;
+        const resultCount = Math.max(1, Number(recipe?.result?.count) || 1);
+        const key = [
+          item.name,
+          recipe.requiresTable ? 'table' : 'inventory',
+          resultCount,
+          ingredients.map(entry => `${entry.item}:${entry.count}`).join(','),
+        ].join('|');
+        if (seen.has(key)) continue;
+        seen.add(key);
+        recipes.push({
+          item: item.name,
+          requiresTable: Boolean(recipe.requiresTable),
+          resultCount,
+          ingredients,
+        });
+      }
+    }
+
+    this.recipeGraph = recipes;
+    return recipes;
+  }
+
 }
 
 export function blockDropNames(bot: mineflayer.Bot, block: any): string[] {
@@ -150,6 +252,28 @@ export function canHarvestBlockNow(bot: mineflayer.Bot, block: any): boolean {
     }
   }
   return false;
+}
+
+
+function recipeIngredients(
+  bot: mineflayer.Bot,
+  recipe: any,
+): Array<{ item: string; count: number }> {
+  const byName = new Map<string, number>();
+  const delta = Array.isArray(recipe?.delta) ? recipe.delta : [];
+
+  for (const part of delta) {
+    const count = Number(part?.count) || 0;
+    const id = Number(part?.id);
+    if (!Number.isFinite(id) || count >= 0) continue;
+    const name = (bot.registry.items as any)?.[id]?.name as string | undefined;
+    if (!name) continue;
+    byName.set(name, (byName.get(name) ?? 0) + Math.abs(count));
+  }
+
+  return [...byName.entries()]
+    .map(([item, count]) => ({ item, count }))
+    .sort((a, b) => a.item.localeCompare(b.item));
 }
 
 function dropId(raw: any): number | null {
