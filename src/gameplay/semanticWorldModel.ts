@@ -13,6 +13,7 @@ import {
   blockDropNames,
   canHarvestBlockNow,
 } from './capabilityRegistry.js';
+import { isFoodAnimal } from './worldSensor.js';
 
 const WATERLIKE = new Set([
   'water', 'bubble_column', 'seagrass', 'tall_seagrass', 'kelp', 'kelp_plant',
@@ -23,6 +24,11 @@ export class SemanticWorldModel {
   private lastFingerprint = '';
   private readonly capabilityRegistry: CapabilityRegistry;
   private lastSurfaceAnchor: SemanticPosition | null = null;
+  private readonly rememberedFoodSources = new Map<string, {
+    entityName: string;
+    position: SemanticPosition;
+    lastSeenAt: number;
+  }>();
 
   constructor(
     private readonly bot: mineflayer.Bot,
@@ -73,6 +79,11 @@ export class SemanticWorldModel {
       facilities: {
         craftingTableNearby: Boolean(this.bot.findBlock({ matching: block => block.name === 'crafting_table', maxDistance: 8 })),
         furnaceNearby: Boolean(this.bot.findBlock({ matching: block => block.name === 'furnace', maxDistance: 8 })),
+        smokerNearby: Boolean(this.bot.findBlock({ matching: block => block.name === 'smoker', maxDistance: 8 })),
+        containerNearby: Boolean(this.bot.findBlock({
+          matching: block => block.name === 'chest' || block.name === 'trapped_chest' || block.name === 'barrel',
+          maxDistance: 8,
+        })),
         bedNearby: Boolean(this.bot.findBlock({ matching: block => block.name.endsWith('_bed'), maxDistance: 16 })),
         shelterNearby: Boolean(this.provenance?.hasStructureNearby('shelter', position, 24)),
       },
@@ -104,25 +115,25 @@ export class SemanticWorldModel {
   }
 
   private buildTargets(): SemanticTarget[] {
-    // Spatial affordances must never be crowded out by resource/entity targets.
-    // Scores are useful within a kind, but a global top-N made rich scenes erase
-    // every answer to "where can I move/build/excavate?".
+    // Observe entities first so food sightings can survive temporary loss of
+    // line-of-sight/chunk visibility as short-lived semantic memories.
+    const entities = this.findEntityTargets().slice(0, 10);
     const spatial = [
       ...this.findKnownStructures(),
+      ...this.findRememberedFoodSources(),
       ...this.findShelterSites(),
       ...this.findExcavationSites(),
       ...this.findLandTargets(),
     ];
     const resources = this.findResourceSources().slice(0, 18);
     const drops = this.findItemDrops().slice(0, 6);
-    const entities = this.findEntityTargets().slice(0, 10);
 
     return dedupeById([
       ...spatial,
       ...drops,
       ...resources,
       ...entities,
-    ]).slice(0, 56);
+    ]).slice(0, 64);
   }
 
   private observeSurfaceAnchor(): void {
@@ -171,7 +182,7 @@ export class SemanticWorldModel {
     // several blocks below it, expose an upward excavation affordance. This is
     // spatial memory, not an攻略 sequence: any cause of getting underground can
     // be recovered by a short re-observed ascent segment.
-    if (this.lastSurfaceAnchor && this.lastSurfaceAnchor.y - current.y >= 4) {
+    if (!isInWater(this.bot) && this.lastSurfaceAnchor && this.lastSurfaceAnchor.y - current.y >= 4) {
       const floor = this.bot.blockAt(new Vec3(current.x, current.y - 1, current.z));
       const preferred = preferredCardinalToward(current, this.lastSurfaceAnchor);
       const direction = isSafeExcavationSupport(floor)
@@ -515,7 +526,8 @@ export class SemanticWorldModel {
 
   private findEntityTargets(): SemanticTarget[] {
     const origin = this.bot.entity.position;
-    return Object.values(this.bot.entities)
+    const now = Date.now();
+    const targets = Object.values(this.bot.entities)
       .filter(entity =>
         Boolean(
           entity &&
@@ -531,28 +543,72 @@ export class SemanticWorldModel {
         const kind = String((entity as any).kind ?? '');
         const kindLower = kind.toLowerCase();
         const hostile = kindLower.includes('hostile') || kindLower.includes('monster');
+        const foodAnimal = Boolean(entity.name && isFoodAnimal(entity.name));
+        const position = {
+          x: entity.position.x,
+          y: entity.position.y,
+          z: entity.position.z,
+        };
+
+        if (foodAnimal && distance <= 32) {
+          const key = foodMemoryKey(entity.name ?? 'animal', position);
+          this.rememberedFoodSources.set(key, {
+            entityName: entity.name ?? 'animal',
+            position,
+            lastSeenAt: now,
+          });
+        }
+
         return {
           id: `entity:${entity.id}`,
           kind: 'entity' as const,
-          position: {
-            x: entity.position.x,
-            y: entity.position.y,
-            z: entity.position.z,
-          },
+          position,
           distance: round1(distance),
-          score: 145 - distance,
+          score: (foodAnimal ? 165 : 145) - distance,
           risk: hostile && distance <= 12 ? 'high' as const : distance <= 20 ? 'low' as const : 'medium' as const,
           metadata: {
             entityId: entity.id,
             entityName: entity.name ?? 'unknown',
             entityKind: kind || null,
             hostile,
+            foodAnimal,
           },
         };
       })
       .filter(target => target.distance <= 32)
       .sort((a, b) => b.score - a.score)
       .slice(0, 16);
+
+    for (const [key, memory] of this.rememberedFoodSources) {
+      if (now - memory.lastSeenAt > 5 * 60_000) this.rememberedFoodSources.delete(key);
+    }
+    return targets;
+  }
+
+  private findRememberedFoodSources(): SemanticTarget[] {
+    const origin = this.bot.entity.position;
+    const now = Date.now();
+    return [...this.rememberedFoodSources.entries()]
+      .filter(([, memory]) => now - memory.lastSeenAt <= 5 * 60_000)
+      .map(([key, memory]) => {
+        const distance = distance3(origin, memory.position);
+        const ageSeconds = (now - memory.lastSeenAt) / 1000;
+        return {
+          id: `food_source:${key}`,
+          kind: 'food_source' as const,
+          position: { ...memory.position },
+          distance: round1(distance),
+          score: 205 - distance * 1.5 - ageSeconds * 0.08,
+          risk: distance <= 24 ? 'low' as const : 'medium' as const,
+          metadata: {
+            entityName: memory.entityName,
+            lastSeenAt: memory.lastSeenAt,
+            currentlyVisible: false,
+          },
+        };
+      })
+      .sort((a, b) => b.score - a.score)
+      .slice(0, 8);
   }
 
   private findItemDrops(): SemanticTarget[] {
@@ -658,8 +714,11 @@ function semanticFingerprint(state: Omit<ExecutiveWorldState, 'revision'>): stri
     inventory,
     state.facilities.craftingTableNearby ? 1 : 0,
     state.facilities.furnaceNearby ? 1 : 0,
+    state.facilities.smokerNearby ? 1 : 0,
+    state.facilities.containerNearby ? 1 : 0,
     state.facilities.bedNearby ? 1 : 0,
     state.facilities.shelterNearby ? 1 : 0,
+    state.world.isNight ? 1 : 0,
     state.strategy.mainGoal,
     state.activeTask.id,
     state.activeTask.status,
@@ -761,6 +820,18 @@ function isUnsafeSupportMiningTarget(
   const horizontal = Math.hypot(player.x - (block.x + 0.5), player.z - (block.z + 0.5));
   const playerFeetY = Math.floor(player.y);
   return horizontal <= 1.45 && block.y <= playerFeetY - 1 && block.y >= playerFeetY - 2;
+}
+
+function foodMemoryKey(
+  entityName: string,
+  position: { x: number; y: number; z: number },
+): string {
+  // Coarse cells merge a small group of animals into one remembered area while
+  // avoiding an ever-growing list of transient entity IDs.
+  const x = Math.round(position.x / 4) * 4;
+  const y = Math.round(position.y);
+  const z = Math.round(position.z / 4) * 4;
+  return `${entityName}:${x}:${y}:${z}`;
 }
 
 function isSafeExcavationSupport(block: any | null): boolean {
