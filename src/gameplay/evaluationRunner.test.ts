@@ -129,7 +129,7 @@ test.each([0, -1, 65536, 1.5, NaN])('invalid port %p is rejected', port => {
 });
 
 test('Java and export subprocesses receive system paths but not model secrets or injected options', () => {
-  const source = { ...env, PATH: '/fixture/bin', JAVA_HOME: '/fixture/java', HOME: '/fixture/home',
+  const source: NodeJS.ProcessEnv = { ...env, PATH: '/fixture/bin', JAVA_HOME: '/fixture/java', HOME: '/fixture/home',
     NODE_OPTIONS: '--require unwanted', JAVA_TOOL_OPTIONS: '-agentlib:unwanted', TYPESAFE_API_KEY: 'private' };
   expect(evaluationToolEnvironment(source)).toEqual({ PATH: '/fixture/bin', JAVA_HOME: '/fixture/java', HOME: '/fixture/home' });
   expect(source.OPENAI_API_KEY).toBe('fixture-private-key');
