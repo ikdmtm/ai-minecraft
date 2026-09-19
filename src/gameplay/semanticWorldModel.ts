@@ -725,7 +725,7 @@ export class SemanticWorldModel {
           },
           distance: round1(distance),
           score: 170 - distance * 3,
-          risk: distance <= 8 ? 'low' : 'medium',
+          risk: distance <= 8 ? 'low' as const : 'medium' as const,
           metadata: {
             entityId: entity.id,
             collectible: true,
@@ -805,8 +805,8 @@ function semanticFingerprint(state: Omit<ExecutiveWorldState, 'revision'>): stri
   // the model is thinking. Revision tracks semantic changes that can invalidate
   // a decision: safety context, inventory, strategy, or task lifecycle.
   return [
-    state.autonomy.worldId,
-    normalizeMemoryDimension(state.autonomy.dimension),
+    state.autonomy?.worldId ?? '',
+    normalizeMemoryDimension(state.autonomy?.dimension),
     state.player.inWater ? 1 : 0,
     state.player.onSolidGround ? 1 : 0,
     Math.round(state.player.hp * 2) / 2,
