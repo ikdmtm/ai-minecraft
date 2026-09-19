@@ -77,6 +77,7 @@ export class ExecutivePolicy {
       const targetIds = ['none', ...state.targets.map(target => target.id)];
       const resourceOptions = dynamicResourceOptions(state);
       const craftOptions = dynamicCraftOptions(state);
+      const capabilityOptions = dynamicCapabilityOptions(state);
       const response = await fetch('https://api.openai.com/v1/responses', {
         method: 'POST',
         headers: {
@@ -107,6 +108,7 @@ export class ExecutivePolicy {
                   target_id: { type: 'string', enum: targetIds },
                   resource: { type: 'string', enum: resourceOptions },
                   craft_item: { type: 'string', enum: craftOptions },
+                  capability_id: { type: 'string', enum: capabilityOptions },
                   structure: { type: 'string', enum: EXECUTIVE_STRUCTURES },
                   amount: { type: 'integer', minimum: 1, maximum: 32 },
                   confidence: { type: 'number', minimum: 0, maximum: 1 },
@@ -116,6 +118,7 @@ export class ExecutivePolicy {
                   'target_id',
                   'resource',
                   'craft_item',
+                  'capability_id',
                   'structure',
                   'amount',
                   'confidence',
@@ -139,6 +142,7 @@ export class ExecutivePolicy {
         target_id: string;
         resource: string;
         craft_item: string;
+        capability_id: string;
         structure: string;
         amount: number;
         confidence: number;
@@ -149,6 +153,7 @@ export class ExecutivePolicy {
         targetId: validateTargetId(parsed.target_id, state.targets),
         resource: validateResource(parsed.resource, state),
         craftItem: validateCraftItem(parsed.craft_item, state),
+        capabilityId: validateCapabilityId(parsed.capability_id, state),
         structure: validateStructure(parsed.structure),
         amount: clampAmount(parsed.amount),
         confidence: clampConfidence(parsed.confidence),
@@ -204,6 +209,11 @@ export class ExecutivePolicy {
               instructions: 'Choose the concrete item for CRAFT_ITEM, otherwise none.',
               criteria: craftCriteria(state),
             },
+            capability: {
+              type: 'choice',
+              instructions: 'Choose a currently exposed dynamic capability for EXECUTE_CAPABILITY, otherwise none.',
+              criteria: capabilityCriteria(state),
+            },
             structure: {
               type: 'choice',
               instructions: 'Choose the structure for BUILD_STRUCTURE, otherwise none.',
@@ -224,6 +234,7 @@ export class ExecutivePolicy {
         targetId: validateTargetId(answers.target?.choice, state.targets),
         resource: validateResource(answers.resource?.choice, state),
         craftItem: validateCraftItem(answers.craft_item?.choice, state),
+        capabilityId: validateCapabilityId(answers.capability?.choice, state),
         structure: validateStructure(answers.structure?.choice),
         amount: defaultAmount(),
         confidence: clampConfidence(answers.task?.confidence),
@@ -244,6 +255,7 @@ export class ExecutivePolicy {
       task: 'WAIT',
       resource: 'none',
       craftItem: 'none',
+      capabilityId: 'none',
       structure: 'none',
       amount: 1,
       confidence: 0,
@@ -272,12 +284,15 @@ function executiveInstructions(): string {
     'Capabilities are affordances, not a progression script. Do not assume wood->stone->shelter or any other canonical route.',
     'Choose one executable task and its parameters. The body handles pathfinding, physical mining, crafting execution, and short certified excavation segments.',
     'For GATHER_RESOURCE choose a concrete resource exposed by state.capabilities.gather. amount is the desired TOTAL inventory count.',
-    'For CRAFT_ITEM choose only an item exposed by state.capabilities.craft. These are recipes currently executable from Minecraft recipe data. amount means the desired TOTAL count of that crafted item in inventory, just like GATHER_RESOURCE.',
+    'For CRAFT_ITEM choose only an item exposed by state.capabilities.craft. These are currently executable recipes ranked by semantic utility, not a prescribed progression. amount means desired TOTAL inventory count.',
+    'For EXECUTE_CAPABILITY choose one capability_id from state.capabilities.actions. Capabilities describe currently executable affordances with preconditions and expected effects; use them as building blocks, not as a scripted sequence.',
+    'Infer what to do from needs, strategy, observations, remembered world knowledge, recent outcomes, and capability effects. For example, do not assume a fixed food routine: choose whatever available capabilities best solve the current state.',
     'EXCAVATE_TARGET opens one short world-model-certified excavation segment to discover or access terrain; it is not tied to any specific resource.',
     'ATTACK_TARGET acts on a concrete observed entity. Decide yourself whether attacking it serves the current plan and survival objective.',
     'Use semantic target IDs when a location, resource source, or entity matters. Never invent coordinates or target IDs.',
     'resource_source targets identify visible harvestable blocks and the inventory resource their Minecraft drop data produces.',
     'item_drop targets are recoverable dropped items. known_structure targets are persistent remembered places.',
+    'state.memory contains confidence-decaying remembered observations. It is evidence, not guaranteed current truth: navigate to useful remembered places and re-observe before relying on them.',
     'land targets are concrete walkable terrain. shelter_site targets are footprints the body can reach and prepare, including clearing soft foliage before construction.',
     'excavation_site metadata.mode may be down or up. An up site with purpose=surface_return is a certified short ascent toward a previously observed natural surface; prefer it over passive waiting when the strategy calls for leaving an underground dead end.',
     'For any task that needs a target, select a compatible target_id. Do not choose NAVIGATE_TARGET, EXCAVATE_TARGET, or BUILD_STRUCTURE with target_id=none when a compatible semantic target is present.',
@@ -309,6 +324,7 @@ function capabilityReference(state: ExecutiveWorldState): Record<string, unknown
       ? 'Open one short certified excavation segment at an excavation_site, then re-observe.'
       : 'Unavailable: no certified excavation site.',
     ATTACK_TARGET: state.capabilities.entityActions,
+    EXECUTE_CAPABILITY: state.capabilities.actions,
     CRAFT_ITEM: state.capabilities.craft,
     BUILD_STRUCTURE: {
       shelter: {
@@ -335,7 +351,8 @@ function taskCriteria(): Record<ExecutiveTaskType, string> {
     GATHER_RESOURCE: 'Acquire a dynamically available concrete resource to a desired inventory total.',
     EXCAVATE_TARGET: 'Open one short certified excavation segment to discover or access terrain.',
     ATTACK_TARGET: 'Attack a selected observed entity when that serves the current plan.',
-    CRAFT_ITEM: 'Craft a currently executable item selected from Minecraft recipe data.',
+    EXECUTE_CAPABILITY: 'Execute one currently available affordance selected from the dynamic capability registry.',
+    CRAFT_ITEM: 'Craft a currently executable, semantically useful item selected from Minecraft recipe data.',
     BUILD_STRUCTURE: 'Build a selected structure at a suitable semantic target.',
     WAIT: 'Briefly wait when acting would not improve the situation.',
   };
@@ -370,7 +387,21 @@ function craftCriteria(state: ExecutiveWorldState): Record<string, string> {
   const result: Record<string, string> = { none: 'No craft item.' };
   for (const capability of state.capabilities.craft) {
     result[capability.item] =
-      `Craft ${capability.item}; requiresTable=${capability.requiresTable}; executableRecipeCount=${capability.recipeCount}`;
+      `Craft ${capability.item}; utility=${capability.utility}; owned=${capability.owned}; strategyRelevant=${capability.strategyRelevant}; requiresTable=${capability.requiresTable}; executableRecipeCount=${capability.recipeCount}`;
+  }
+  return result;
+}
+
+function capabilityCriteria(state: ExecutiveWorldState): Record<string, string> {
+  const result: Record<string, string> = { none: 'No dynamic capability.' };
+  for (const capability of state.capabilities.actions) {
+    result[capability.id] = [
+      capability.kind,
+      capability.description,
+      `utility=${capability.utilityTags.join(',')}`,
+      `preconditions=${JSON.stringify(capability.preconditions)}`,
+      `effects=${JSON.stringify(capability.expectedEffects)}`,
+    ].join(' ');
   }
   return result;
 }
@@ -394,6 +425,16 @@ function validateResource(value: string | undefined, state: ExecutiveWorldState)
 function validateCraftItem(value: string | undefined, state: ExecutiveWorldState): string {
   if (!value || value === 'none') return 'none';
   return state.capabilities.craft.some(entry => entry.item === value) ? value : 'none';
+}
+
+function validateCapabilityId(
+  value: string | undefined,
+  state: ExecutiveWorldState,
+): string | undefined {
+  if (!value || value === 'none') return undefined;
+  return state.capabilities.actions.some(capability => capability.id === value)
+    ? value
+    : undefined;
 }
 
 function validateStructure(value: string | undefined): ExecutiveStructure {
@@ -443,7 +484,13 @@ function normalizeDecisionParameters(
     reason = `auto_bound_target:${rebound.kind}`;
   }
 
-  if (decision.task === 'GATHER_RESOURCE') {
+  if (decision.task === 'EXECUTE_CAPABILITY') {
+    const capability = decision.capabilityId
+      ? state.capabilities.actions.find(entry => entry.id === decision.capabilityId)
+      : undefined;
+    if (!capability) return asWait(decision, 'invalid_capability:execute_requires_available_capability');
+    if (!targetId && capability.targetId) targetId = capability.targetId;
+  } else if (decision.task === 'GATHER_RESOURCE') {
     const resource = decision.resource ?? 'none';
     if (target) {
       const targetResource = typeof target.metadata.resource === 'string'
@@ -531,6 +578,7 @@ function asWait(decision: ExecutiveDecision, reason: string): ExecutiveDecision 
     targetId: undefined,
     resource: 'none',
     craftItem: 'none',
+    capabilityId: undefined,
     structure: 'none',
     amount: 1,
     reason,
@@ -543,6 +591,10 @@ function dynamicResourceOptions(state: ExecutiveWorldState): string[] {
 
 function dynamicCraftOptions(state: ExecutiveWorldState): string[] {
   return ['none', ...new Set(state.capabilities.craft.map(entry => entry.item))];
+}
+
+function dynamicCapabilityOptions(state: ExecutiveWorldState): string[] {
+  return ['none', ...new Set(state.capabilities.actions.map(entry => entry.id))];
 }
 
 function normalizeSecret(value: string | undefined): string | null {
@@ -582,6 +634,7 @@ function logDecision(
     target_id: decision.targetId ?? null,
     resource: decision.resource ?? null,
     craft_item: decision.craftItem ?? null,
+    capability_id: decision.capabilityId ?? null,
     structure: decision.structure ?? null,
     amount: decision.amount ?? null,
     confidence: decision.confidence,
