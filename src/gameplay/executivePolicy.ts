@@ -1,5 +1,5 @@
 import { parseOperation, OPERATION_JSON_SCHEMA } from './primitiveOperations.js';
-import { validateProcedureSaveSelection } from './procedureSaveSelection.js';
+import { validateProcedureSaveSelection, PROCEDURE_REVISION_INSTRUCTIONS } from './procedureSaveSelection.js';
 import {
   EXECUTIVE_TASKS,
   type ExecutiveDecision,
@@ -240,6 +240,7 @@ function executiveInstructions(): string {
     'OPEN a block then read autonomy.window. TRANSFER uses its current windowId, sourceSlot, destinationSlot, item and count. Read slot contents after each transfer. CLOSE the window when done. Only the server decides whether a slot accepts an item.',
     'LOOKUP_KNOWLEDGE uses knowledge_query and knowledge_offset to inspect neutral registry and matching server-JAR facts, including items, foods, entity loot, recipes, tags and window slots. Use nextOffset for more results. Missing data is unknown, not proof a mechanic is impossible.',
     'SAVE_PROCEDURE uses a name and 2-12 consecutive verified recentExperience evidence IDs to remember a reusable procedure you actually demonstrated. It stores declarative basic operations, not code. Do not claim to have learned an untested procedure. RUN_PROCEDURE selects a saved procedureId; its targets are rebound in this world and every step is checked.',
+    PROCEDURE_REVISION_INSTRUCTIONS,
     'Candidate procedures are experiments, not guaranteed skills. Prior-world experience is useful but old-world coordinates are not current facts. Consult outcomes and revise plans after failed predictions.',
     'For an intentional wait, use an operation WAIT with durationMs up to 60000 and until=timeout/daylight/night/inventory_changed/window_changed. It can be interrupted by safety changes. A timed-out condition was NOT satisfied.',
     'The code does not provide a progression script. Infer what to do from the current state, Minecraft specifications, long-horizon strategy, remembered experience, and currently executable affordances.',
@@ -321,6 +322,7 @@ function normalizeDecision(
   if (decision.task === 'SAVE_PROCEDURE') {
     return { ...decision, ...validateProcedureSaveSelection(
       decision.procedureName, decision.evidenceIds, state.autonomy?.recentExperience,
+      { parentId: decision.procedureId, reason: decision.reason, presentedProcedures: state.autonomy?.learnedProcedures },
     ) };
   }
   if (decision.task === 'RUN_PROCEDURE') {
