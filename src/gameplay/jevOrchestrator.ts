@@ -1,6 +1,5 @@
 import { ExperienceMemory } from './experienceMemory.js';
-import { readFileSync, writeFileSync, mkdirSync } from 'fs';
-import { resolve, dirname } from 'path';
+import { resolveGameplayWorldIdentity, advanceGameplayWorldIdentity, type GameplayWorldIdentity } from './worldIdentity.js';
 import mineflayer from 'mineflayer';
 import { attachClientReadiness } from './clientReadiness.js';
 import { pathfinder } from 'mineflayer-pathfinder';
@@ -58,6 +57,7 @@ export class CognitiveOrchestrator {
   private readonly provenance = new WorldProvenance();
   private readonly memory: WorldMemory;
   private readonly experience: ExperienceMemory;
+  private worldIdentity: GameplayWorldIdentity;
   private bot: mineflayer.Bot | null = null;
   private sensor: WorldSensor | null = null;
   private primitive: SkillExecutor | null = null;
@@ -71,13 +71,23 @@ export class CognitiveOrchestrator {
   private generation = 1;
 
   constructor(private readonly config: CognitiveOrchestratorConfig) {
-    this.memory = new WorldMemory(config.dbPath);
+    // Resolve before opening the DB; invalid explicit identity must not change it.
+    this.worldIdentity = resolveGameplayWorldIdentity(config);
+    this.memory = new WorldMemory(config.dbPath, this.worldIdentity.memoryWorldId);
     this.experience = new ExperienceMemory(config.dbPath);
-    let worldId = process.env.GAMEPLAY_WORLD_ID?.trim();
-    if (!worldId) {
-      try { worldId = readFileSync(process.env.GAMEPLAY_WORLD_ID_FILE || resolve(process.env.MC_DEV_DIR || '.minecraft-dev', 'server/world/.ai-world-id'), 'utf8').trim(); } catch { /* Existing DB world ID survives restarts. */ }
-    }
-    if (worldId) this.memory.setWorldId(worldId);
+  }
+
+  private refreshWorldIdentity(): void {
+    const selected = resolveGameplayWorldIdentity(this.config);
+    if (selected.memoryWorldId !== this.memory.getWorldId()) this.provenance.clear();
+    this.memory.setWorldId(selected.memoryWorldId);
+    this.worldIdentity = selected;
+    console.log(JSON.stringify({
+      ts: new Date().toISOString(), kind: 'world_identity_resolved',
+      world_id: selected.memoryWorldId, server_id: selected.serverId,
+      source: selected.source,
+      spatial_restart_reusable: selected.source !== 'session_unconfirmed',
+    }));
   }
 
   getShared(): SharedStateBus {
@@ -132,6 +142,7 @@ export class CognitiveOrchestrator {
 
   async start(events: CognitiveEvents): Promise<void> {
     if (this.running) return;
+    this.refreshWorldIdentity();
     this.running = true;
 
     const typesafeApiKey = process.env.TYPESAFE_API_KEY?.trim();
@@ -218,19 +229,15 @@ export class CognitiveOrchestrator {
 
   nextGeneration(): void {
     if (this.running) throw new Error('stop_runtime_before_changing_world');
+    const selected = advanceGameplayWorldIdentity(this.config, this.worldIdentity);
+    this.memory.setWorldId(selected.memoryWorldId);
+    this.worldIdentity = selected;
     this.generation++;
     this.shared.reset(this.generation);
     this.provenance.clear();
-    const worldId = this.memory.startNewWorld();
-    // Keep explicit lifecycle rotation and the local world's persistent marker consistent.
-    const marker = process.env.GAMEPLAY_WORLD_ID_FILE || resolve(process.env.MC_DEV_DIR || '.minecraft-dev', 'server/world/.ai-world-id');
-    if (!process.env.GAMEPLAY_WORLD_ID) {
-      mkdirSync(dirname(marker), { recursive: true });
-      writeFileSync(marker, worldId + '\n');
-    }
     this.shared.pushEvent({
       type: 'memory_world_rotated',
-      detail: `generation=${this.generation} world_id=${worldId} global_memory=preserved`,
+      detail: `generation=${this.generation} world_id=${selected.memoryWorldId} global_memory=preserved`,
       importance: 'medium',
     });
   }
