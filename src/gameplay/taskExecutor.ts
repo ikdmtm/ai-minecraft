@@ -6,11 +6,7 @@ import type { WorldSensor } from './worldSensor.js';
 import type {
   ExecutiveActionCapability,
   ExecutiveDecision,
-  ExecutiveResource,
-  ExecutiveStructure,
   ExecutiveTaskSnapshot,
-  ExecutiveWorldState,
-  SemanticTarget,
   TaskExecutionResult,
 } from './executiveTypes.js';
 import type {
@@ -18,6 +14,7 @@ import type {
   TypedGameplayDecision,
   WorldCandidate,
 } from './typedActions.js';
+import type { WorldMemory } from './worldMemory.js';
 
 export class TaskExecutor {
   private sequence = 0;
@@ -29,6 +26,7 @@ export class TaskExecutor {
     private readonly primitive: SkillExecutor,
     private readonly sensor: WorldSensor,
     private readonly semantic: SemanticWorldModel,
+    private readonly memory: WorldMemory,
   ) {}
 
   snapshot(): ExecutiveTaskSnapshot {
@@ -55,57 +53,36 @@ export class TaskExecutor {
       detail: '',
       progress: {},
     };
+
     this.log('task_started', {
       task_id: taskId,
       task: decision.task,
       target_id: decision.targetId ?? null,
-      amount: decision.amount ?? null,
-      resource: decision.resource ?? null,
-      craft_item: decision.craftItem ?? null,
-      capability_id: decision.capabilityId ?? null,
-      structure: decision.structure ?? null,
+      affordance_id: decision.capabilityId ?? null,
       source: decision.source,
       confidence: decision.confidence,
       based_on_revision: decision.basedOnRevision,
     });
 
+    let affordance: ExecutiveActionCapability | undefined;
     try {
       let detail = '';
       switch (decision.task) {
-        case 'NAVIGATE_TARGET':
-          detail = await this.navigateTarget(decision.targetId, startedGoal);
+        case 'EXECUTE_AFFORDANCE': {
+          if (!decision.capabilityId) throw new Error('affordance_missing');
+          const state = this.semantic.capture(this.snapshot());
+          affordance = state.capabilities.actions.find(action => action.id === decision.capabilityId);
+          if (!affordance) throw new Error(`affordance_unavailable:${decision.capabilityId}`);
+          detail = await this.executeAffordance(affordance, startedGoal);
+          this.memory.recordProcedureOutcome({
+            key: procedureKey(affordance),
+            label: affordance.description,
+            success: true,
+            detail,
+            metadata: procedureMetadata(affordance),
+          });
           break;
-        case 'GATHER_RESOURCE':
-          detail = await this.gatherResource(
-            decision.resource ?? 'none',
-            decision.amount ?? 1,
-            decision.targetId,
-            startedGoal,
-          );
-          break;
-        case 'EXCAVATE_TARGET':
-          detail = await this.excavateTarget(decision.targetId, startedGoal);
-          break;
-        case 'ATTACK_TARGET':
-          detail = await this.attackTarget(decision.targetId, startedGoal);
-          break;
-        case 'EXECUTE_CAPABILITY':
-          detail = await this.executeDynamicCapability(decision.capabilityId, startedGoal);
-          break;
-        case 'CRAFT_ITEM':
-          detail = await this.craftExecutiveItem(
-            decision.craftItem ?? 'none',
-            decision.amount ?? 1,
-            startedGoal,
-          );
-          break;
-        case 'BUILD_STRUCTURE':
-          detail = await this.buildStructure(
-            decision.structure ?? 'none',
-            decision.targetId,
-            startedGoal,
-          );
-          break;
+        }
         case 'WAIT':
           await delay(500);
           detail = 'waited';
@@ -119,6 +96,15 @@ export class TaskExecutor {
       return { status: 'succeeded', detail };
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
+      if (affordance) {
+        this.memory.recordProcedureOutcome({
+          key: procedureKey(affordance),
+          label: affordance.description,
+          success: false,
+          detail: message,
+          metadata: procedureMetadata(affordance),
+        });
+      }
       const status = message.startsWith('task_replan:') ? 'interrupted' : 'failed';
       this.finish(status, message);
       return { status, detail: message };
@@ -131,544 +117,203 @@ export class TaskExecutor {
     }
   }
 
-  private async navigateTarget(
-    targetId: string | undefined,
+  private async executeAffordance(
+    affordance: ExecutiveActionCapability,
     startedGoal: string,
   ): Promise<string> {
-    const state = this.semantic.capture(this.snapshot());
-    const target = state.targets.find(candidate => candidate.id === targetId);
-    if (!target) throw new Error('navigate_semantic_target_missing');
-
-    this.update('navigating_target', {
-      target: target.id,
-      kind: target.kind,
-      distance: target.distance,
+    this.update('executing_affordance', {
+      affordance: affordance.id,
+      kind: affordance.kind,
+      item: affordance.item ?? null,
+      target: affordance.targetId ?? null,
     });
-    const result = await this.runPrimitive({
-      action: 'NAVIGATE',
-      targetPosition: target.position,
-      confidence: 1,
-      source: 'task',
-      reason: `executive_navigate:${target.kind}`,
-    }, 30_000);
-    if (result.status !== 'succeeded') {
-      throw new Error(`navigate_target_failed:${result.detail}`);
-    }
-    this.safeCheckpoint(startedGoal, 'target_reached');
-    return `reached:${target.id}`;
-  }
 
-  private async gatherResource(
-    resource: ExecutiveResource,
-    amount: number,
-    targetId: string | undefined,
-    startedGoal: string,
-  ): Promise<string> {
-    if (!resource || resource === 'none') throw new Error('gather_resource_missing_resource');
-
-    const initial = inventoryMap(this.bot)[resource] ?? 0;
-    const targetTotal = Math.max(initial, Math.max(1, amount));
-    const triedSources = new Set<string>();
-
-    for (let step = 0; step < 24; step++) {
-      const current = inventoryMap(this.bot)[resource] ?? 0;
-      this.update('gathering_resource', {
-        resource,
-        collected: current - initial,
-        target: targetTotal,
-        inventoryCount: current,
-      });
-      if (current >= targetTotal) {
-        return `resource_collected:${resource}:${current - initial}`;
-      }
-
-      const state = this.semantic.capture(this.snapshot());
-
-      const dropped = state.targets
-        .filter(target =>
-          target.kind === 'item_drop' &&
-          target.metadata.itemName === resource &&
-          !triedSources.has(target.id),
-        )
-        .sort((a, b) => a.distance - b.distance)[0];
-      if (dropped) {
-        triedSources.add(dropped.id);
-        const collect = await this.runPrimitive({
+    switch (affordance.kind) {
+      case 'move_to': {
+        if (!affordance.position) throw new Error('move_affordance_missing_position');
+        await this.requirePrimitiveSuccess(await this.runPrimitive({
           action: 'NAVIGATE',
-          targetPosition: dropped.position,
+          targetPosition: affordance.position,
           confidence: 1,
           source: 'task',
-          reason: `collect_dropped_resource:${resource}`,
-        }, 15_000);
-        if (collect.status === 'interrupted') throw new Error('task_replan:resource_collection_interrupted');
-        this.safeCheckpoint(startedGoal, 'resource_drop_collected');
-        continue;
-      }
-
-      const sources = state.targets
-        .filter(target =>
-          target.kind === 'resource_source' &&
-          target.metadata.resource === resource &&
-          !triedSources.has(target.id),
-        )
-        .sort((a, b) => {
-          if (a.id === targetId) return -1;
-          if (b.id === targetId) return 1;
-          return a.distance - b.distance;
-        });
-
-      const source = sources[0];
-      if (!source) throw new Error(`resource_source_unavailable:${resource}`);
-      triedSources.add(source.id);
-
-      const blockName = typeof source.metadata.blockName === 'string'
-        ? source.metadata.blockName
-        : null;
-      const blockTargetId = typeof source.metadata.blockTargetId === 'string'
-        ? source.metadata.blockTargetId
-        : null;
-      if (!blockName || !blockTargetId) {
-        throw new Error(`resource_source_invalid:${resource}`);
-      }
-
-      const raw = this.capturePrimitiveWorld();
-      const candidate: WorldCandidate = {
-        id: blockTargetId,
-        kind: 'block',
-        name: blockName,
-        distance: Math.round(this.bot.entity.position.distanceTo({
-          x: source.position.x,
-          y: source.position.y,
-          z: source.position.z,
-        } as any) * 10) / 10,
-        position: { ...source.position },
-      };
-      if (!raw.blockCandidates.some(entry => entry.id === candidate.id)) {
-        raw.blockCandidates.unshift(candidate);
-      }
-
-      const result = await this.runPrimitive({
-        action: 'MINE',
-        blockTargetId,
-        confidence: 1,
-        source: 'task',
-        reason: `gather_dynamic_resource:${resource}`,
-      }, 25_000, raw);
-      if (result.status === 'interrupted') throw new Error('task_replan:resource_mining_interrupted');
-      if (result.status !== 'succeeded') {
-        this.safeCheckpoint(startedGoal, 'resource_source_failed');
-        continue;
-      }
-      this.safeCheckpoint(startedGoal, 'resource_mined');
-    }
-
-    throw new Error(`resource_task_step_limit:${resource}`);
-  }
-
-  private async excavateTarget(
-    targetId: string | undefined,
-    startedGoal: string,
-  ): Promise<string> {
-    const state = this.semantic.capture(this.snapshot());
-    const target = state.targets.find(candidate =>
-      candidate.id === targetId && candidate.kind === 'excavation_site',
-    );
-    if (!target) throw new Error('excavate_target_missing');
-
-    const direction = excavationDirection(target);
-    if (!direction) throw new Error('excavate_target_missing_direction');
-    const mode = excavationMode(target);
-
-    this.update('excavating_target', {
-      target: target.id,
-      distance: target.distance,
-      direction,
-      mode,
-    });
-
-    const result = await this.runPrimitive({
-      action: 'DIG_STAIRCASE',
-      direction,
-      excavationMode: mode,
-      targetPosition: target.position,
-      confidence: 1,
-      source: 'task',
-      reason: `executive_excavate:${mode}:${target.id}`,
-    }, 40_000);
-    if (result.status === 'interrupted') throw new Error('task_replan:excavation_interrupted');
-    if (result.status !== 'succeeded') throw new Error(`excavate_failed:${result.detail}`);
-
-    this.safeCheckpoint(startedGoal, 'excavation_segment_completed');
-    return `excavated:${mode}:${target.id}`;
-  }
-
-  private async attackTarget(
-    targetId: string | undefined,
-    startedGoal: string,
-  ): Promise<string> {
-    const state = this.semantic.capture(this.snapshot());
-    const target = state.targets.find(candidate =>
-      candidate.id === targetId && candidate.kind === 'entity',
-    );
-    if (!target) throw new Error('attack_target_missing');
-
-    const entityId = Number(target.metadata.entityId);
-    const entityName = typeof target.metadata.entityName === 'string'
-      ? target.metadata.entityName
-      : 'entity';
-    if (!Number.isFinite(entityId)) throw new Error('attack_target_invalid_entity');
-
-    const raw = this.capturePrimitiveWorld();
-    const candidate: WorldCandidate = {
-      id: `entity:${entityId}`,
-      kind: 'entity',
-      name: entityName,
-      distance: target.distance,
-      position: { ...target.position },
-      hostile: Boolean(target.metadata.hostile),
-    };
-    if (!raw.entityCandidates.some(entry => entry.id === candidate.id)) {
-      raw.entityCandidates.unshift(candidate);
-    }
-
-    this.update('attacking_target', {
-      target: target.id,
-      entity: entityName,
-      distance: target.distance,
-    });
-    const result = await this.runPrimitive({
-      action: 'ATTACK',
-      entityTargetId: candidate.id,
-      confidence: 1,
-      source: 'task',
-      reason: `executive_attack:${entityName}`,
-    }, 30_000, raw);
-    if (result.status === 'interrupted') throw new Error('task_replan:attack_interrupted');
-    if (result.status !== 'succeeded') throw new Error(`attack_failed:${result.detail}`);
-
-    this.safeCheckpoint(startedGoal, 'entity_attacked');
-    return `attacked:${entityName}`;
-  }
-
-  private async executeDynamicCapability(
-    capabilityId: string | undefined,
-    startedGoal: string,
-  ): Promise<string> {
-    if (!capabilityId) throw new Error('dynamic_capability_missing');
-    const state = this.semantic.capture(this.snapshot());
-    const capability = state.capabilities.actions.find(entry => entry.id === capabilityId);
-    if (!capability) throw new Error(`dynamic_capability_unavailable:${capabilityId}`);
-
-    this.update('executing_dynamic_capability', {
-      capability: capability.id,
-      kind: capability.kind,
-      item: capability.item ?? null,
-      target: capability.targetId ?? null,
-    });
-
-    switch (capability.kind) {
-      case 'hunt_entity':
-        await this.executeHuntCapability(capability, startedGoal);
+          reason: `affordance:${affordance.id}`,
+        }, 30_000), affordance);
         break;
-      case 'consume_item': {
-        const result = await this.runPrimitive({
-          action: 'EAT',
-          consumeItem: capability.item,
+      }
+
+      case 'break_block': {
+        if (!affordance.blockTargetId || !affordance.position) {
+          throw new Error('break_affordance_missing_target');
+        }
+        const raw = this.capturePrimitiveWorld();
+        const blockName = stringSpec(affordance, 'blockName') ?? 'block';
+        const candidate: WorldCandidate = {
+          id: affordance.blockTargetId,
+          kind: 'block',
+          name: blockName,
+          distance: round1(this.bot.entity.position.distanceTo(affordance.position as any)),
+          position: { ...affordance.position },
+        };
+        if (!raw.blockCandidates.some(entry => entry.id === candidate.id)) {
+          raw.blockCandidates.unshift(candidate);
+        }
+        await this.requirePrimitiveSuccess(await this.runPrimitive({
+          action: 'MINE',
+          blockTargetId: affordance.blockTargetId,
           confidence: 1,
           source: 'task',
-          reason: `capability:${capability.id}`,
-        }, 20_000);
-        if (result.status !== 'succeeded') throw new Error(`capability_failed:${capability.id}:${result.detail}`);
-        this.safeCheckpoint(startedGoal, 'food_consumed');
+          reason: `affordance:${affordance.id}`,
+        }, 25_000, raw), affordance);
         break;
       }
+
+      case 'attack_entity': {
+        if (!affordance.entityTargetId || !affordance.position) {
+          throw new Error('attack_affordance_missing_target');
+        }
+        const raw = this.capturePrimitiveWorld();
+        const candidate: WorldCandidate = {
+          id: affordance.entityTargetId,
+          kind: 'entity',
+          name: stringSpec(affordance, 'entityName') ?? 'entity',
+          distance: round1(this.bot.entity.position.distanceTo(affordance.position as any)),
+          position: { ...affordance.position },
+          hostile: Boolean(affordance.preconditions.hostile),
+        };
+        if (!raw.entityCandidates.some(entry => entry.id === candidate.id)) {
+          raw.entityCandidates.unshift(candidate);
+        }
+        await this.requirePrimitiveSuccess(await this.runPrimitive({
+          action: 'ATTACK',
+          entityTargetId: affordance.entityTargetId,
+          confidence: 1,
+          source: 'task',
+          reason: `affordance:${affordance.id}`,
+        }, 20_000, raw), affordance);
+        break;
+      }
+
+      case 'collect_drop': {
+        if (!affordance.position) throw new Error('collect_affordance_missing_position');
+        await this.requirePrimitiveSuccess(await this.runPrimitive({
+          action: 'NAVIGATE',
+          targetPosition: affordance.position,
+          confidence: 1,
+          source: 'task',
+          reason: `affordance:${affordance.id}`,
+        }, 15_000), affordance);
+        await delay(250);
+        break;
+      }
+
+      case 'use_item': {
+        if (!affordance.item) throw new Error('use_affordance_missing_item');
+        await this.requirePrimitiveSuccess(await this.runPrimitive({
+          action: 'USE_ITEM',
+          useItem: affordance.item,
+          confidence: 1,
+          source: 'task',
+          reason: `affordance:${affordance.id}`,
+        }, 20_000), affordance);
+        break;
+      }
+
       case 'place_item': {
-        const result = await this.runPrimitive({
+        if (!affordance.item) throw new Error('place_affordance_missing_item');
+        await this.requirePrimitiveSuccess(await this.runPrimitive({
           action: 'PLACE_ITEM',
-          placeItem: capability.item,
+          placeItem: affordance.item,
+          targetPosition: affordance.position,
           confidence: 1,
           source: 'task',
-          reason: `capability:${capability.id}`,
-        }, 20_000);
-        if (result.status !== 'succeeded') throw new Error(`capability_failed:${capability.id}:${result.detail}`);
-        this.safeCheckpoint(startedGoal, 'item_placed');
+          reason: `affordance:${affordance.id}`,
+        }, 20_000), affordance);
         break;
       }
-      case 'process_item': {
-        const result = await this.runPrimitive({
-          action: 'COOK_FOOD',
-          cookItem: capability.item,
+
+      case 'craft_recipe': {
+        if (!affordance.item) throw new Error('craft_affordance_missing_item');
+        await this.requirePrimitiveSuccess(await this.runPrimitive({
+          action: 'CRAFT',
+          craftItem: affordance.item,
           confidence: 1,
           source: 'task',
-          reason: `capability:${capability.id}`,
-        }, 30_000);
-        if (result.status !== 'succeeded') throw new Error(`capability_failed:${capability.id}:${result.detail}`);
-        this.safeCheckpoint(startedGoal, 'item_processed');
+          reason: `affordance:${affordance.id}`,
+        }, 30_000), affordance);
         break;
       }
-      case 'sleep': {
-        const result = await this.runPrimitive({
-          action: 'SLEEP',
+
+      case 'process_recipe': {
+        if (!affordance.item) throw new Error('process_affordance_missing_item');
+        await this.requirePrimitiveSuccess(await this.runPrimitive({
+          action: 'PROCESS_ITEM',
+          processItem: affordance.item,
+          targetPosition: affordance.position,
           confidence: 1,
           source: 'task',
-          reason: `capability:${capability.id}`,
-        }, 30_000);
-        if (result.status !== 'succeeded') throw new Error(`capability_failed:${capability.id}:${result.detail}`);
-        this.safeCheckpoint(startedGoal, 'slept');
+          reason: `affordance:${affordance.id}`,
+        }, 35_000), affordance);
         break;
       }
+
+      case 'interact_block': {
+        if (!affordance.position) throw new Error('interact_affordance_missing_position');
+        await this.requirePrimitiveSuccess(await this.runPrimitive({
+          action: 'INTERACT_BLOCK',
+          targetPosition: affordance.position,
+          confidence: 1,
+          source: 'task',
+          reason: `affordance:${affordance.id}`,
+        }, 20_000), affordance);
+        break;
+      }
+
       case 'wait_condition':
-        await this.waitForCapabilityCondition(capability, startedGoal);
+        await this.waitForCondition(affordance);
         break;
     }
 
-    return `capability_executed:${capability.id}`;
+    this.safeCheckpoint(startedGoal, `affordance_completed:${affordance.kind}`);
+    return `affordance_executed:${affordance.id}`;
   }
 
-  private async executeHuntCapability(
-    capability: ExecutiveActionCapability,
-    startedGoal: string,
+  private async requirePrimitiveSuccess(
+    result: Awaited<ReturnType<SkillExecutor['runAndWait']>>,
+    affordance: ExecutiveActionCapability,
   ): Promise<void> {
-    const state = this.semantic.capture(this.snapshot());
-    const target = state.targets.find(candidate =>
-      candidate.id === capability.targetId &&
-      candidate.kind === 'entity' &&
-      Boolean(candidate.metadata.foodAnimal),
-    );
-    if (!target) throw new Error(`hunt_target_unavailable:${capability.targetId ?? 'none'}`);
-
-    const entityId = Number(target.metadata.entityId);
-    const entityName = typeof target.metadata.entityName === 'string'
-      ? target.metadata.entityName
-      : 'animal';
-    if (!Number.isFinite(entityId)) throw new Error('hunt_target_invalid_entity');
-
-    const raw = this.capturePrimitiveWorld();
-    const candidate: WorldCandidate = {
-      id: `entity:${entityId}`,
-      kind: 'entity',
-      name: entityName,
-      distance: target.distance,
-      position: { ...target.position },
-      hostile: false,
-      foodAnimal: true,
-    };
-    if (!raw.entityCandidates.some(entry => entry.id === candidate.id)) {
-      raw.entityCandidates.unshift(candidate);
+    if (result.status === 'succeeded') return;
+    if (result.status === 'interrupted') {
+      throw new Error(`task_replan:affordance_interrupted:${affordance.id}:${result.detail}`);
     }
-
-    const result = await this.runPrimitive({
-      action: 'HUNT_FOOD',
-      entityTargetId: candidate.id,
-      confidence: 1,
-      source: 'task',
-      reason: `capability:${capability.id}`,
-    }, 35_000, raw);
-    if (result.status !== 'succeeded') {
-      throw new Error(`capability_failed:${capability.id}:${result.detail}`);
-    }
-    this.safeCheckpoint(startedGoal, 'food_animal_hunted');
+    throw new Error(`affordance_failed:${affordance.id}:${result.detail}`);
   }
 
-  private async waitForCapabilityCondition(
-    capability: ExecutiveActionCapability,
-    startedGoal: string,
-  ): Promise<void> {
-    if (capability.id !== 'wait:daylight') {
-      throw new Error(`unsupported_wait_condition:${capability.id}`);
+  private async waitForCondition(affordance: ExecutiveActionCapability): Promise<void> {
+    const condition = stringSpec(affordance, 'condition');
+    if (condition !== 'daylight' && condition !== 'night') {
+      throw new Error(`unsupported_wait_condition:${condition ?? 'none'}`);
     }
 
     const deadline = Date.now() + 10 * 60_000;
     while (Date.now() < deadline) {
       const time = this.bot.time.timeOfDay;
-      const isNight = time >= 12500 && time < 23500;
-      if (!isNight) {
-        this.safeCheckpoint(startedGoal, 'wait_condition_satisfied:daylight');
-        return;
-      }
+      const night = time >= 12500 && time < 23500;
+      if ((condition === 'daylight' && !night) || (condition === 'night' && night)) return;
 
       const threat = this.shared.get().threatLevel;
       if (threat === 'danger' || threat === 'critical') {
         throw new Error(`task_replan:wait_interrupted_by_threat:${threat}`);
       }
-      if (this.bot.food <= 6) {
-        throw new Error('task_replan:wait_interrupted_by_hunger');
-      }
 
       this.update('waiting_for_condition', {
-        capability: capability.id,
-        condition: 'daylight',
+        affordance: affordance.id,
+        condition,
         timeOfDay: time,
-        hunger: this.bot.food,
       });
       await delay(1_000);
     }
 
-    throw new Error('wait_condition_timeout:daylight');
-  }
-
-  private async craftExecutiveItem(
-    item: TypedGameplayDecision['craftItem'],
-    requestedAmount: number,
-    startedGoal: string,
-  ): Promise<string> {
-    if (!item || item === 'none') throw new Error('craft_item_missing_item');
-
-    const initial = inventoryMap(this.bot)[item] ?? 0;
-    const targetTotal = Math.max(initial, Math.max(1, requestedAmount));
-
-    for (let attempt = 0; attempt < 32; attempt++) {
-      const current = inventoryMap(this.bot)[item] ?? 0;
-      this.update('crafting_item', {
-        item,
-        inventoryCount: current,
-        target: targetTotal,
-        crafted: current - initial,
-      });
-      if (current >= targetTotal) {
-        return `crafted:${item}:${current - initial}`;
-      }
-
-      const before = current;
-      const result = await this.runPrimitive({
-        action: 'CRAFT',
-        craftItem: item,
-        confidence: 1,
-        source: 'task',
-        reason: 'executive_craft_item',
-      }, 30_000);
-      if (result.status === 'interrupted') {
-        throw new Error('task_replan:craft_interrupted');
-      }
-      if (result.status !== 'succeeded') {
-        throw new Error(`craft_item_failed:${item}:${result.detail}`);
-      }
-
-      const after = inventoryMap(this.bot)[item] ?? 0;
-      if (after <= before) {
-        throw new Error(`craft_no_inventory_progress:${item}`);
-      }
-      this.safeCheckpoint(startedGoal, `crafted_${item}`);
-    }
-
-    throw new Error(`craft_item_step_limit:${item}`);
-  }
-
-  private async buildStructure(
-    structure: ExecutiveStructure,
-    targetId: string | undefined,
-    startedGoal: string,
-  ): Promise<string> {
-    switch (structure) {
-      case 'shelter':
-        return this.establishShelter(targetId, startedGoal);
-      default:
-        throw new Error('build_structure_missing_structure');
-    }
-  }
-
-  private async establishShelter(
-    targetId: string | undefined,
-    startedGoal: string,
-  ): Promise<string> {
-    const tried = new Set<string>();
-
-    for (let attempt = 0; attempt < 4; attempt++) {
-      const state = this.semantic.capture(this.snapshot());
-      const sites = state.targets
-        .filter(target => target.kind === 'shelter_site' && !tried.has(target.id))
-        .sort((a, b) => {
-          if (a.id === targetId) return -1;
-          if (b.id === targetId) return 1;
-          return b.score - a.score;
-        });
-      const site = sites[0];
-      if (!site) throw new Error('no_buildable_shelter_site');
-      tried.add(site.id);
-
-      this.update('establishing_shelter', {
-        stage: 'navigating',
-        site: site.id,
-        attempt: attempt + 1,
-      });
-
-      const distance = Math.hypot(
-        this.bot.entity.position.x - site.position.x,
-        this.bot.entity.position.y - site.position.y,
-        this.bot.entity.position.z - site.position.z,
-      );
-      let buildPosition = site.position;
-      if (distance > 1.5) {
-        const nav = await this.runPrimitive({
-          action: 'NAVIGATE',
-          targetPosition: site.position,
-          confidence: 1,
-          source: 'task',
-          reason: 'navigate_buildable_shelter_site',
-        }, 30_000);
-        if (nav.status === 'interrupted') {
-          throw new Error('task_replan:shelter_navigation_interrupted');
-        }
-        if (nav.status !== 'succeeded') {
-          // A selected site can become locally unreachable after digging or
-          // terrain changes. If the bot is already dry and grounded nearby,
-          // let BUILD_SHELTER validate the current footprint instead of
-          // rejecting the whole intent before construction is even attempted.
-          const current = this.semantic.capture(this.snapshot());
-          if (
-            distance <= 6 &&
-            !current.player.inWater &&
-            current.player.onSolidGround
-          ) {
-            buildPosition = {
-              x: Math.floor(this.bot.entity.position.x),
-              y: Math.floor(this.bot.entity.position.y),
-              z: Math.floor(this.bot.entity.position.z),
-            };
-            this.update('establishing_shelter', {
-              stage: 'local_fallback',
-              site: site.id,
-              attempt: attempt + 1,
-            });
-          } else {
-            continue;
-          }
-        }
-      }
-
-      const arrived = this.semantic.capture(this.snapshot());
-      if (arrived.player.inWater || !arrived.player.onSolidGround) continue;
-
-      this.update('establishing_shelter', {
-        stage: 'building',
-        site: site.id,
-        attempt: attempt + 1,
-      });
-      const result = await this.runPrimitive({
-        action: 'BUILD_SHELTER',
-        targetPosition: buildPosition,
-        confidence: 1,
-        source: 'task',
-        reason: buildPosition === site.position
-          ? 'semantic_first_night_shelter'
-          : 'local_validated_shelter_fallback',
-      }, 30_000);
-
-      if (result.status === 'succeeded') {
-        this.safeCheckpoint(startedGoal, 'shelter_built');
-        return `shelter_built:${site.id}`;
-      }
-      if (result.status === 'interrupted') {
-        throw new Error('task_replan:shelter_build_interrupted');
-      }
-      if (!isRetriableShelterSiteFailure(result.detail)) {
-        throw new Error(`shelter_failed:${result.detail}`);
-      }
-
-      this.safeCheckpoint(startedGoal, 'shelter_site_rejected');
-    }
-
-    throw new Error('shelter_failed:no_viable_site_after_retries');
+    throw new Error(`wait_condition_timeout:${condition}`);
   }
 
   private async runPrimitive(
@@ -778,40 +423,38 @@ function idleTask(): ExecutiveTaskSnapshot {
   };
 }
 
-function inventoryMap(bot: mineflayer.Bot): Record<string, number> {
-  const result: Record<string, number> = {};
-  for (const item of bot.inventory.items()) {
-    result[item.name] = (result[item.name] ?? 0) + item.count;
-  }
-  return result;
-}
-
-function isRetriableShelterSiteFailure(detail: string): boolean {
+function procedureKey(affordance: ExecutiveActionCapability): string {
   return [
-    'shelter_requires_solid_ground',
-    'shelter_uneven_or_liquid_ground',
-    'shelter_missing_reference',
-    'shelter_roof_anchor_reference_missing',
-    'shelter_roof_anchor_failed',
-    'shelter_roof_reference_missing',
-    'shelter_roof_failed',
-    'shelter_door_ground_missing',
-    'shelter_doorway_blocked',
-    'shelter_door_failed',
-    'shelter_site_obstructed',
-    'shelter_too_incomplete',
-  ].some(reason => detail.includes(reason));
+    affordance.kind,
+    affordance.item ?? '',
+    affordance.outputItem ?? '',
+    affordance.station ?? '',
+    stringSpec(affordance, 'blockName') ?? '',
+    stringSpec(affordance, 'entityName') ?? '',
+    stringSpec(affordance, 'targetKind') ?? '',
+  ].join('|');
 }
 
-function excavationDirection(target: SemanticTarget): 'N' | 'E' | 'S' | 'W' | null {
-  const value = target.metadata.direction;
-  return value === 'N' || value === 'E' || value === 'S' || value === 'W'
-    ? value
-    : null;
+function procedureMetadata(
+  affordance: ExecutiveActionCapability,
+): Record<string, string | number | boolean | null> {
+  return {
+    kind: affordance.kind,
+    item: affordance.item ?? null,
+    outputItem: affordance.outputItem ?? null,
+    station: affordance.station ?? null,
+    blockName: stringSpec(affordance, 'blockName'),
+    entityName: stringSpec(affordance, 'entityName'),
+  };
 }
 
-function excavationMode(target: SemanticTarget): 'down' | 'up' {
-  return target.metadata.mode === 'up' ? 'up' : 'down';
+function stringSpec(affordance: ExecutiveActionCapability, key: string): string | null {
+  const value = affordance.specification[key];
+  return typeof value === 'string' && value ? value : null;
+}
+
+function round1(value: number): number {
+  return Math.round(value * 10) / 10;
 }
 
 function delay(ms: number): Promise<void> {
