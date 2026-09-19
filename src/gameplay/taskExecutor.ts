@@ -5,7 +5,7 @@ import { SemanticWorldModel } from './semanticWorldModel.js';
 import { SkillExecutor } from './skillExecutor.js';
 import type { WorldSensor } from './worldSensor.js';
 import type { ExecutiveActionCapability, ExecutiveDecision, ExecutiveTaskSnapshot, TaskExecutionResult } from './executiveTypes.js';
-import type { WorldMemory } from './worldMemory.js';
+import { normalizeMemoryDimension, type WorldMemory } from './worldMemory.js';
 import { ExperienceMemory, bindProcedureStep } from './experienceMemory.js';
 import { parseOperation, inventorySignature, windowSignature, windowSnapshot, type PrimitiveOperation } from './primitiveOperations.js';
 
@@ -37,6 +37,8 @@ export class TaskExecutor {
     if (this.stopped) return { status: 'interrupted', detail: 'runtime_stopped' };
     if (this.current.status === 'running') return { status: 'failed', detail: 'task_already_running' };
     const token = ++this.epoch;
+    const taskWorldId = this.memory.getWorldId();
+    const taskDimension = normalizeMemoryDimension(this.bot.game.dimension);
     this.current = { id: ++this.sequence, task: decision.task, targetId: decision.targetId ?? null,
       status: 'running', startedAt: Date.now(), updatedAt: Date.now(), detail: '', progress: {} };
     this.log('task_started', { task_id: this.current.id, task: decision.task,
@@ -47,6 +49,10 @@ export class TaskExecutor {
       reason: decision.reason ?? null, based_on_revision: decision.basedOnRevision });
     const check = () => {
       if (this.stopped || token !== this.epoch) throw new Error('task_replan:cancelled');
+      if (taskDimension == null) throw new Error('task_replan:dimension_unavailable');
+      if (this.memory.getWorldId() !== taskWorldId || normalizeMemoryDimension(this.bot.game.dimension) !== taskDimension) {
+        throw new Error('task_replan:spatial_context_changed');
+      }
     };
     try {
       check(); let detail: string;
@@ -112,6 +118,9 @@ export class TaskExecutor {
     const blockName = op.position ? this.bot.blockAt(new Vec3(op.position.x, op.position.y, op.position.z))?.name : undefined;
     const entityName = op.entityId != null ? this.bot.entities[op.entityId]?.name : undefined;
     const worldId = this.memory.getWorldId();
+    const dimension = String(this.bot.game.dimension), version = this.bot.version;
+    const contextChanged = () => this.memory.getWorldId() !== worldId ||
+      normalizeMemoryDimension(this.bot.game.dimension) !== normalizeMemoryDimension(dimension);
     let hurt = false;
     const hurtListener = (entity: any) => { if (entity.id === op.entityId) hurt = true; };
     this.bot.on('entityHurt', hurtListener);
@@ -129,28 +138,35 @@ export class TaskExecutor {
       status = 'succeeded'; detail = `${op.action}:${result.detail}:${verified ? 'effect_observed' : 'no_effect_confirmed'}`;
       if (verified && op.action === 'PLACE' && op.position && op.item) {
         this.memory.observe({ kind: 'placed_block', key: `${op.position.x}:${op.position.y}:${op.position.z}`, label: op.item,
-          position: op.position, scope: 'world', retention: 'stable', confidence: 1, metadata: { source: 'verified_self_action' } });
+          position: op.position, dimension, scope: 'world', retention: 'stable', confidence: 1, metadata: { source: 'verified_self_action' } });
       }
-      if (verified && op.action === 'BREAK' && op.position) this.memory.markContradictedNear(op.position, 0.1, ['placed_block'], 1);
+      if (verified && op.action === 'BREAK' && op.position) this.memory.markContradictedNear(op.position, 0.1, ['placed_block'], 1, dimension);
       return { detail, verified };
     } catch (error) {
-      detail = error instanceof Error ? error.message : String(error);
-      status = detail.startsWith('task_replan:') ? 'interrupted' : 'failed'; throw error;
+      // Preserve the source context; a cross-dimension completion is not a placement
+      // in the destination and is not negative training evidence for the action.
+      detail = contextChanged() ? 'task_replan:spatial_context_changed' : error instanceof Error ? error.message : String(error);
+      status = detail.startsWith('task_replan:') ? 'interrupted' : 'failed';
+      verified = false;
+      throw new Error(detail);
     } finally {
       this.bot.removeListener('entityHurt', hurtListener);
       const after = observation(this.bot, op);
-      const effect = JSON.stringify({ hp: after.hp - before.hp, hunger: after.hunger - before.hunger,
-        inventoryBefore: before.inventory, inventoryAfter: after.inventory,
-        blockBefore: before.block, blockAfter: after.block, targetHurtObserved: hurt, windowChanged: before.window !== after.window });
-      const evidence = this.experience.append({ worldId, version: this.bot.version, dimension: String(this.bot.game.dimension),
+      const effect = contextChanged()
+        ? JSON.stringify({ contextChanged: true, sourceWorldId: worldId, sourceDimension: dimension,
+            destinationWorldId: this.memory.getWorldId(), destinationDimension: String(this.bot.game.dimension) })
+        : JSON.stringify({ hp: after.hp - before.hp, hunger: after.hunger - before.hunger,
+            inventoryBefore: before.inventory, inventoryAfter: after.inventory,
+            blockBefore: before.block, blockAfter: after.block, targetHurtObserved: hurt, windowChanged: before.window !== after.window });
+      const evidence = this.experience.append({ worldId, version, dimension,
         operation: op, status, verified, detail, effect, origin, blockName, entityName, window: win });
       this.log('operation_evidence', { task_id: this.current.id, evidence_id: evidence.id,
         experience_session_id: evidence.sessionId, evidence_sequence: evidence.sequence,
-        world_id: worldId, minecraft_version: this.bot.version, dimension: String(this.bot.game.dimension),
+        world_id: worldId, minecraft_version: version, dimension,
         operation: op, status, effect_verified: verified, detail, effect });
-      // A safety interruption is not evidence that the operation itself failed.
+      // A safety/context interruption is not evidence that the operation itself failed.
       if (status !== 'interrupted') this.memory.recordProcedureOutcome({
-        key: [this.bot.version, String(this.bot.game.dimension), op.action, op.item ?? '', blockName ?? '', entityName ?? ''].join('|'),
+        key: [version, dimension, op.action, op.item ?? '', blockName ?? '', entityName ?? ''].join('|'),
         label: `${op.action} ${op.item ?? blockName ?? entityName ?? ''}`.trim(),
         success: status === 'succeeded' && verified,
         detail: status === 'succeeded' ? (verified ? 'effect_observed' : 'effect_not_confirmed') : 'operation_failed',
