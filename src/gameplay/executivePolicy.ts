@@ -422,6 +422,16 @@ function normalizeDecisionParameters(
   let targetId = decision.targetId;
   const target = targetId ? state.targets.find(candidate => candidate.id === targetId) : undefined;
 
+  // Event-driven Executive decisions are made at task boundaries. Reject
+  // action/argument combinations that cannot be executed instead of sending
+  // them into the Task layer to fail repeatedly.
+  if (decision.task === 'CONTINUE_TASK' && state.activeTask.status !== 'running') {
+    return asWait(decision, 'invalid_task:no_running_task');
+  }
+  if (decision.task === 'NAVIGATE_TARGET' && !target) {
+    return asWait(decision, 'invalid_target:navigate_requires_target');
+  }
+
   if (decision.task === 'GATHER_RESOURCE') {
     const resource = decision.resource ?? 'none';
     if (target) {
@@ -451,9 +461,13 @@ function normalizeDecisionParameters(
         reason: 'capability_unavailable:no_excavation_site',
       };
     }
-    if (target?.kind !== 'excavation_site') targetId = undefined;
+    if (target?.kind !== 'excavation_site') {
+      return asWait(decision, 'invalid_target:excavation_requires_site');
+    }
   } else if (decision.task === 'ATTACK_TARGET') {
-    if (target?.kind !== 'entity') targetId = undefined;
+    if (target?.kind !== 'entity') {
+      return asWait(decision, 'invalid_target:attack_requires_entity');
+    }
   } else if (
     decision.task === 'BUILD_STRUCTURE' &&
     decision.structure === 'shelter'
@@ -471,10 +485,25 @@ function normalizeDecisionParameters(
         reason: 'capability_unavailable:no_shelter_site',
       };
     }
-    if (target?.kind !== 'shelter_site') targetId = undefined;
+    if (target?.kind !== 'shelter_site') {
+      return asWait(decision, 'invalid_target:shelter_requires_site');
+    }
   }
 
   return { ...decision, targetId };
+}
+
+function asWait(decision: ExecutiveDecision, reason: string): ExecutiveDecision {
+  return {
+    ...decision,
+    task: 'WAIT',
+    targetId: undefined,
+    resource: 'none',
+    craftItem: 'none',
+    structure: 'none',
+    amount: 1,
+    reason,
+  };
 }
 
 function dynamicResourceOptions(state: ExecutiveWorldState): string[] {
