@@ -210,18 +210,34 @@ export class RunRecorder {
   }
 }
 
-/** Separate process preserves a termination record even when the gameplay child crashes. */
-export async function runRecordedChild(recorder: RunRecorder, args: string[], command = process.execPath): Promise<number> {
+export interface RecordedChildLimits {
+  maxDurationMs?: number;
+  shutdownGraceMs?: number;
+  signal?: AbortSignal;
+}
+
+/** Separate process preserves a termination record even when the gameplay child crashes.
+ * Optional evaluation limits do not alter ordinary start:gameplay behavior.
+ */
+export async function runRecordedChild(recorder: RunRecorder, args: string[], command = process.execPath,
+  limits: RecordedChildLimits = {}): Promise<number> {
+  const grace = limits.shutdownGraceMs ?? 10000;
+  if ((limits.maxDurationMs != null && (!Number.isSafeInteger(limits.maxDurationMs) || limits.maxDurationMs < 1 || limits.maxDurationMs > 300000)) ||
+      !Number.isSafeInteger(grace) || grace < 1 || grace > 10000) throw new Error('invalid_recorded_child_limits');
+  if (limits.signal?.aborted) { recorder.finish(null, null, 'cancelled_before_spawn'); return 130; }
   let child: ChildProcess | undefined, timer: ReturnType<typeof setTimeout> | undefined;
+  let deadline: ReturnType<typeof setTimeout> | undefined;
   let recordingError = false, forced = false;
+  let stopReason: 'duration_limit' | 'evaluation_cancelled' | undefined;
   const kill = (signal: NodeJS.Signals) => {
     if (!child?.pid) return;
     try { if (process.platform === 'win32') child.kill(signal); else process.kill(-child.pid, signal); } catch { /* Child may already have exited. */ }
   };
   const terminate = (signal: NodeJS.Signals) => {
     kill(signal);
-    if (!timer) timer = setTimeout(() => { forced = true; kill('SIGKILL'); }, 10000);
+    if (!timer) timer = setTimeout(() => { forced = true; kill('SIGKILL'); }, grace);
   };
+  const abort = () => { stopReason ??= 'evaluation_cancelled'; terminate('SIGTERM'); };
   const receive = (line: string, stream: 'stdout' | 'stderr') => {
     if (recordingError) return;
     try { recorder.acceptLine(line, stream); } catch {
@@ -230,6 +246,7 @@ export async function runRecordedChild(recorder: RunRecorder, args: string[], co
   };
   const sigint = () => terminate('SIGINT'), sigterm = () => terminate('SIGTERM');
   process.on('SIGINT', sigint); process.on('SIGTERM', sigterm);
+  limits.signal?.addEventListener('abort', abort, { once: true });
   try {
     return await new Promise<number>(resolveCode => {
       child = spawn(command, args, { cwd: recorder.cwd, env: { ...recorder.env, GAMEPLAY_RUN_ID: recorder.runId },
@@ -238,17 +255,28 @@ export async function runRecordedChild(recorder: RunRecorder, args: string[], co
       const readers = [createInterface({ input: child.stdout!, crlfDelay: Infinity }), createInterface({ input: child.stderr!, crlfDelay: Infinity })];
       readers[0].on('line', line => receive(line, 'stdout'));
       readers[1].on('line', line => receive(line, 'stderr'));
+      if (limits.maxDurationMs != null) deadline = setTimeout(() => {
+        stopReason ??= 'duration_limit';
+        try { recorder.record({ kind: 'run_limit_reached', max_duration_ms: limits.maxDurationMs }); }
+        catch { recordingError = true; }
+        terminate('SIGTERM');
+      }, limits.maxDurationMs);
       let spawnError = false;
       child.once('error', error => { spawnError = true; receive(JSON.stringify({ kind: 'spawn_error', message: error.message }), 'stderr'); });
       child.once('close', (code, signal) => {
         readers.forEach(reader => reader.close());
-        try { recorder.finish(code, signal, recordingError ? 'recording_failed' : spawnError ? 'spawn_failed' : forced ? 'forced_after_signal' : undefined); }
+        const reason = recordingError ? 'recording_failed' : spawnError ? 'spawn_failed'
+          : forced ? (stopReason ? `${stopReason}_forced` : 'forced_after_signal') : stopReason;
+        try { recorder.finish(code, signal, reason); }
         catch { recordingError = true; }
-        resolveCode(recordingError || spawnError || forced ? 1 : code ?? (signal === 'SIGINT' ? 130 : signal === 'SIGTERM' ? 143 : 1));
+        resolveCode(recordingError || spawnError || forced ? 1 : stopReason === 'duration_limit' ? 124
+          : stopReason === 'evaluation_cancelled' ? 130 : code ?? (signal === 'SIGINT' ? 130 : signal === 'SIGTERM' ? 143 : 1));
       });
     });
   } finally {
     if (timer) clearTimeout(timer);
+    if (deadline) clearTimeout(deadline);
+    limits.signal?.removeEventListener('abort', abort);
     process.removeListener('SIGINT', sigint); process.removeListener('SIGTERM', sigterm);
   }
 }
