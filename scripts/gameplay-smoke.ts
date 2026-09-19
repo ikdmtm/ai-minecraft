@@ -127,8 +127,10 @@ async function main() {
     await run({ action: 'CLOSE', windowId: slots().id });
     await until(() => bot!.inventory.items().some(i => i.name === 'cooked_chicken'), 'output_in_inventory');
 
-    command('effect give AdapterSmoke minecraft:hunger 8 10 true');
-    await until(() => bot!.food <= 14, 'hunger_reduced_for_use', 12000);
+    // A strong, short Hunger effect deterministically burns through initial
+    // saturation so USE can be verified from a real food-level increase.
+    command('effect give AdapterSmoke minecraft:hunger 3 255 true');
+    await until(() => bot!.food <= 14, 'hunger_reduced_for_use', 8000);
     command('effect clear AdapterSmoke minecraft:hunger');
     const hungerBefore = bot.food;
     const cookedBefore = count('cooked_chicken');
