@@ -56,22 +56,11 @@ export class CapabilityRegistry {
       }))
       .slice(0, 20);
 
-    const huntFood = targets
-      .filter(target => target.kind === 'entity' && Boolean(target.metadata.foodAnimal))
-      .map(target => ({
-        targetId: target.id,
-        entity: stringMeta(target, 'entityName') ?? 'unknown',
-      }))
-      .slice(0, 12);
-
     return {
       gather,
       craft: this.discoverCraftableItems(strategyText),
       recipes: this.discoverReachableRecipes(gather, strategyText),
-      huntFood,
-      edible: this.discoverEdibleInventory(),
-      place: this.discoverPlaceableUtilities(),
-      cook: this.discoverCookableFood(),
+      actions: this.discoverDynamicActions(targets),
       entityActions,
       canExcavate: targets.some(target => target.kind === 'excavation_site'),
     };
@@ -203,7 +192,141 @@ export class CapabilityRegistry {
       .slice(0, 128);
   }
 
-  private discoverEdibleInventory(): ExecutiveCapabilitySnapshot['edible'] {
+  private discoverDynamicActions(
+    targets: SemanticTarget[],
+  ): ExecutiveCapabilitySnapshot['actions'] {
+    const actions: ExecutiveCapabilitySnapshot['actions'] = [];
+
+    for (const target of targets) {
+      if (target.kind !== 'entity' || !Boolean(target.metadata.foodAnimal)) continue;
+      const entity = stringMeta(target, 'entityName') ?? 'animal';
+      actions.push({
+        id: `hunt:${target.id}`,
+        kind: 'hunt_entity',
+        description: `Hunt observed ${entity} and collect nearby drops.`,
+        targetId: target.id,
+        utilityTags: ['food', 'survival', 'resource'],
+        preconditions: {
+          visible: true,
+          hostile: Boolean(target.metadata.hostile),
+          distance: target.distance,
+        },
+        expectedEffects: {
+          mayProduceFood: true,
+          entity: entity,
+        },
+      });
+    }
+
+    for (const entry of this.discoverEdibleInventory()) {
+      if (this.bot.food >= 20) break;
+      actions.push({
+        id: `consume:${entry.item}`,
+        kind: 'consume_item',
+        description: `Consume carried ${entry.item} to restore hunger.`,
+        item: entry.item,
+        utilityTags: ['food', 'survival', 'recovery'],
+        preconditions: {
+          inventoryCount: entry.count,
+          hunger: this.bot.food,
+        },
+        expectedEffects: {
+          hungerIncreaseApprox: entry.foodPoints,
+        },
+      });
+    }
+
+    for (const entry of this.discoverPlaceableUtilities()) {
+      actions.push({
+        id: `place:${entry.item}`,
+        kind: 'place_item',
+        description: `Place carried ${entry.item} nearby so it can be used as ${entry.role} infrastructure.`,
+        item: entry.item,
+        role: entry.role,
+        utilityTags: ['infrastructure', entry.role],
+        preconditions: {
+          inventoryCount: inventoryCount(this.bot, entry.item),
+          onGround: Boolean(this.bot.entity.onGround),
+        },
+        expectedEffects: {
+          facilityAvailable: entry.role,
+        },
+      });
+    }
+
+    const station = this.bot.findBlock({
+      matching: block => block.name === 'furnace' || block.name === 'smoker',
+      maxDistance: 8,
+    });
+    for (const entry of this.discoverCookableFood()) {
+      if (!station || !entry.fuelAvailable) continue;
+      actions.push({
+        id: `process:${entry.input}:${entry.output}`,
+        kind: 'process_item',
+        description: `Cook carried ${entry.input} into ${entry.output} using the nearby ${station.name}.`,
+        item: entry.input,
+        outputItem: entry.output,
+        station: station.name,
+        utilityTags: ['food', 'processing', 'survival'],
+        preconditions: {
+          inputCount: entry.count,
+          fuelAvailable: entry.fuelAvailable,
+          stationNearby: true,
+        },
+        expectedEffects: {
+          outputItem: entry.output,
+          improvesFoodValue: true,
+        },
+      });
+    }
+
+    const bed = this.bot.findBlock({
+      matching: block => block.name.endsWith('_bed'),
+      maxDistance: 16,
+    });
+    if (bed && isNight(this.bot)) {
+      actions.push({
+        id: 'sleep:nearby_bed',
+        kind: 'sleep',
+        description: 'Sleep in the nearby bed to advance through the night when Minecraft permits it.',
+        utilityTags: ['sleep', 'safety', 'time'],
+        preconditions: {
+          bedNearby: true,
+          night: true,
+        },
+        expectedEffects: {
+          advancesToDay: true,
+        },
+      });
+    }
+
+    const shelter = targets.find(target =>
+      target.kind === 'known_structure' &&
+      target.metadata.structureKind === 'shelter' &&
+      target.distance <= 3,
+    );
+    if (shelter && isNight(this.bot)) {
+      actions.push({
+        id: 'wait:daylight',
+        kind: 'wait_condition',
+        description: 'Remain at the known shelter until daylight or until safety/needs require replanning.',
+        targetId: shelter.id,
+        utilityTags: ['safety', 'time', 'shelter'],
+        preconditions: {
+          night: true,
+          shelterNearby: true,
+        },
+        expectedEffects: {
+          advancesToDay: true,
+          avoidsNightExposure: true,
+        },
+      });
+    }
+
+    return actions.slice(0, 40);
+  }
+
+  private discoverEdibleInventory(): Array<{ item: string; count: number; foodPoints: number }> {
     return this.bot.inventory.items()
       .map(item => {
         const data = (this.bot.registry.items as any)?.[item.type] ?? {};
@@ -441,6 +564,11 @@ function isFuelItem(name: string): boolean {
     name.endsWith('_wood') ||
     name.endsWith('_planks')
   );
+}
+
+function isNight(bot: mineflayer.Bot): boolean {
+  const time = bot.time.timeOfDay;
+  return time >= 12500 && time < 23500;
 }
 
 function recipeIngredients(
