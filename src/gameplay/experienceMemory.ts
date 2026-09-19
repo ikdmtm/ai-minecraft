@@ -5,6 +5,7 @@ import { dirname, resolve } from 'path';
 import { windowSnapshot, type PrimitiveOperation } from './primitiveOperations.js';
 import { deriveProcedureSteps, procedureEnvironmentMatches } from './procedureBindings.js';
 import { normalizeMemoryDimension } from './worldMemory.js';
+import { searchExperience, memorySearchContextKey, type MemorySearchContext, type MemorySearchRequest, type MemorySearchResult } from './memoryRetrieval.js';
 export { bindProcedureStep, completeProcedureStepBinding, ProcedureBindingError, procedureEnvironmentMatches } from './procedureBindings.js';
 
 export interface Evidence {
@@ -58,6 +59,7 @@ export interface ReplayRecord {
 /** Append-only evidence and replay journal. Templates are data, never code. */
 export class ExperienceMemory {
   private db: Database.Database;
+  private lastMemorySearch?: MemorySearchResult;
   readonly sessionId = randomUUID();
   constructor(path = ':memory:') {
     if (path !== ':memory:') mkdirSync(dirname(resolve(path)), { recursive: true });
@@ -77,6 +79,17 @@ export class ExperienceMemory {
     `);
   }
   close(): void { if (this.db.open) this.db.close(); }
+  /** Explicit query only: ordinary observation does not scan history. */
+  search(context: MemorySearchContext, request: MemorySearchRequest): MemorySearchResult {
+    this.lastMemorySearch = undefined;
+    const result = searchExperience(this.db, context, request);
+    this.lastMemorySearch = structuredClone(result);
+    return result;
+  }
+  retrievalSnapshot(context: MemorySearchContext): MemorySearchResult | null {
+    if (!this.lastMemorySearch || memorySearchContextKey(this.lastMemorySearch.context) !== memorySearchContextKey(context)) return null;
+    return structuredClone(this.lastMemorySearch);
+  }
   append(input: Omit<Evidence, 'id' | 'sequence' | 'sessionId' | 'createdAt'>): Evidence {
     const row = { ...input, id: randomUUID(), sequence: 0, sessionId: this.sessionId, createdAt: Date.now() };
     const result = this.db.prepare('INSERT INTO autonomy_evidence(id,payload) VALUES(?,?)').run(row.id, JSON.stringify(row));
