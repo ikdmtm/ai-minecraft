@@ -1,5 +1,7 @@
 import Database from 'better-sqlite3';
 import { randomUUID } from 'crypto';
+import { mkdirSync } from 'fs';
+import { dirname, resolve } from 'path';
 
 export type MemoryRetention = 'transient' | 'session' | 'stable';
 export type MemoryScope = 'world' | 'global' | 'stable';
@@ -53,6 +55,7 @@ export class WorldMemory {
   private worldId: string;
 
   constructor(dbPath?: string, worldId?: string) {
+    if (dbPath) mkdirSync(dirname(resolve(dbPath)), { recursive: true });
     this.db = dbPath ? new Database(dbPath) : null;
     this.worldId = worldId ?? 'world-ephemeral';
     if (this.db) {
