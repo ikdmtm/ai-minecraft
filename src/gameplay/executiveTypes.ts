@@ -6,8 +6,14 @@ export type ExecutiveTaskType =
   | 'GATHER_RESOURCE'
   | 'EXCAVATE_TARGET'
   | 'ATTACK_TARGET'
+  | 'HUNT_FOOD_TARGET'
+  | 'EAT_FOOD'
   | 'CRAFT_ITEM'
+  | 'PLACE_ITEM'
+  | 'COOK_FOOD'
+  | 'SLEEP'
   | 'BUILD_STRUCTURE'
+  | 'WAIT_UNTIL_DAYLIGHT'
   | 'WAIT';
 
 export type ExecutiveResource = string;
@@ -51,6 +57,28 @@ export interface ExecutiveCapabilitySnapshot {
     item: string;
     requiresTable: boolean;
     recipeCount: number;
+    utility: 'food' | 'tool' | 'weapon' | 'armor' | 'bed' | 'workstation' | 'storage' | 'material' | 'building' | 'utility' | 'misc';
+    owned: number;
+    strategyRelevant: boolean;
+  }>;
+  huntFood: Array<{
+    targetId: string;
+    entity: string;
+  }>;
+  edible: Array<{
+    item: string;
+    count: number;
+    foodPoints: number;
+  }>;
+  place: Array<{
+    item: string;
+    role: 'workstation' | 'storage' | 'sleep' | 'utility';
+  }>;
+  cook: Array<{
+    input: string;
+    output: string;
+    count: number;
+    fuelAvailable: boolean;
   }>;
   recipes: Array<{
     item: string;
@@ -100,6 +128,8 @@ export interface ExecutiveWorldState {
   facilities: {
     craftingTableNearby: boolean;
     furnaceNearby: boolean;
+    smokerNearby: boolean;
+    containerNearby: boolean;
     bedNearby: boolean;
     shelterNearby: boolean;
   };
@@ -118,6 +148,8 @@ export interface ExecutiveDecision {
   targetId?: string;
   resource?: ExecutiveResource;
   craftItem?: CraftItem;
+  placeItem?: string;
+  cookItem?: string;
   structure?: ExecutiveStructure;
   amount?: number;
   confidence: number;
@@ -137,8 +169,14 @@ export const EXECUTIVE_TASKS: ExecutiveTaskType[] = [
   'GATHER_RESOURCE',
   'EXCAVATE_TARGET',
   'ATTACK_TARGET',
+  'HUNT_FOOD_TARGET',
+  'EAT_FOOD',
   'CRAFT_ITEM',
+  'PLACE_ITEM',
+  'COOK_FOOD',
+  'SLEEP',
   'BUILD_STRUCTURE',
+  'WAIT_UNTIL_DAYLIGHT',
   'WAIT',
 ];
 
