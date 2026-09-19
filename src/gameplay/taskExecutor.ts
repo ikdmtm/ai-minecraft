@@ -76,6 +76,7 @@ export class TaskExecutor {
           if (!affordance) throw new Error(`affordance_unavailable:${decision.capabilityId}`);
           learningBefore = captureLearningSnapshot(this.bot);
           detail = await this.executeAffordance(affordance, startedGoal);
+          this.rememberWorldOutcome(affordance);
           const learningAfter = captureLearningSnapshot(this.bot);
           this.memory.recordProcedureOutcome({
             key: procedureKey(affordance),
@@ -325,6 +326,61 @@ export class TaskExecutor {
     }
 
     throw new Error(`wait_condition_timeout:${condition}`);
+  }
+
+  private rememberWorldOutcome(affordance: ExecutiveActionCapability): void {
+    if (affordance.kind === 'place_item' && affordance.position && affordance.item) {
+      const p = affordance.position;
+      this.memory.observe({
+        kind: 'placed_block',
+        key: `${affordance.item}:${Math.floor(p.x)}:${Math.floor(p.y)}:${Math.floor(p.z)}`,
+        label: affordance.item,
+        position: { ...p },
+        scope: 'world',
+        retention: 'stable',
+        confidence: 1,
+        metadata: {
+          blockName: stringSpec(affordance, 'blockName') ?? affordance.item,
+          source: 'self_action',
+        },
+      });
+      return;
+    }
+
+    if (affordance.kind === 'break_block' && affordance.position) {
+      this.memory.markContradictedNear(
+        affordance.position,
+        1.5,
+        ['resource_site', 'placed_block'],
+        0.55,
+      );
+      return;
+    }
+
+    if (
+      affordance.kind === 'move_to' &&
+      affordance.targetId?.startsWith('memory_target:')
+    ) {
+      this.memory.reinforce(affordance.targetId.slice('memory_target:'.length), 0.08);
+      return;
+    }
+
+    if (
+      affordance.kind === 'attack_entity' &&
+      affordance.position &&
+      affordance.entityTargetId
+    ) {
+      const match = /^entity:(\d+)$/.exec(affordance.entityTargetId);
+      const entityStillExists = match ? Boolean(this.bot.entities[Number(match[1])]) : true;
+      if (!entityStillExists) {
+        this.memory.markContradictedNear(
+          affordance.position,
+          4,
+          ['entity_sighting'],
+          0.5,
+        );
+      }
+    }
   }
 
   private async runPrimitive(
