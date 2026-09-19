@@ -2,9 +2,10 @@ import Database from 'better-sqlite3';
 import { createHash, randomUUID } from 'crypto';
 import { mkdirSync } from 'fs';
 import { dirname, resolve } from 'path';
-import type mineflayer from 'mineflayer';
-import { Vec3 } from 'vec3';
-import { parseOperation, windowSnapshot, type PrimitiveOperation } from './primitiveOperations.js';
+import { windowSnapshot, type PrimitiveOperation } from './primitiveOperations.js';
+import { deriveProcedureSteps } from './procedureBindings.js';
+import { normalizeMemoryDimension } from './worldMemory.js';
+export { bindProcedureStep, completeProcedureStepBinding, ProcedureBindingError, procedureEnvironmentMatches } from './procedureBindings.js';
 
 export interface Evidence {
   id: string; sequence: number; sessionId: string; worldId: string; version: string; dimension: string;
@@ -15,10 +16,15 @@ export interface Evidence {
 }
 export interface ProcedureStep {
   operation: PrimitiveOperation;
-  binding?: { kind: 'block' | 'entity'; name: string } | { kind: 'relative'; offset: { x: number; y: number; z: number } };
+  binding?: { kind: 'block' | 'entity'; name: string; ref?: string } |
+    { kind: 'relative'; offset: { x: number; y: number; z: number }; ref?: string };
   windowType?: string;
   sourceItem?: string;
   destinationInventory?: boolean;
+  opensWindowRef?: string;
+  windowBinding?: { ref: string; type: string; open: boolean };
+  sourceRole?: string | null;
+  destinationRole?: string | null;
 }
 export interface LearnedProcedure {
   id: string; name: string; version: string; dimension: string; steps: ProcedureStep[];
@@ -73,32 +79,8 @@ export class ExperienceMemory {
     }
     const id = 'learned:' + createHash('sha256').update(ids.join('|')).digest('hex').slice(0, 20);
     const existing = this.get(id); if (existing) return existing;
-    const origin = first.origin;
-    const steps = traces.map(trace => {
-      const operation = parseOperation(trace.operation);
-      const step: ProcedureStep = { operation: { ...operation } };
-      delete step.operation.position; delete step.operation.entityId; delete step.operation.windowId;
-      if (['PLACE', 'MOVE', 'LOOK'].includes(operation.action) || (operation.position && !trace.blockName)) {
-        const p = operation.position!;
-        step.binding = { kind: 'relative', offset: { x: p.x - Math.floor(origin.x), y: p.y - Math.floor(origin.y), z: p.z - Math.floor(origin.z) } };
-      } else if (operation.position && trace.blockName) step.binding = { kind: 'block', name: trace.blockName };
-      if (operation.entityId != null) {
-        if (!trace.entityName) throw new Error('procedure_unknown_entity_binding');
-        step.binding = { kind: 'entity', name: trace.entityName };
-      }
-      if (operation.action === 'TRANSFER') {
-        step.windowType = String(trace.window.type);
-        const source = trace.window.slots[operation.sourceSlot!];
-        const destination = trace.window.slots[operation.destinationSlot!];
-        if (!source?.item || !destination) throw new Error('procedure_missing_slot_evidence');
-        if (source.zone === 'inventory') { step.sourceItem = source.item; delete step.operation.sourceSlot; }
-        if (destination.zone === 'inventory') { step.destinationInventory = true; delete step.operation.destinationSlot; }
-      }
-      if (operation.action === 'WAIT' && (operation.durationMs ?? 5000) > 10000) throw new Error('procedure_wait_too_long');
-      return step;
-    });
     const procedure: LearnedProcedure = { id, name: name.trim(), version: first.version, dimension: first.dimension,
-      steps, evidenceIds: [...ids], successes: 0, failures: 0, status: 'candidate', createdAt: Date.now() };
+      steps: deriveProcedureSteps(traces), evidenceIds: [...ids], successes: 0, failures: 0, status: 'candidate', createdAt: Date.now() };
     this.persist(procedure); return procedure;
   }
   get(id: string): LearnedProcedure | undefined {
@@ -106,9 +88,13 @@ export class ExperienceMemory {
     return row ? JSON.parse(row.payload) : undefined;
   }
   list(version?: string, dimension?: string): LearnedProcedure[] {
-    return (this.db.prepare('SELECT payload FROM autonomy_procedures ORDER BY rowid DESC LIMIT 64').all() as { payload: string }[])
+    // Filter before the display limit: other environments must not hide an
+    // older compatible procedure. Relevance ranking/indexing remains separate.
+    return (this.db.prepare('SELECT payload FROM autonomy_procedures ORDER BY rowid DESC').all() as { payload: string }[])
       .map(row => JSON.parse(row.payload) as LearnedProcedure)
-      .filter(p => (!version || p.version === version) && (!dimension || p.dimension === dimension));
+      .filter(p => (!version || p.version === version) && (dimension == null ||
+        (normalizeMemoryDimension(dimension) != null && normalizeMemoryDimension(p.dimension) === normalizeMemoryDimension(dimension))))
+      .slice(0, 64);
   }
   recordReplay(id: string, success: boolean): void {
     const procedure = this.get(id); if (!procedure) throw new Error('procedure_not_found');
@@ -120,49 +106,4 @@ export class ExperienceMemory {
     this.db.prepare('INSERT INTO autonomy_procedures(id,payload) VALUES(?,?) ON CONFLICT(id) DO UPDATE SET payload=excluded.payload')
       .run(procedure.id, JSON.stringify(procedure));
   }
-}
-
-/** Late binding makes a learned procedure reusable without importing old-world coordinates. */
-export function bindProcedureStep(
-  step: ProcedureStep, bot: mineflayer.Bot, anchor: Vec3, entities: Map<string, number>,
-): PrimitiveOperation {
-  const op = { ...step.operation };
-  if (step.binding?.kind === 'relative') op.position = anchor.plus(new Vec3(step.binding.offset.x, step.binding.offset.y, step.binding.offset.z));
-  if (step.binding?.kind === 'block') {
-    const name = step.binding.name;
-    const block = bot.findBlock({ matching: b => b.name === name && bot.canSeeBlock(b), maxDistance: 16 });
-    if (!block) throw new Error(`procedure_block_precondition_missing:${name}`);
-    op.position = { ...block.position };
-  }
-  if (step.binding?.kind === 'entity') {
-    const name = step.binding.name;
-    let id = entities.get(name);
-    if (id == null) {
-      const entity = bot.nearestEntity(e => e.name === name && e !== bot.entity);
-      if (!entity) throw new Error(`procedure_entity_precondition_missing:${name}`);
-      id = entity.id; entities.set(name, id);
-    }
-    if (!bot.entities[id]) throw new Error('procedure_bound_entity_disappeared');
-    op.entityId = id;
-  }
-  if (op.action === 'CLOSE') op.windowId = (bot.currentWindow ?? bot.inventory).id;
-  if (op.action === 'TRANSFER') {
-    const win = bot.currentWindow ?? bot.inventory;
-    if (String(win.type) !== step.windowType) throw new Error('procedure_window_precondition_changed');
-    op.windowId = win.id;
-    if (step.sourceItem) {
-      const slot = win.slots.findIndex((item, index) => index >= win.inventoryStart && index < win.inventoryEnd &&
-        item != null && item.name === step.sourceItem && item.count >= (op.count ?? 1));
-      if (slot < 0) throw new Error('procedure_inventory_item_missing');
-      op.sourceSlot = slot;
-    }
-    if (step.destinationInventory) {
-      const source = win.slots[op.sourceSlot!];
-      const slot = win.slots.findIndex((item, index) => index >= win.inventoryStart && index < win.inventoryEnd && index !== op.sourceSlot &&
-        (!item || (source && item.type === source.type && JSON.stringify(item.nbt) === JSON.stringify(source.nbt) && item.count + (op.count ?? 1) <= item.stackSize)));
-      if (slot < 0) throw new Error('procedure_inventory_full');
-      op.destinationSlot = slot;
-    }
-  }
-  return parseOperation(op);
 }
