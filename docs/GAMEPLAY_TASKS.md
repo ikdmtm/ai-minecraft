@@ -81,7 +81,7 @@ T01ではこの処理を検証専用CIへ置換した。[PR #1](https://github.c
 | T00 | 現状監査・設計契約・タスク分割 | VERIFIED（文書・監査のみ） | なし | この文書、固定した基準SHA、読んだCIログ |
 | T01 | 一回限りの移行CIを通常の検証専用CIへ置換 | VERIFIED・取り込み済み | T00 | run 35430600966 / 35430757373、merge 73379eb |
 | T02 | 自律実走の記録・停止・再開の形式を固定 | IMPLEMENTED（PR #2の最新CIを確認） | T01 | [T02記録](T02_RUN_RECORDING.md)、runRecorder.test.ts、対応PRのCI |
-| T03 | 基本操作の未検証箇所を1操作ずつ検証 | T03a VERIFIED / T03b READY | T01 | 対象操作の失敗再現・修正・回帰テスト |
+| T03 | 基本操作の未検証箇所を1操作ずつ検証 | T03a/T03b VERIFIED / T03c READY | T01 | 対象操作の失敗再現・修正・回帰テスト |
 | T04 | ワールド変更・再起動での記憶分離を検証 | TODO | T01 | 同seed別world、再起動、dimension等の検証結果 |
 | T05 | LLM自身による手順保存と別環境再利用を検証 | TODO | T02・T03・T04 | 保存元証拠、再bind、再実行結果、失敗時更新 |
 | T06 | 記憶の関連検索と整理を小さく追加 | TODO | T04 | 原記録保持、検索上限、反証・要約のテスト |
@@ -130,6 +130,10 @@ During T03a, the real server exposed one adapter bug: CRAFT searched for a craft
 
 No gameplay strategy, memory, learning, or planner behavior was changed.
 - T03b: 対象entity/INTERACT/装備の検証。攻撃の成功を撃破成功と同一視しない。
+
+T03b VERIFIED (PR #4, CI run 35436573563): disposable Minecraft 1.21.4 server verified EQUIP by observing the selected held item, ATTACK by observing entityHurt while the target pig remained present, and INTERACT_ENTITY by equipping a saddle and observing the target pig's metadata change. The smoke emitted REAL_SERVER_EQUIP_PASSED, REAL_SERVER_ATTACK_PASSED, REAL_SERVER_INTERACT_ENTITY_PASSED, and the full REAL_SERVER_SMOKE_PASSED marker.
+
+The first T03b smoke failure was a fixture-selection bug: it selected extreme pigs from all loaded entities and could bind a naturally present distant pig. The fixture now resolves the pigs nearest the exact summon positions and asserts reachability before executing the adapter operation. No runtime adapter, gameplay strategy, memory, learning, or planner behavior required changes in T03b.
 - T03c: TRANSFER/OPEN/CLOSE/WAIT の境界条件。古いwindow、満杯、条件timeout、割込み後の後続処理を確認する。
 
 すべてを一度に修正せず、まず1件を再現してテスト化する。ゲームの攻略方針は変更しない。未対応インターフェースを既存アダプターへ追加する場合も独立タスクにする。
@@ -195,7 +199,7 @@ Observed result: Run manifest/JSONL journal and pre-run SQLite/knowledge snapsho
 Tests actually run / evidence: T01 final run 35430757373 was checked before merging PR #1. New T02 CI is recorded on PR #2; do not treat a pending or superseded run as verification of the latest head.
 Tests not run: Autonomous Hardcore play; behavior learning/cross-world evaluation. New tests use fixture child processes and temporary SQLite only.
 Remaining blocker: Verify the final T02 CI and review/integrate PR #2. Unknown seed and dirty source limitations remain explicit.
-Next single task: T03b only (real-server target entity / INTERACT / EQUIP verification). Do not combine with T03c or T04/T05/T06.
+Next single task: T03c only (real-server TRANSFER / OPEN / CLOSE / WAIT boundary verification). Do not combine with T04/T05/T06.
 ```
 
 ## 7. 再開時の最小手順
