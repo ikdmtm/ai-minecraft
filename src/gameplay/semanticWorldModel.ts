@@ -22,6 +22,7 @@ export class SemanticWorldModel {
   private revision = 0;
   private lastFingerprint = '';
   private readonly capabilityRegistry: CapabilityRegistry;
+  private lastSurfaceAnchor: SemanticPosition | null = null;
 
   constructor(
     private readonly bot: mineflayer.Bot,
@@ -37,6 +38,7 @@ export class SemanticWorldModel {
     const inWater = isInWater(this.bot);
     const onSolidGround = isSolidStand(this.bot.blockAt(position.offset(0, -1, 0)));
 
+    this.observeSurfaceAnchor();
     const targets = this.buildTargets();
     const strategy = {
       mainGoal: this.shared.get().currentGoal || 'Survive as long as possible in this Hardcore world while continuing to live actively.',
@@ -102,15 +104,32 @@ export class SemanticWorldModel {
   }
 
   private buildTargets(): SemanticTarget[] {
-    return [
+    // Spatial affordances must never be crowded out by resource/entity targets.
+    // Scores are useful within a kind, but a global top-N made rich scenes erase
+    // every answer to "where can I move/build/excavate?".
+    const spatial = [
       ...this.findKnownStructures(),
       ...this.findShelterSites(),
       ...this.findExcavationSites(),
       ...this.findLandTargets(),
-      ...this.findResourceSources(),
-      ...this.findEntityTargets(),
-      ...this.findItemDrops(),
-    ].sort((a, b) => b.score - a.score).slice(0, 36);
+    ];
+    const resources = this.findResourceSources().slice(0, 18);
+    const drops = this.findItemDrops().slice(0, 6);
+    const entities = this.findEntityTargets().slice(0, 10);
+
+    return dedupeById([
+      ...spatial,
+      ...drops,
+      ...resources,
+      ...entities,
+    ]).slice(0, 56);
+  }
+
+  private observeSurfaceAnchor(): void {
+    const p = this.bot.entity.position.floored();
+    const current = { x: p.x, y: p.y, z: p.z };
+    if (!isLikelySurfaceStand(this.bot, current)) return;
+    this.lastSurfaceAnchor = current;
   }
 
   private findKnownStructures(): SemanticTarget[] {
@@ -142,6 +161,66 @@ export class SemanticWorldModel {
     const origin = this.bot.entity.position;
     const candidates: SemanticTarget[] = [];
     const originY = Math.floor(origin.y);
+    const current: SemanticPosition = {
+      x: Math.floor(origin.x),
+      y: Math.floor(origin.y),
+      z: Math.floor(origin.z),
+    };
+
+    // If we previously observed the bot on the natural surface and it is now
+    // several blocks below it, expose an upward excavation affordance. This is
+    // spatial memory, not an攻略 sequence: any cause of getting underground can
+    // be recovered by a short re-observed ascent segment.
+    if (this.lastSurfaceAnchor && this.lastSurfaceAnchor.y - current.y >= 4) {
+      const floor = this.bot.blockAt(new Vec3(current.x, current.y - 1, current.z));
+      const preferred = preferredCardinalToward(current, this.lastSurfaceAnchor);
+      const direction = isSafeExcavationSupport(floor)
+        ? this.findSafeExcavationDirection(current, 'up', preferred)
+        : null;
+      if (direction) {
+        candidates.push({
+          id: `excavation_site:surface_return:${current.x}:${current.y}:${current.z}:${direction}`,
+          kind: 'excavation_site',
+          position: current,
+          distance: 0,
+          score: 225,
+          risk: 'low',
+          metadata: {
+            direction,
+            mode: 'up',
+            purpose: 'surface_return',
+            rememberedSurfaceY: this.lastSurfaceAnchor.y,
+            safeSteps: 4,
+          },
+        });
+      }
+    }
+
+    const addDownwardCandidate = (stand: SemanticPosition): void => {
+      const floor = this.bot.blockAt(new Vec3(stand.x, stand.y - 1, stand.z));
+      if (!isSafeExcavationSupport(floor)) return;
+      const direction = this.findSafeExcavationDirection(stand, 'down');
+      if (!direction) return;
+      const distance = distance3(origin, stand);
+      candidates.push({
+        id: `excavation_site:${stand.x}:${stand.y}:${stand.z}:${direction}`,
+        kind: 'excavation_site',
+        position: stand,
+        distance: round1(distance),
+        score: 165 - distance * 3 - Math.abs(stand.y - origin.y),
+        risk: distance <= 18 ? 'low' : 'medium',
+        metadata: {
+          direction,
+          mode: 'down',
+          floor: floor?.name ?? null,
+          safeSteps: 4,
+        },
+      });
+    };
+
+    // The current grounded position is often the best safe place to begin a
+    // controlled staircase. The old radius=2 start accidentally excluded it.
+    addDownwardCandidate(current);
 
     for (let radius = 2; radius <= 28; radius += 2) {
       const samples = Math.max(12, Math.ceil(Math.PI * radius));
@@ -151,52 +230,38 @@ export class SemanticWorldModel {
         const z = Math.floor(origin.z + Math.sin(angle) * radius);
         const stand = this.findSurfaceStandableColumn(x, z, originY + 12, originY - 8);
         if (!stand) continue;
-
-        const floor = this.bot.blockAt(new Vec3(stand.x, stand.y - 1, stand.z));
-        if (!isSafeExcavationSupport(floor)) continue;
-
-        const direction = this.findSafeExcavationDirection(stand);
-        if (!direction) continue;
-
-        const distance = distance3(origin, stand);
-        candidates.push({
-          id: `excavation_site:${stand.x}:${stand.y}:${stand.z}:${direction}`,
-          kind: 'excavation_site',
-          position: stand,
-          distance: round1(distance),
-          score: 165 - distance * 3 - Math.abs(stand.y - origin.y),
-          risk: distance <= 18 ? 'low' : 'medium',
-          metadata: {
-            direction,
-            floor: floor?.name ?? null,
-            safeSteps: 4,
-          },
-        });
+        addDownwardCandidate(stand);
       }
-      if (candidates.length >= 5 && radius >= 12) break;
+      if (candidates.length >= 6 && radius >= 12) break;
     }
 
     return dedupeById(candidates)
       .sort((a, b) => b.score - a.score)
-      .slice(0, 5);
+      .slice(0, 6);
   }
 
   private findSafeExcavationDirection(
     stand: SemanticPosition,
+    mode: 'down' | 'up',
+    preferred?: 'N' | 'E' | 'S' | 'W' | null,
   ): 'N' | 'E' | 'S' | 'W' | null {
-    const directions = [
+    const all = [
       ['N', 0, -1],
       ['E', 1, 0],
       ['S', 0, 1],
       ['W', -1, 0],
     ] as const;
+    const directions = preferred
+      ? [...all.filter(([name]) => name === preferred), ...all.filter(([name]) => name !== preferred)]
+      : [...all];
+    const verticalStep = mode === 'up' ? 1 : -1;
 
     for (const [name, dx, dz] of directions) {
       let safe = true;
       for (let step = 1; step <= 4; step++) {
         const next = new Vec3(
           stand.x + dx * step,
-          stand.y - step,
+          stand.y + verticalStep * step,
           stand.z + dz * step,
         );
         const support = this.bot.blockAt(next.offset(0, -1, 0));
@@ -221,6 +286,33 @@ export class SemanticWorldModel {
     const candidates: SemanticTarget[] = [];
     const originY = Math.floor(origin.y);
 
+    const addCandidate = (stand: SemanticPosition): void => {
+      if (!this.isShelterFootprintBuildable(stand)) return;
+      const distance = distance3(origin, stand);
+      candidates.push({
+        id: `shelter_site:${stand.x}:${stand.y}:${stand.z}`,
+        kind: 'shelter_site',
+        position: stand,
+        distance: round1(distance),
+        score: 190 - distance * 3 - Math.abs(stand.y - origin.y),
+        risk: distance <= 20 ? 'low' : 'medium',
+        metadata: {
+          buildableFootprint: 'compact_cross',
+          surfaceCandidate: true,
+          foliageClearable: true,
+        },
+      });
+    };
+
+    // Include the place the bot is already standing. Excluding radius zero was
+    // particularly harmful in forests where the nearest clear footprint is the
+    // current one and surrounding samples sit under low leaves.
+    addCandidate({
+      x: Math.floor(origin.x),
+      y: Math.floor(origin.y),
+      z: Math.floor(origin.z),
+    });
+
     for (let radius = 2; radius <= 32; radius += 2) {
       const samples = Math.max(12, Math.ceil(Math.PI * radius));
       for (let i = 0; i < samples; i++) {
@@ -228,21 +320,8 @@ export class SemanticWorldModel {
         const x = Math.floor(origin.x + Math.cos(angle) * radius);
         const z = Math.floor(origin.z + Math.sin(angle) * radius);
         const stand = this.findSurfaceStandableColumn(x, z, originY + 32, originY - 4);
-        if (!stand || !this.isShelterFootprintBuildable(stand)) continue;
-
-        const distance = distance3(origin, stand);
-        candidates.push({
-          id: `shelter_site:${stand.x}:${stand.y}:${stand.z}`,
-          kind: 'shelter_site',
-          position: stand,
-          distance: round1(distance),
-          score: 180 - distance * 3 - Math.abs(stand.y - origin.y),
-          risk: distance <= 20 ? 'low' : 'medium',
-          metadata: {
-            buildableFootprint: 'compact_cross',
-            surfaceCandidate: true,
-          },
-        });
+        if (!stand) continue;
+        addCandidate(stand);
       }
       if (candidates.length >= 5 && radius >= 12) break;
     }
@@ -270,10 +349,6 @@ export class SemanticWorldModel {
   }
 
   private isShelterFootprintBuildable(center: SemanticPosition): boolean {
-    // Match the actual compact shelter primitive instead of demanding an
-    // unrelated 5x5 clearing. The body only needs the center plus north/east/
-    // west wall columns and the south doorway to have stable support and
-    // two-block clearance.
     const footprint = [
       [0, 0],
       [1, 0],
@@ -286,21 +361,61 @@ export class SemanticWorldModel {
       const floor = this.bot.blockAt(new Vec3(center.x + dx, center.y - 1, center.z + dz));
       const feet = this.bot.blockAt(new Vec3(center.x + dx, center.y, center.z + dz));
       const head = this.bot.blockAt(new Vec3(center.x + dx, center.y + 1, center.z + dz));
-      if (!isStableTerrainSupport(floor) || !isPassable(feet) || !isPassable(head)) return false;
+      if (!isStableTerrainSupport(floor)) return false;
+
+      // The center must already be genuinely standable so navigation can reach
+      // it without secretly digging. Wall/door columns may contain foliage or
+      // plants that the shelter primitive can explicitly clear before placing.
+      if (dx === 0 && dz === 0) {
+        if (!isPassable(feet) || !isPassable(head)) return false;
+      } else if (!isBuildClearance(feet) || !isBuildClearance(head)) {
+        return false;
+      }
+
+      if (
+        (feet && this.provenance?.isPlayerPlaced(feet.position)) ||
+        (head && this.provenance?.isPlayerPlaced(head.position))
+      ) {
+        return false;
+      }
     }
 
-    // The current roof uses the center and east column at y+2.
     const roofCenter = this.bot.blockAt(new Vec3(center.x, center.y + 2, center.z));
     const roofEast = this.bot.blockAt(new Vec3(center.x + 1, center.y + 2, center.z));
-    return isPassable(roofCenter) && isPassable(roofEast);
+    return isBuildClearance(roofCenter) && isBuildClearance(roofEast);
   }
 
   private findLandTargets(): SemanticTarget[] {
     const origin = this.bot.entity.position;
     const candidates: SemanticTarget[] = [];
 
-    // Sample nearby columns instead of asking the policy for compass directions.
-    // This turns "find shore" into concrete, geolocated affordances.
+    const addCandidate = (stand: SemanticPosition, local = false): void => {
+      const floor = this.bot.blockAt(new Vec3(stand.x, stand.y - 1, stand.z));
+      const feet = this.bot.blockAt(new Vec3(stand.x, stand.y, stand.z));
+      const head = this.bot.blockAt(new Vec3(stand.x, stand.y + 1, stand.z));
+      if (!isStableTerrainSupport(floor) || !isPassable(feet) || !isPassable(head)) return;
+      const distance = distance3(origin, stand);
+      candidates.push({
+        id: `land:${stand.x}:${stand.y}:${stand.z}`,
+        kind: 'land',
+        position: stand,
+        distance: round1(distance),
+        score: (local ? 188 : 172) - distance * 2 - Math.abs(stand.y - origin.y),
+        risk: distance <= 16 ? 'low' : 'medium',
+        metadata: {
+          solid: true,
+          shorelineCandidate: isInWater(this.bot),
+          localStand: local,
+        },
+      });
+    };
+
+    addCandidate({
+      x: Math.floor(origin.x),
+      y: Math.floor(origin.y),
+      z: Math.floor(origin.z),
+    }, true);
+
     for (let radius = 2; radius <= 48; radius += 2) {
       const samples = Math.max(12, Math.ceil(Math.PI * radius));
       for (let i = 0; i < samples; i++) {
@@ -309,20 +424,7 @@ export class SemanticWorldModel {
         const z = Math.floor(origin.z + Math.sin(angle) * radius);
         const stand = this.findStandableColumn(x, z);
         if (!stand) continue;
-
-        const distance = distance3(origin, stand);
-        candidates.push({
-          id: `land:${stand.x}:${stand.y}:${stand.z}`,
-          kind: 'land',
-          position: stand,
-          distance: round1(distance),
-          score: 140 - distance * 4 - Math.abs(stand.y - origin.y) * 1.5,
-          risk: distance <= 12 ? 'low' : 'medium',
-          metadata: {
-            solid: true,
-            shorelineCandidate: isInWater(this.bot),
-          },
-        });
+        addCandidate(stand);
       }
       if (candidates.length >= 8 && radius >= 10) break;
     }
@@ -334,7 +436,7 @@ export class SemanticWorldModel {
 
   private findStandableColumn(x: number, z: number): SemanticPosition | null {
     const originY = Math.floor(this.bot.entity.position.y);
-    for (let y = originY + 8; y >= originY - 14; y--) {
+    for (let y = originY + 24; y >= originY - 16; y--) {
       const floor = this.bot.blockAt(new Vec3(x, y - 1, z));
       const feet = this.bot.blockAt(new Vec3(x, y, z));
       const head = this.bot.blockAt(new Vec3(x, y + 1, z));
@@ -368,6 +470,10 @@ export class SemanticWorldModel {
       const block = this.bot.blockAt(pos);
       if (!block || !block.diggable) continue;
       if (this.provenance?.isPlayerPlaced(block.position)) continue;
+      // Resource gathering must not silently become excavation by removing the
+      // floor beneath/next to the bot. Controlled terrain opening belongs to
+      // excavation_site + DIG_STAIRCASE, which is re-observed segment by segment.
+      if (isUnsafeSupportMiningTarget(origin, block.position)) continue;
       if (!this.bot.canSeeBlock(block)) continue;
       if (!canHarvestBlockNow(this.bot, block)) continue;
 
@@ -562,16 +668,14 @@ function isStableTerrainSupport(block: any | null): boolean {
   if (!block) return false;
   if (WATERLIKE.has(block.name) || block.name === 'lava') return false;
   if (block.boundingBox !== 'block') return false;
+  if (isGravityAffectedSupport(block.name)) return false;
+  if (isFoliageOrTrunk(block.name)) return false;
 
-  // minecraft-data 1.21+ describes terrain by mining tags rather than the old
-  // "rock"/"dirt" material names. Treat pickaxe terrain and non-falling
-  // shovel terrain as stable structural support, while keeping foliage,
-  // trunks/workstations and gravity blocks out of shelter/excavation sites.
-  const material = String(block.material ?? '');
-  if (material === 'rock' || material === 'dirt') return true;
-  if (material.includes('mineable/pickaxe')) return true;
-  if (material.includes('mineable/shovel') && !isGravityAffectedSupport(block.name)) return true;
-  return false;
+  // Prefer physical/world semantics over version-sensitive material labels.
+  // Grass, dirt, stone, deepslate, ores and similar natural full blocks are
+  // valid support even when prismarine-block does not expose the legacy
+  // "rock"/"dirt" material string for the current Minecraft version.
+  return block.diggable !== false;
 }
 
 function isGravityAffectedSupport(name: string): boolean {
@@ -581,6 +685,79 @@ function isGravityAffectedSupport(name: string): boolean {
     name === 'gravel' ||
     name.endsWith('_concrete_powder')
   );
+}
+
+function isFoliageOrTrunk(name: string): boolean {
+  return (
+    name.endsWith('_leaves') ||
+    name.endsWith('_log') ||
+    name.endsWith('_wood') ||
+    name === 'mushroom_stem' ||
+    name === 'cactus' ||
+    name === 'bamboo'
+  );
+}
+
+function isSoftNaturalObstruction(block: any | null): boolean {
+  if (!block) return false;
+  if (isPassable(block)) return true;
+  if (WATERLIKE.has(block.name) || block.name === 'lava') return false;
+  const name = String(block.name ?? '');
+  return (
+    name.endsWith('_leaves') ||
+    name.endsWith('_sapling') ||
+    name.endsWith('_flower') ||
+    name === 'grass' ||
+    name === 'short_grass' ||
+    name === 'tall_grass' ||
+    name === 'fern' ||
+    name === 'large_fern' ||
+    name === 'dead_bush' ||
+    name === 'vine' ||
+    name === 'glow_lichen' ||
+    name === 'snow'
+  );
+}
+
+function isBuildClearance(block: any | null): boolean {
+  return isPassable(block) || isSoftNaturalObstruction(block);
+}
+
+function isLikelySurfaceStand(bot: mineflayer.Bot, stand: SemanticPosition): boolean {
+  const floor = bot.blockAt(new Vec3(stand.x, stand.y - 1, stand.z));
+  const feet = bot.blockAt(new Vec3(stand.x, stand.y, stand.z));
+  const head = bot.blockAt(new Vec3(stand.x, stand.y + 1, stand.z));
+  if (!isStableTerrainSupport(floor) || !isPassable(feet) || !isPassable(head)) return false;
+
+  // A forest canopy still counts as surface. What disqualifies a position is
+  // terrain/structure overhead, not leaves or plants.
+  for (let dy = 2; dy <= 16; dy++) {
+    const above = bot.blockAt(new Vec3(stand.x, stand.y + dy, stand.z));
+    if (!above) return false;
+    if (isPassable(above) || isSoftNaturalObstruction(above)) continue;
+    return false;
+  }
+  return true;
+}
+
+function preferredCardinalToward(
+  from: SemanticPosition,
+  to: SemanticPosition,
+): 'N' | 'E' | 'S' | 'W' | null {
+  const dx = to.x - from.x;
+  const dz = to.z - from.z;
+  if (Math.abs(dx) < 1 && Math.abs(dz) < 1) return null;
+  if (Math.abs(dx) >= Math.abs(dz)) return dx >= 0 ? 'E' : 'W';
+  return dz >= 0 ? 'S' : 'N';
+}
+
+function isUnsafeSupportMiningTarget(
+  player: { x: number; y: number; z: number },
+  block: { x: number; y: number; z: number },
+): boolean {
+  const horizontal = Math.hypot(player.x - (block.x + 0.5), player.z - (block.z + 0.5));
+  const playerFeetY = Math.floor(player.y);
+  return horizontal <= 1.45 && block.y <= playerFeetY - 1 && block.y >= playerFeetY - 2;
 }
 
 function isSafeExcavationSupport(block: any | null): boolean {
