@@ -278,14 +278,26 @@ function executiveInstructions(): string {
     'Use semantic target IDs when a location, resource source, or entity matters. Never invent coordinates or target IDs.',
     'resource_source targets identify visible harvestable blocks and the inventory resource their Minecraft drop data produces.',
     'item_drop targets are recoverable dropped items. known_structure targets are persistent remembered places.',
-    'For BUILD_STRUCTURE(shelter), use a shelter_site only when a new shelter is actually useful.',
+    'For BUILD_STRUCTURE(shelter), use a shelter_site only when a new shelter is actually useful. The current shelter body requires one wooden door and at least eight structural blocks already in inventory; satisfy those prerequisites explicitly with CRAFT_ITEM/GATHER_RESOURCE instead of expecting BUILD_STRUCTURE to craft them.',
     'Reuse existing facilities and remembered structures. Do not duplicate work without a reason.',
-    'Use recent failures to change approach instead of blindly repeating the same failed task.',
+    'Use recent failures to change approach instead of blindly repeating the same failed task. If BUILD_STRUCTURE has just failed for a systemic crafting/material reason, do not retry the same build unchanged until the missing prerequisite or execution state has changed.',
     'Safety emergencies are handled by a separate deterministic reflex layer; still avoid obviously unreasonable voluntary risks.',
   ].join(' ');
 }
 
 function capabilityReference(state: ExecutiveWorldState): Record<string, unknown> {
+  const woodenDoors = Object.entries(state.inventory)
+    .filter(([name]) => name.endsWith('_door') && name !== 'iron_door')
+    .reduce((sum, [, count]) => sum + count, 0);
+  const structuralBlocks = Object.entries(state.inventory)
+    .filter(([name]) =>
+      name === 'dirt' ||
+      name === 'cobblestone' ||
+      name.endsWith('_planks') ||
+      name.endsWith('_log'),
+    )
+    .reduce((sum, [, count]) => sum + count, 0);
+
   return {
     NAVIGATE_TARGET: 'Move to a supplied semantic target.',
     GATHER_RESOURCE: state.capabilities.gather,
@@ -294,7 +306,19 @@ function capabilityReference(state: ExecutiveWorldState): Record<string, unknown
       : 'Unavailable: no certified excavation site.',
     ATTACK_TARGET: state.capabilities.entityActions,
     CRAFT_ITEM: state.capabilities.craft,
-    BUILD_STRUCTURE: 'Build a supported structure when useful. Current embodied structure primitive: shelter.',
+    BUILD_STRUCTURE: {
+      shelter: {
+        description: 'Build the current compact enclosed shelter template at a shelter_site.',
+        prerequisites: {
+          woodenDoorRequired: 1,
+          structuralBlocksRequired: 8,
+        },
+        available: {
+          woodenDoors,
+          structuralBlocks,
+        },
+      },
+    },
     CONTINUE_TASK: 'Continue a running task when it remains appropriate.',
     WAIT: 'Do nothing briefly when no useful executable action is available.',
   };
