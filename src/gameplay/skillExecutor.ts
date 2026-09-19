@@ -773,6 +773,81 @@ export class SkillExecutor {
     await this.craftRecipeWithRecovery(item, recipes[0], table);
   }
 
+  private async craftRecipeWithRecovery(
+    itemName: string,
+    recipe: any,
+    table: any | null,
+  ): Promise<void> {
+    const before = this.inventoryCount(itemName);
+    try {
+      await this.bot.craft(recipe, 1, table ?? undefined);
+    } catch (error) {
+      await this.reconcileCraftingState();
+
+      if (this.inventoryCount(itemName) > before) {
+        this.shared.pushEvent({
+          type: 'crafted_reconciled',
+          detail: itemName,
+          importance: 'medium',
+        });
+        return;
+      }
+
+      throw error;
+    }
+
+    this.shared.pushEvent({ type: 'crafted', detail: itemName, importance: 'low' });
+  }
+
+  private async prepareCraftingState(): Promise<void> {
+    const currentWindow = this.bot.currentWindow;
+    if (currentWindow) {
+      try {
+        const sync = (this.bot as any)._syncWindow?.(currentWindow);
+        if (sync) await withTimeout(Promise.resolve(sync), 3_000, 'craft_window_sync_timeout');
+      } catch {
+        // Best effort; close the stale GUI even if its model cannot be synced.
+      }
+      try {
+        await this.bot.closeWindow(currentWindow);
+      } catch {
+        // Best effort.
+      }
+    }
+
+    await this.syncPlayerInventory();
+  }
+
+  private async reconcileCraftingState(): Promise<void> {
+    const currentWindow = this.bot.currentWindow;
+    if (currentWindow) {
+      try {
+        const sync = (this.bot as any)._syncWindow?.(currentWindow);
+        if (sync) await withTimeout(Promise.resolve(sync), 3_000, 'craft_reconcile_window_timeout');
+      } catch {
+        // Continue with the authoritative player-inventory refresh below.
+      }
+      try {
+        await this.bot.closeWindow(currentWindow);
+      } catch {
+        // Best effort.
+      }
+    }
+
+    await delay(150);
+    await this.syncPlayerInventory();
+    await delay(100);
+  }
+
+  private async syncPlayerInventory(): Promise<void> {
+    try {
+      const sync = (this.bot as any)._syncWindow?.(this.bot.inventory);
+      if (sync) await withTimeout(Promise.resolve(sync), 3_000, 'inventory_sync_timeout');
+    } catch {
+      // A sync failure should not itself wedge the skill executor.
+    }
+  }
+
   private async placeAdjacent(item: any, token: number): Promise<any | null> {
     const base = this.bot.entity.position.floored();
     const offsets = [[1, 0], [-1, 0], [0, 1], [0, -1]] as const;
