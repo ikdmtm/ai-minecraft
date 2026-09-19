@@ -11,6 +11,7 @@ import { ExperienceMemory, bindProcedureStep, completeProcedureStepBinding, Proc
 import { parseOperation, windowSnapshot, type PrimitiveOperation } from './primitiveOperations.js';
 import { observeOperation as observation, assessOperationEffect, type EffectAssessment } from './operationEvidence.js';
 import type { SpatialRuntimeContext } from './spatialRuntimeContext.js';
+import { validateNoteSelection } from './memoryConsolidation.js';
 
 export class TaskExecutor {
   private sequence = 0;
@@ -88,6 +89,17 @@ export class TaskExecutor {
             coverage: result.coverage, has_more: result.nextCursor != null,
             skipped_malformed: result.skippedMalformed, skipped_oversized: result.skippedOversized });
           detail = `memory_query_completed:${result.hits.length}:${result.coverage}`; break;
+        }
+        case 'CONSOLIDATE_MEMORY': {
+          const state = this.semantic.capture(this.snapshot());
+          const selection = validateNoteSelection(decision.memoryNote, decision.evidenceIds, decision.reason, state.autonomy);
+          check();
+          const note = this.experience.consolidate({ worldId: taskWorldId, version: this.bot.version, dimension: taskDimension! },
+            selection.memoryNote, selection.evidenceIds, selection.reason);
+          this.log('memory_note_saved', { task_id: this.current.id, note_id: note.id, root_id: note.rootId,
+            parent_id: note.parentId, revision: note.revision, state: note.state, interpretation_only: true,
+            evidence_ids: note.evidenceIds, source: decision.source });
+          detail = `memory_note_saved:${note.id}:${note.state}:interpretation_only`; break;
         }
         case 'SAVE_PROCEDURE': {
           const procedure = decision.procedureId
