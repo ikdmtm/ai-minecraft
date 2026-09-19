@@ -6,7 +6,7 @@ import { SkillExecutor } from './skillExecutor.js';
 import type { WorldSensor } from './worldSensor.js';
 import type { ExecutiveActionCapability, ExecutiveDecision, ExecutiveTaskSnapshot, TaskExecutionResult } from './executiveTypes.js';
 import { normalizeMemoryDimension, type WorldMemory } from './worldMemory.js';
-import { ExperienceMemory, bindProcedureStep } from './experienceMemory.js';
+import { ExperienceMemory, bindProcedureStep, completeProcedureStepBinding, ProcedureBindingError, procedureEnvironmentMatches } from './experienceMemory.js';
 import { parseOperation, windowSnapshot, type PrimitiveOperation } from './primitiveOperations.js';
 import { observeOperation as observation, assessOperationEffect, type EffectAssessment } from './operationEvidence.js';
 import type { SpatialRuntimeContext } from './spatialRuntimeContext.js';
@@ -88,22 +88,30 @@ export class TaskExecutor {
         case 'RUN_PROCEDURE': {
           const procedure = this.experience.get(decision.procedureId ?? '');
           if (!procedure) throw new Error('procedure_not_found');
-          if (procedure.version !== this.bot.version || procedure.dimension !== String(this.bot.game.dimension)) throw new Error('procedure_environment_mismatch');
+          if (!procedureEnvironmentMatches(procedure, this.bot.version, this.bot.game.dimension)) throw new Error('procedure_environment_mismatch');
           const anchor = this.bot.entity.position.floored(), bindings = new Map<string, number>();
           const deadline = Date.now() + 60000, startedGoal = this.shared.get().currentGoal;
           try {
-            for (const step of procedure.steps) {
+            for (const [stepIndex, step] of procedure.steps.entries()) {
               check();
               if (this.shared.get().currentGoal !== startedGoal || Date.now() >= deadline) throw new Error('task_replan:procedure_boundary_changed');
               const op = bindProcedureStep(step, this.bot, anchor, bindings);
+              this.log('procedure_step_bound', { task_id: this.current.id, procedure_id: procedure.id,
+                step_index: stepIndex, operation: op, world_id: taskWorldId, dimension: taskDimension,
+                evidence_id: procedure.evidenceIds[stepIndex] ?? null });
               const outcome = await this.operate(op, check, Math.max(100, deadline - Date.now()));
               // Missing confirmation calls for re-observation/replanning, not
               // a false failure of this skill or blind execution of its next step.
               if (!outcome.verified) throw new Error('task_replan:procedure_step_effect_unconfirmed');
+              completeProcedureStepBinding(step, this.bot, bindings);
             }
             check();
             this.experience.recordReplay(procedure.id, true);
           } catch (error) {
+            if (error instanceof ProcedureBindingError) {
+              this.log('procedure_rebind_required', { task_id: this.current.id, procedure_id: procedure.id, reason: error.message });
+              throw new Error(`task_replan:${error.message}`);
+            }
             if (!(error instanceof Error && error.message.startsWith('task_replan:'))) this.experience.recordReplay(procedure.id, false);
             throw error;
           }
