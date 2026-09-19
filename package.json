@@ -7,6 +7,8 @@
     "build": "tsc",
     "start": "tsx src/index.ts",
     "start:gameplay": "tsx src/gameplay/runRecorder.ts",
+    "check:gameplay": "tsx src/gameplay/evaluationPreflight.ts",
+    "eval:gameplay": "tsx src/gameplay/evaluationRunner.ts",
     "dev": "tsx watch src/index.ts",
     "dev:gameplay": "tsx watch src/gameplay/jevMain.ts",
     "mc:setup": "bash scripts/mc-setup-local.sh",
@@ -22,7 +24,8 @@
     "lint": "tsc --noEmit",
     "test:gameplay": "jest src/gameplay --runInBand",
     "test:knowledge-export": "python3 scripts/test-export-knowledge.py",
-    "test:gameplay-smoke": "tsx scripts/gameplay-smoke.ts"
+    "test:gameplay-smoke": "tsx scripts/gameplay-smoke.ts && tsx scripts/evaluation-smoke.ts",
+    "test:evaluation-smoke": "tsx scripts/evaluation-smoke.ts"
   },
   "engines": {
     "node": ">=22"
