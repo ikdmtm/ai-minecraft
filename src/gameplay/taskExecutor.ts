@@ -85,6 +85,12 @@ export class TaskExecutor {
             startedGoal,
           );
           break;
+        case 'EXCAVATE_TARGET':
+          detail = await this.excavateTarget(decision.targetId, startedGoal);
+          break;
+        case 'ATTACK_TARGET':
+          detail = await this.attackTarget(decision.targetId, startedGoal);
+          break;
         case 'CRAFT_ITEM':
           detail = await this.craftExecutiveItem(decision.craftItem ?? 'none', startedGoal);
           break;
@@ -153,16 +159,187 @@ export class TaskExecutor {
     targetId: string | undefined,
     startedGoal: string,
   ): Promise<string> {
-    switch (resource) {
-      case 'logs':
-        return this.gatherWood(amount, targetId, startedGoal);
-      case 'cobblestone':
-        return this.acquireStone(amount, targetId, startedGoal);
-      case 'food':
-        return this.gatherFood(amount, targetId, startedGoal);
-      default:
-        throw new Error('gather_resource_missing_resource');
+    if (!resource || resource === 'none') throw new Error('gather_resource_missing_resource');
+
+    const initial = inventoryMap(this.bot)[resource] ?? 0;
+    const targetTotal = Math.max(initial, Math.max(1, amount));
+    const triedSources = new Set<string>();
+
+    for (let step = 0; step < 24; step++) {
+      const current = inventoryMap(this.bot)[resource] ?? 0;
+      this.update('gathering_resource', {
+        resource,
+        collected: current - initial,
+        target: targetTotal,
+        inventoryCount: current,
+      });
+      if (current >= targetTotal) {
+        return `resource_collected:${resource}:${current - initial}`;
+      }
+
+      const state = this.semantic.capture(this.snapshot());
+
+      const dropped = state.targets
+        .filter(target =>
+          target.kind === 'item_drop' &&
+          target.metadata.itemName === resource &&
+          !triedSources.has(target.id),
+        )
+        .sort((a, b) => a.distance - b.distance)[0];
+      if (dropped) {
+        triedSources.add(dropped.id);
+        const collect = await this.runPrimitive({
+          action: 'NAVIGATE',
+          targetPosition: dropped.position,
+          confidence: 1,
+          source: 'task',
+          reason: `collect_dropped_resource:${resource}`,
+        }, 15_000);
+        if (collect.status === 'interrupted') throw new Error('task_replan:resource_collection_interrupted');
+        this.safeCheckpoint(startedGoal, 'resource_drop_collected');
+        continue;
+      }
+
+      const sources = state.targets
+        .filter(target =>
+          target.kind === 'resource_source' &&
+          target.metadata.resource === resource &&
+          !triedSources.has(target.id),
+        )
+        .sort((a, b) => {
+          if (a.id === targetId) return -1;
+          if (b.id === targetId) return 1;
+          return a.distance - b.distance;
+        });
+
+      const source = sources[0];
+      if (!source) throw new Error(`resource_source_unavailable:${resource}`);
+      triedSources.add(source.id);
+
+      const blockName = typeof source.metadata.blockName === 'string'
+        ? source.metadata.blockName
+        : null;
+      const blockTargetId = typeof source.metadata.blockTargetId === 'string'
+        ? source.metadata.blockTargetId
+        : null;
+      if (!blockName || !blockTargetId) {
+        throw new Error(`resource_source_invalid:${resource}`);
+      }
+
+      const raw = this.capturePrimitiveWorld();
+      const candidate: WorldCandidate = {
+        id: blockTargetId,
+        kind: 'block',
+        name: blockName,
+        distance: Math.round(this.bot.entity.position.distanceTo({
+          x: source.position.x,
+          y: source.position.y,
+          z: source.position.z,
+        } as any) * 10) / 10,
+        position: { ...source.position },
+      };
+      if (!raw.blockCandidates.some(entry => entry.id === candidate.id)) {
+        raw.blockCandidates.unshift(candidate);
+      }
+
+      const result = await this.runPrimitive({
+        action: 'MINE',
+        blockTargetId,
+        confidence: 1,
+        source: 'task',
+        reason: `gather_dynamic_resource:${resource}`,
+      }, 25_000, raw);
+      if (result.status === 'interrupted') throw new Error('task_replan:resource_mining_interrupted');
+      if (result.status !== 'succeeded') {
+        this.safeCheckpoint(startedGoal, 'resource_source_failed');
+        continue;
+      }
+      this.safeCheckpoint(startedGoal, 'resource_mined');
     }
+
+    throw new Error(`resource_task_step_limit:${resource}`);
+  }
+
+  private async excavateTarget(
+    targetId: string | undefined,
+    startedGoal: string,
+  ): Promise<string> {
+    const state = this.semantic.capture(this.snapshot());
+    const target = state.targets.find(candidate =>
+      candidate.id === targetId && candidate.kind === 'excavation_site',
+    );
+    if (!target) throw new Error('excavate_target_missing');
+
+    const direction = excavationDirection(target);
+    if (!direction) throw new Error('excavate_target_missing_direction');
+
+    this.update('excavating_target', {
+      target: target.id,
+      distance: target.distance,
+      direction,
+    });
+
+    const result = await this.runPrimitive({
+      action: 'DIG_STAIRCASE',
+      direction,
+      targetPosition: target.position,
+      confidence: 1,
+      source: 'task',
+      reason: `executive_excavate:${target.id}`,
+    }, 40_000);
+    if (result.status === 'interrupted') throw new Error('task_replan:excavation_interrupted');
+    if (result.status !== 'succeeded') throw new Error(`excavate_failed:${result.detail}`);
+
+    this.safeCheckpoint(startedGoal, 'excavation_segment_completed');
+    return `excavated:${target.id}`;
+  }
+
+  private async attackTarget(
+    targetId: string | undefined,
+    startedGoal: string,
+  ): Promise<string> {
+    const state = this.semantic.capture(this.snapshot());
+    const target = state.targets.find(candidate =>
+      candidate.id === targetId && candidate.kind === 'entity',
+    );
+    if (!target) throw new Error('attack_target_missing');
+
+    const entityId = Number(target.metadata.entityId);
+    const entityName = typeof target.metadata.entityName === 'string'
+      ? target.metadata.entityName
+      : 'entity';
+    if (!Number.isFinite(entityId)) throw new Error('attack_target_invalid_entity');
+
+    const raw = this.capturePrimitiveWorld();
+    const candidate: WorldCandidate = {
+      id: `entity:${entityId}`,
+      kind: 'entity',
+      name: entityName,
+      distance: target.distance,
+      position: { ...target.position },
+      hostile: Boolean(target.metadata.hostile),
+    };
+    if (!raw.entityCandidates.some(entry => entry.id === candidate.id)) {
+      raw.entityCandidates.unshift(candidate);
+    }
+
+    this.update('attacking_target', {
+      target: target.id,
+      entity: entityName,
+      distance: target.distance,
+    });
+    const result = await this.runPrimitive({
+      action: 'ATTACK',
+      entityTargetId: candidate.id,
+      confidence: 1,
+      source: 'task',
+      reason: `executive_attack:${entityName}`,
+    }, 30_000, raw);
+    if (result.status === 'interrupted') throw new Error('task_replan:attack_interrupted');
+    if (result.status !== 'succeeded') throw new Error(`attack_failed:${result.detail}`);
+
+    this.safeCheckpoint(startedGoal, 'entity_attacked');
+    return `attacked:${entityName}`;
   }
 
   private async craftExecutiveItem(
