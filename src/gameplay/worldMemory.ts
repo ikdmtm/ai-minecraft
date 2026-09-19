@@ -233,6 +233,24 @@ export class WorldMemory {
     return recalled;
   }
 
+  markContradictedNear(
+    position: { x: number; y: number; z: number },
+    radius: number,
+    kinds?: string[],
+    strength = 0.35,
+  ): void {
+    const allowed = kinds ? new Set(kinds) : null;
+    const now = Date.now();
+    for (const record of this.records.values()) {
+      if (record.scope !== 'world' || record.worldId !== this.worldId || !record.position) continue;
+      if (allowed && !allowed.has(record.kind)) continue;
+      if (distance(position, record.position) > radius) continue;
+      record.confidence = clamp01(effectiveConfidence(record, now) - strength);
+      record.lastSeenAt = now;
+      this.persist(record);
+    }
+  }
+
   markContradicted(id: string, strength = 0.35): void {
     const record = this.records.get(id);
     if (!record) return;
