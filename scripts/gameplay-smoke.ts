@@ -75,7 +75,8 @@ async function main() {
     command('give AdapterSmoke minecraft:oak_planks 2');
     command('give AdapterSmoke minecraft:oak_log 2');
     command('give AdapterSmoke minecraft:wooden_pickaxe 1');
-    await until(() => ['furnace', 'chicken', 'oak_planks', 'oak_log', 'wooden_pickaxe'].every(name => bot!.inventory.items().some(i => i.name === name)), 'fixture_items');
+    command('give AdapterSmoke minecraft:saddle 1');
+    await until(() => ['furnace', 'chicken', 'oak_planks', 'oak_log', 'wooden_pickaxe', 'saddle'].every(name => bot!.inventory.items().some(i => i.name === name)), 'fixture_items');
     const run = async (op: PrimitiveOperation) => {
       console.log(JSON.stringify({ phase: 'before', operation: op, position: bot!.entity.position, held: bot!.heldItem?.name, onGround: bot!.entity.onGround }));
       const result = await executePrimitiveOperation(bot!, op, context);
@@ -142,12 +143,76 @@ async function main() {
     console.log(JSON.stringify({ phase: 'use_verified', item: 'cooked_chicken', hunger_before: hungerBefore, hunger_after: bot.food }));
     console.log('REAL_SERVER_USE_PASSED: selected food consumed and hunger increased');
 
+    const attackPigPosition = new Vec3(ox + 2.5, 201, oz + 0.5);
+    const interactPigPosition = new Vec3(ox - 2.5, 201, oz + 0.5);
+    command(`summon minecraft:pig ${attackPigPosition.x} ${attackPigPosition.y} ${attackPigPosition.z} {NoAI:1b,PersistenceRequired:1b}`);
+    command(`summon minecraft:pig ${interactPigPosition.x} ${interactPigPosition.y} ${interactPigPosition.z} {NoAI:1b,PersistenceRequired:1b}`);
+    const nearestPig = (position: Vec3) => Object.values(bot!.entities)
+      .filter((entity: any) => entity.name === 'pig')
+      .sort((a: any, b: any) => a.position.distanceTo(position) - b.position.distanceTo(position))[0] as any | undefined;
+    await until(() => {
+      const attack = nearestPig(attackPigPosition);
+      const interact = nearestPig(interactPigPosition);
+      return Boolean(
+        attack && interact && attack.id !== interact.id &&
+        attack.position.distanceTo(attackPigPosition) < 1 &&
+        interact.position.distanceTo(interactPigPosition) < 1,
+      );
+    }, 'fixture_pigs');
+    const attackPig = nearestPig(attackPigPosition)!;
+    const interactPig = nearestPig(interactPigPosition)!;
+    assert.ok(bot.entity.position.distanceTo(attackPig.position) <= 3.5);
+    assert.ok(bot.entity.position.distanceTo(interactPig.position) <= 3.5);
+
+    await run({ action: 'EQUIP', item: 'wooden_pickaxe' });
+    assert.equal(bot.heldItem?.name, 'wooden_pickaxe');
+    console.log('REAL_SERVER_EQUIP_PASSED: selected held item observed');
+
+    let attackHurtObserved = false;
+    const hurtHandler = (entity: any) => {
+      if (entity?.id === attackPig.id) attackHurtObserved = true;
+    };
+    bot.on('entityHurt', hurtHandler);
+    try {
+      await run({ action: 'ATTACK', entityId: attackPig.id });
+      await until(() => attackHurtObserved, 'attack_hurt_event', 5000);
+      assert.ok(bot.entities[attackPig.id], 'single ATTACK must not be treated as an implied kill');
+      console.log(JSON.stringify({
+        phase: 'attack_verified',
+        entity_id: attackPig.id,
+        hurt_observed: attackHurtObserved,
+        entity_still_present: Boolean(bot.entities[attackPig.id]),
+      }));
+      console.log('REAL_SERVER_ATTACK_PASSED: hit observed without claiming target kill');
+    } finally {
+      bot.removeListener('entityHurt', hurtHandler);
+    }
+
+    await run({ action: 'EQUIP', item: 'saddle' });
+    assert.equal(bot.heldItem?.name, 'saddle');
+    const metadataBefore = JSON.stringify(interactPig.metadata);
+    await run({ action: 'INTERACT_ENTITY', entityId: interactPig.id });
+    await until(() => {
+      const current = bot!.entities[interactPig.id] as any;
+      return Boolean(current) && JSON.stringify(current.metadata) !== metadataBefore;
+    }, 'pig_interaction_metadata_changed', 5000);
+    const interactedPig = bot.entities[interactPig.id] as any;
+    assert.ok(interactedPig);
+    assert.notEqual(JSON.stringify(interactedPig.metadata), metadataBefore);
+    console.log(JSON.stringify({
+      phase: 'entity_interact_verified',
+      entity_id: interactPig.id,
+      held: bot.heldItem?.name ?? null,
+      metadata_changed: true,
+    }));
+    console.log('REAL_SERVER_INTERACT_ENTITY_PASSED: entity state changed after selected interaction');
+
     await run({ action: 'EQUIP', item: 'wooden_pickaxe' });
     await run({ action: 'BREAK', position: p });
     assert.equal(bot.blockAt(new Vec3(p.x, p.y, p.z))?.name, 'air');
     await run({ action: 'MOVE', position: p });
     await until(() => bot!.inventory.items().some(i => i.name === 'furnace'), 'normal_drop_pickup');
-    console.log('REAL_SERVER_SMOKE_PASSED: craft/use/place/open/transfer/process-output/close/equip/break/move/pickup');
+    console.log('REAL_SERVER_SMOKE_PASSED: craft/use/equip/attack/interact-entity/place/open/transfer/process-output/close/break/move/pickup');
   } finally {
     live = false; try { bot?.quit(); } catch { /* best effort */ }
     if (server && server.exitCode == null) {
