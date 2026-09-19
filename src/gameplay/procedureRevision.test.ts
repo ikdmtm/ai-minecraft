@@ -167,7 +167,7 @@ describe('T05c evidence-backed procedure reevaluation and revision', () => {
     });
     expect((await f.run(p)).status).toBe('interrupted');
     const row = f.experience.replayHistory(p.id)[0];
-    expect(row).toMatchObject({ outcome: 'interrupted', worldId: 'revision-world', dimension: 'overworld' });
+    expect(row).toMatchObject({ outcome: 'interrupted', worldId: 'revision-world', dimension: 'minecraft:overworld' });
     expect(f.experience.evidence(row.evidenceIds)[0].status).toBe('interrupted');
     expect(f.experience.get(p.id)).toEqual(p);
   });
