@@ -1,4 +1,5 @@
 import Database from 'better-sqlite3';
+import { randomUUID } from 'crypto';
 
 export type MemoryRetention = 'transient' | 'session' | 'stable';
 export type MemoryScope = 'world' | 'global' | 'stable';
@@ -51,12 +52,16 @@ export class WorldMemory {
   private readonly db: Database.Database | null;
   private worldId: string;
 
-  constructor(dbPath?: string, worldId = 'generation-1') {
-    this.worldId = worldId;
+  constructor(dbPath?: string, worldId?: string) {
     this.db = dbPath ? new Database(dbPath) : null;
+    this.worldId = worldId ?? 'world-ephemeral';
     if (this.db) {
       this.db.pragma('journal_mode = WAL');
       this.db.exec(`
+        CREATE TABLE IF NOT EXISTS gameplay_memory_meta (
+          key TEXT PRIMARY KEY,
+          value TEXT NOT NULL
+        );
         CREATE TABLE IF NOT EXISTS gameplay_memory (
           id TEXT PRIMARY KEY,
           kind TEXT NOT NULL,
@@ -76,12 +81,26 @@ export class WorldMemory {
         CREATE INDEX IF NOT EXISTS idx_gameplay_memory_scope
           ON gameplay_memory(scope, world_id, kind, last_seen_at);
       `);
+      const persistedWorld = this.db.prepare(
+        'SELECT value FROM gameplay_memory_meta WHERE key = ?',
+      ).get('current_world_id') as { value?: string } | undefined;
+      this.worldId = worldId ?? persistedWorld?.value ?? newWorldId();
+      this.persistCurrentWorldId();
       this.loadPersisted();
+    } else if (!worldId) {
+      this.worldId = newWorldId();
     }
   }
 
   setWorldId(worldId: string): void {
     this.worldId = worldId;
+    this.persistCurrentWorldId();
+  }
+
+  startNewWorld(): string {
+    this.worldId = newWorldId();
+    this.persistCurrentWorldId();
+    return this.worldId;
   }
 
   getWorldId(): string {
@@ -227,6 +246,15 @@ export class WorldMemory {
     this.persist(record);
   }
 
+  private persistCurrentWorldId(): void {
+    if (!this.db) return;
+    this.db.prepare(`
+      INSERT INTO gameplay_memory_meta(key, value)
+      VALUES('current_world_id', ?)
+      ON CONFLICT(key) DO UPDATE SET value = excluded.value
+    `).run(this.worldId);
+  }
+
   private loadPersisted(): void {
     if (!this.db) return;
     const rows = this.db.prepare(`
@@ -359,4 +387,8 @@ function distance(
 
 function clamp01(value: number): number {
   return Math.max(0, Math.min(1, value));
+}
+
+function newWorldId(): string {
+  return `world-${Date.now()}-${randomUUID().slice(0, 8)}`;
 }
