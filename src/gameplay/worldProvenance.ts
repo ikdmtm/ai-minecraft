@@ -68,6 +68,11 @@ export class WorldProvenance {
     return false;
   }
 
+  clear(): void {
+    this.placed.clear();
+    this.structures.clear();
+  }
+
   pruneMissing(blockAt: (pos: Vec3) => any | null): void {
     for (const value of this.placed.keys()) {
       const [x, y, z] = value.split(':').map(Number);
