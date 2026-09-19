@@ -26,6 +26,7 @@ export interface TypedGameplayDecision {
   craftItem?: CraftItem;
   placeItem?: string;
   cookItem?: string;
+  consumeItem?: string;
   direction?: CompassDirection;
   excavationMode?: 'down' | 'up';
   targetPosition?: { x: number; y: number; z: number };
