@@ -6,14 +6,9 @@ export type ExecutiveTaskType =
   | 'GATHER_RESOURCE'
   | 'EXCAVATE_TARGET'
   | 'ATTACK_TARGET'
-  | 'HUNT_FOOD_TARGET'
-  | 'EAT_FOOD'
+  | 'EXECUTE_CAPABILITY'
   | 'CRAFT_ITEM'
-  | 'PLACE_ITEM'
-  | 'COOK_FOOD'
-  | 'SLEEP'
   | 'BUILD_STRUCTURE'
-  | 'WAIT_UNTIL_DAYLIGHT'
   | 'WAIT';
 
 export type ExecutiveResource = string;
@@ -47,6 +42,39 @@ export interface SemanticTarget {
   metadata: Record<string, string | number | boolean | null>;
 }
 
+export type DynamicCapabilityKind =
+  | 'hunt_entity'
+  | 'consume_item'
+  | 'place_item'
+  | 'process_item'
+  | 'sleep'
+  | 'wait_condition';
+
+export interface ExecutiveActionCapability {
+  id: string;
+  kind: DynamicCapabilityKind;
+  description: string;
+  targetId?: string;
+  item?: string;
+  outputItem?: string;
+  station?: string;
+  role?: string;
+  utilityTags: string[];
+  preconditions: Record<string, string | number | boolean | null>;
+  expectedEffects: Record<string, string | number | boolean | null>;
+}
+
+export interface ExecutiveMemoryRecord {
+  id: string;
+  kind: string;
+  label: string;
+  position: SemanticPosition;
+  confidence: number;
+  lastSeenAt: number;
+  observations: number;
+  metadata: Record<string, string | number | boolean | null>;
+}
+
 export interface ExecutiveCapabilitySnapshot {
   gather: Array<{
     resource: string;
@@ -61,25 +89,7 @@ export interface ExecutiveCapabilitySnapshot {
     owned: number;
     strategyRelevant: boolean;
   }>;
-  huntFood: Array<{
-    targetId: string;
-    entity: string;
-  }>;
-  edible: Array<{
-    item: string;
-    count: number;
-    foodPoints: number;
-  }>;
-  place: Array<{
-    item: string;
-    role: 'workstation' | 'storage' | 'sleep' | 'utility';
-  }>;
-  cook: Array<{
-    input: string;
-    output: string;
-    count: number;
-    fuelAvailable: boolean;
-  }>;
+  actions: ExecutiveActionCapability[];
   recipes: Array<{
     item: string;
     requiresTable: boolean;
@@ -140,6 +150,7 @@ export interface ExecutiveWorldState {
   };
   activeTask: ExecutiveTaskSnapshot;
   targets: SemanticTarget[];
+  memory: ExecutiveMemoryRecord[];
   recentEvents: Array<{ type: string; detail: string; importance: string }>;
 }
 
@@ -148,8 +159,7 @@ export interface ExecutiveDecision {
   targetId?: string;
   resource?: ExecutiveResource;
   craftItem?: CraftItem;
-  placeItem?: string;
-  cookItem?: string;
+  capabilityId?: string;
   structure?: ExecutiveStructure;
   amount?: number;
   confidence: number;
@@ -169,14 +179,9 @@ export const EXECUTIVE_TASKS: ExecutiveTaskType[] = [
   'GATHER_RESOURCE',
   'EXCAVATE_TARGET',
   'ATTACK_TARGET',
-  'HUNT_FOOD_TARGET',
-  'EAT_FOOD',
+  'EXECUTE_CAPABILITY',
   'CRAFT_ITEM',
-  'PLACE_ITEM',
-  'COOK_FOOD',
-  'SLEEP',
   'BUILD_STRUCTURE',
-  'WAIT_UNTIL_DAYLIGHT',
   'WAIT',
 ];
 
