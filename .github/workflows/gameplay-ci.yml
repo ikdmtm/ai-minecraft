@@ -33,7 +33,7 @@ jobs:
           if hashlib.sha256(raw).hexdigest() != '83bccfbbef4bd6606495d3729043627e2dfb6e004ecc3805f872e9d5d08825a3':
               raise SystemExit('Update checksum mismatch')
           extra = Path('scripts/.autonomy-update/supplement.json').read_bytes()
-          if hashlib.sha256(extra).hexdigest() != 'df4c1a5f676214f601ea9c74702333065bfb688925da2db0ef901298b0547304':
+          if hashlib.sha256(extra).hexdigest() != '3e15eedd8b80a011c05d63c723ee195eb8ffa3b7f6a6385c810c83be4902c008':
               raise SystemExit('Supplement checksum mismatch')
           def blob(data):
               return hashlib.sha1(b'blob ' + str(len(data)).encode() + b'\0' + data).hexdigest()
@@ -88,14 +88,6 @@ jobs:
           name: autonomy-smoke-diagnostics
           path: data/autonomy-smoke-server.log
           retention-days: 3
-          if-no-files-found: ignore
-      - name: Retain exact server fixture for offline reproduction
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: autonomy-server-fixture
-          path: ${{ runner.temp }}/autonomy-smoke-server/server/server.jar
-          retention-days: 1
           if-no-files-found: ignore
       - name: Publish only verified changes without overwriting concurrent work
         env:
