@@ -15,6 +15,7 @@ export type SemanticTargetKind =
   | 'tree_cluster'
   | 'stone_source'
   | 'food_source'
+  | 'remembered_location'
   | 'item_drop'
   | 'resource_source'
   | 'entity'
