@@ -197,6 +197,7 @@ export class SemanticWorldModel {
     }
 
     const addDownwardCandidate = (stand: SemanticPosition): void => {
+      if (Math.abs(stand.y - origin.y) > 4) return;
       const floor = this.bot.blockAt(new Vec3(stand.x, stand.y - 1, stand.z));
       if (!isSafeExcavationSupport(floor)) return;
       const direction = this.findSafeExcavationDirection(stand, 'down');
@@ -287,6 +288,7 @@ export class SemanticWorldModel {
     const originY = Math.floor(origin.y);
 
     const addCandidate = (stand: SemanticPosition): void => {
+      if (Math.abs(stand.y - origin.y) > 4) return;
       if (!this.isShelterFootprintBuildable(stand)) return;
       const distance = distance3(origin, stand);
       candidates.push({
@@ -390,6 +392,7 @@ export class SemanticWorldModel {
     const candidates: SemanticTarget[] = [];
 
     const addCandidate = (stand: SemanticPosition, local = false): void => {
+      if (Math.abs(stand.y - origin.y) > 4) return;
       const floor = this.bot.blockAt(new Vec3(stand.x, stand.y - 1, stand.z));
       const feet = this.bot.blockAt(new Vec3(stand.x, stand.y, stand.z));
       const head = this.bot.blockAt(new Vec3(stand.x, stand.y + 1, stand.z));
@@ -436,7 +439,7 @@ export class SemanticWorldModel {
 
   private findStandableColumn(x: number, z: number): SemanticPosition | null {
     const originY = Math.floor(this.bot.entity.position.y);
-    for (let y = originY + 24; y >= originY - 16; y--) {
+    for (let y = originY + 8; y >= originY - 12; y--) {
       const floor = this.bot.blockAt(new Vec3(x, y - 1, z));
       const feet = this.bot.blockAt(new Vec3(x, y, z));
       const head = this.bot.blockAt(new Vec3(x, y + 1, z));
