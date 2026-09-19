@@ -88,7 +88,11 @@ export class TaskExecutor {
           detail = await this.attackTarget(decision.targetId, startedGoal);
           break;
         case 'CRAFT_ITEM':
-          detail = await this.craftExecutiveItem(decision.craftItem ?? 'none', startedGoal);
+          detail = await this.craftExecutiveItem(
+            decision.craftItem ?? 'none',
+            decision.amount ?? 1,
+            startedGoal,
+          );
           break;
         case 'BUILD_STRUCTURE':
           detail = await this.buildStructure(
@@ -340,23 +344,49 @@ export class TaskExecutor {
 
   private async craftExecutiveItem(
     item: TypedGameplayDecision['craftItem'],
+    requestedAmount: number,
     startedGoal: string,
   ): Promise<string> {
     if (!item || item === 'none') throw new Error('craft_item_missing_item');
 
-    this.update('crafting_item', { item });
-    const result = await this.runPrimitive({
-      action: 'CRAFT',
-      craftItem: item,
-      confidence: 1,
-      source: 'task',
-      reason: 'executive_craft_item',
-    }, 30_000);
-    if (result.status !== 'succeeded') {
-      throw new Error(`craft_item_failed:${item}:${result.detail}`);
+    const initial = inventoryMap(this.bot)[item] ?? 0;
+    const targetTotal = Math.max(initial, Math.max(1, requestedAmount));
+
+    for (let attempt = 0; attempt < 32; attempt++) {
+      const current = inventoryMap(this.bot)[item] ?? 0;
+      this.update('crafting_item', {
+        item,
+        inventoryCount: current,
+        target: targetTotal,
+        crafted: current - initial,
+      });
+      if (current >= targetTotal) {
+        return `crafted:${item}:${current - initial}`;
+      }
+
+      const before = current;
+      const result = await this.runPrimitive({
+        action: 'CRAFT',
+        craftItem: item,
+        confidence: 1,
+        source: 'task',
+        reason: 'executive_craft_item',
+      }, 30_000);
+      if (result.status === 'interrupted') {
+        throw new Error('task_replan:craft_interrupted');
+      }
+      if (result.status !== 'succeeded') {
+        throw new Error(`craft_item_failed:${item}:${result.detail}`);
+      }
+
+      const after = inventoryMap(this.bot)[item] ?? 0;
+      if (after <= before) {
+        throw new Error(`craft_no_inventory_progress:${item}`);
+      }
+      this.safeCheckpoint(startedGoal, `crafted_${item}`);
     }
-    this.safeCheckpoint(startedGoal, `crafted_${item}`);
-    return `crafted:${item}`;
+
+    throw new Error(`craft_item_step_limit:${item}`);
   }
 
   private async buildStructure(
