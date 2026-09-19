@@ -36,7 +36,7 @@
 
 過去の出来事を覚えていることと、同じ資源・建物が今も存在することは別。履歴の保存と、毎回取り出す作業記憶の量も分離する。
 
-## 3. 今回確認した基準点
+## 3. T00で確認した基準点（履歴）
 
 - 実装の基準コミット: [`68c6a0478893072a76d5c84083e1b0b1fe60f23c`](https://github.com/ikdmtm/ai-minecraft/commit/68c6a0478893072a76d5c84083e1b0b1fe60f23c)
 - 作業対象ブランチ: `revive/gameplay-first-jev`
@@ -57,11 +57,11 @@
 
 実装文書に記載された制限: JEV 経路は choice-only の互換経路で、自由な操作引数・手順保存/再生の全面対応ではない。vanilla JAR の知識 export は custom datapack を含まない。包括的な長期記憶整理と、自律的な長期生存は未検証。
 
-### 最初に片付ける確認済みの問題
+### T00で見つかったCIの問題とT01の対応
 
-基準コミットの `.github/workflows/gameplay-ci.yml` はまだ一回限りのパッチ適用と自動 commit/push を実行する構成になっている。一方、その run の最後に `scripts/.autonomy-update` は削除されている。現在の条件のまま次の通常 push を行うと、必要な4分割パッチがないため適用ステップが失敗する見込み。ゲームのバグと CI の後片付けを混同しない。
+基準コミットの `.github/workflows/gameplay-ci.yml` は一回限りのパッチ適用と自動 commit/push を実行する構成だった。一方、その run の最後に `scripts/.autonomy-update` は削除されていたため、次の通常 push では適用ステップが失敗する見込みだった。
 
-この文書の追加は専用 docs ブランチで行い、当該 runtime ブランチを変更しない。
+T01ではこの処理を検証専用CIへ置換した。変更は [PR #1](https://github.com/ikdmtm/ai-minecraft/pull/1) の `docs/autonomy-task-plan-20260919` にあり、本チェックポイント時点では未マージ。`revive/gameplay-first-jev` 側で既に有効になったと取り違えない。
 
 ## 4. 作業単位と完了条件
 
@@ -79,8 +79,8 @@
 | ID | 作業単位 | 状態 | 依存 | 完了の証拠 |
 | --- | --- | --- | --- | --- |
 | T00 | 現状監査・設計契約・タスク分割 | VERIFIED（文書・監査のみ） | なし | この文書、固定した基準SHA、読んだCIログ |
-| T01 | 一回限りの移行CIを通常の検証専用CIへ置換 | READY | T00 | 新しいコミットへのCI成功、source自動書換えなし |
-| T02 | 自律実走の記録・停止・再開の形式を固定 | TODO | T01 | 試験マニフェストとログ検証テスト |
+| T01 | 一回限りの移行CIを通常の検証専用CIへ置換 | VERIFIED（PR上、未マージ） | T00 | run 35430600966、両job成功、追跡済みソース差分なし |
+| T02 | 自律実走の記録・停止・再開の形式を固定 | READY（T01取り込み後） | T01 | 試験マニフェストとログ検証テスト |
 | T03 | 基本操作の未検証箇所を1操作ずつ検証 | TODO | T01 | 対象操作の失敗再現・修正・回帰テスト |
 | T04 | ワールド変更・再起動での記憶分離を検証 | TODO | T01 | 同seed別world、再起動、dimension等の検証結果 |
 | T05 | LLM自身による手順保存と別環境再利用を検証 | TODO | T02・T03・T04 | 保存元証拠、再bind、再実行結果、失敗時更新 |
@@ -96,6 +96,19 @@ T03～T06は一括実装しない。以下の子タスクを独立した作業�
 パッチ復元、ソース改変、git commit/push、contents:write を撤去し、通常の checkout → install → typecheck/build → unit/export tests → 必要な adapter smoke にする。開発ブランチ/PR/手動実行のどこで走るかを明示する。fixture は一時ディレクトリを使い、LLM の有料呼出し・ユーザーの既存ワールド変更は行わない。
 
 完了条件: 通常のソースチェックアウトだけで実行できる。少なくとも新しい1コミットで成功を確認する。GitHubの権限設定変更やbranch protection変更はこのタスクに含めない。
+
+T01の実装・検証記録:
+
+- CI実装head: `95a33e2b8c4ce56f4bc8248bd76742ade6bf2296`。基準baseは `68c6a0478893072a76d5c84083e1b0b1fe60f23c`。
+- [run 35430600966](https://github.com/ikdmtm/ai-minecraft/actions/runs/35430600966) はPR更新で起動。実際のcheckoutはPR検証用merge `9fe7e10cd160402eb5f422cc9652a0b622bfd0de`。パッチ復元や自動publishは行っていない。
+- `verify` / job `105864347772`: 型チェック、ビルド、42 suites / 567 tests、export 4 tests、追跡済みソース差分なしの確認がすべて成功。
+- `adapter-smoke` / job `105864499961`: Minecraft 1.21.4の使い捨てワールドでの既存adapter smoke、診断artifact保存、追跡済みソース差分なしの確認がすべて成功。
+- `contents: read`、`persist-credentials: false`。秘密のLLMキーは渡さない。ソース自動commit/push・パッチ適用・contents:writeを撤去した。
+- 起動条件は `revive/gameplay-first-jev` へのpushと同ブランチ向けpull_request、およびworkflow_dispatch。手動起動にはworkflowがデフォルトブランチにも存在する前提があり、今回は手動起動やbaseへのpushは未検証。デフォルトブランチ・権限設定は変更していない。
+- 同じevent/refの古い実行をキャンセルするconcurrencyを設定。通常検証10分、smoke job10分、smokeコマンド240秒の上限。既存テストの内容や依存バージョンは変更しない。
+- ローカルのYAML検査でも、GitHub blob `d21fb2fb7d66b680e81135b47a7b0ec509fc8345` との一致、起動条件、読取り権限、パッチ・publish処理なし、差分検査を確認。
+- 最初の試行 `f5eb155` はrunner.tempをjob-level envで参照したため実行前に失敗。step-levelへ修正した上記headで両jobの成功を確認した。
+- 既存依存関係のnpm audit警告（18件、うちhigh 8件）とActionsの非推奨警告は記録のみ。T01では依存更新や既存テストの緩和を行わない。
 
 ### T02: 実走の再現情報
 
@@ -165,18 +178,22 @@ Next single task:
 ## 6. 現在のチェックポイント
 
 ```text
-Task ID: T00
+Task ID: T01
 Base SHA: 68c6a0478893072a76d5c84083e1b0b1fe60f23c
-Work branch: docs/autonomy-task-plan-20260919
-Status: VERIFIED (design and audit only)
-Changed files: docs/GAMEPLAY_TASKS.md
-Observed result: Current implementation and completed CI were inspected; remaining work split into bounded tasks.
-Tests actually run: None in this documentation task. Existing run 35428912575/job 105859752118 logs were read.
-Tests not run: Fresh CI, new LLM gameplay, and new cross-world evaluation were not run here.
-Remaining blocker: The runtime branch still contains a one-shot source-patching CI workflow.
-Next single task: T01 only. Do not expand into memory consolidation or game behavior changes in the same task.
+Work branch: docs/autonomy-task-plan-20260919 / PR #1 (not merged)
+CI implementation head: 95a33e2b8c4ce56f4bc8248bd76742ade6bf2296
+Tested PR merge: 9fe7e10cd160402eb5f422cc9652a0b622bfd0de
+Status: VERIFIED (normal PR CI; base-branch rollout pending)
+Changed files: .github/workflows/gameplay-ci.yml, docs/GAMEPLAY_TASKS.md
+Observed result: No one-shot patches or automated source publication. Both read-only CI jobs succeeded.
+Tests actually run: Run 35430600966; typecheck/build, 42 suites/567 tests, 4 export tests, disposable-world adapter smoke, tracked-source guards. Local YAML/blob checks also passed.
+Tests not run: New autonomous LLM gameplay, new cross-world behavior, workflow_dispatch and base push were not tested in T01.
+Remaining blocker: PR #1 is still unmerged; the runtime branch retains the old CI until the change is integrated. Dependency/deprecation warnings are deferred maintenance.
+Next single task: Integrate the reviewed T01 PR, then T02 only (run manifest/logging). Do not mix memory consolidation or gameplay changes.
 ```
+
+この文書のT01完了記録は、上記CIが両jobとも成功した後に追加したもの。記録追加による後続CIがある場合は、PRの最新headと対応runを別途確認し、上記runが将来のコミットまで検証したとは解釈しない。
 
 ## 7. 再開時の最小手順
 
-この文書と `GAMEPLAY_AUTONOMY.md` を読み、作業ブランチの最新SHA・直近CI・未完了変更を確認する。次はT01だけを対象とし、現状が既に変わっていれば証拠と差分を更新する。停止前の会話に出てきた古いファイル内容を、そのまま現行コードへ貼り戻さない。
+この文書と `GAMEPLAY_AUTONOMY.md` を読み、PR #1・作業ブランチの最新SHA・直近CI・未完了変更を確認する。T01はPR上で検証済みなので再実装しない。取り込み状況を確認した後、次はT02だけを対象とする。現状が変わっていれば証拠と差分を更新する。停止前の会話に出てきた古いファイル内容を、そのまま現行コードへ貼り戻さない。
