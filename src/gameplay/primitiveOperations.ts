@@ -255,7 +255,12 @@ export async function executePrimitiveOperation(
       if (bot.currentWindow) throw new Error('operation_close_window_before_craft');
       const name = need(op.item, 'item'); const id = bot.registry.itemsByName[name]?.id;
       if (id == null) throw new Error('operation_unknown_recipe_item');
-      const table = bot.findBlock({ matching: b => b.name === 'crafting_table' && bot.canSeeBlock(b), maxDistance: 4 });
+      // Keep geometric checks out of findBlock's scan predicate. Mineflayer may
+      // evaluate that predicate while traversing partially loaded candidates;
+      // calling canSeeBlock there can dereference incomplete positions.
+      // recipesFor/craft receive the concrete nearby table and remain responsible
+      // for rejecting an unusable workstation.
+      const table = bot.findBlock({ matching: b => b.name === 'crafting_table', maxDistance: 4 });
       const recipes = bot.recipesFor(id, null, 1, table);
       if (!recipes.length) throw new Error('operation_recipe_not_executable');
       const before = stackCount(bot, name);
