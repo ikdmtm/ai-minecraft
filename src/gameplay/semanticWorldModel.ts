@@ -562,10 +562,25 @@ function isStableTerrainSupport(block: any | null): boolean {
   if (!block) return false;
   if (WATERLIKE.has(block.name) || block.name === 'lava') return false;
   if (block.boundingBox !== 'block') return false;
-  // Prismarine Block exposes Minecraft's physical material category. For
-  // excavation/shelter foundations we want terrain, not foliage, trunks,
-  // workstations, wool, or other solid-but-unstable/non-terrain blocks.
-  return block.material === 'rock' || block.material === 'dirt';
+
+  // minecraft-data 1.21+ describes terrain by mining tags rather than the old
+  // "rock"/"dirt" material names. Treat pickaxe terrain and non-falling
+  // shovel terrain as stable structural support, while keeping foliage,
+  // trunks/workstations and gravity blocks out of shelter/excavation sites.
+  const material = String(block.material ?? '');
+  if (material === 'rock' || material === 'dirt') return true;
+  if (material.includes('mineable/pickaxe')) return true;
+  if (material.includes('mineable/shovel') && !isGravityAffectedSupport(block.name)) return true;
+  return false;
+}
+
+function isGravityAffectedSupport(name: string): boolean {
+  return (
+    name === 'sand' ||
+    name === 'red_sand' ||
+    name === 'gravel' ||
+    name.endsWith('_concrete_powder')
+  );
 }
 
 function isSafeExcavationSupport(block: any | null): boolean {
