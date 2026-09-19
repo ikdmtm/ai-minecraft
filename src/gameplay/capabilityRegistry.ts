@@ -210,7 +210,10 @@ export class CapabilityRegistry {
     craft: ExecutiveCapabilitySnapshot['craft'],
     recipes: ExecutiveCapabilitySnapshot['recipes'],
   ): ExecutiveActionCapability[] {
-    const actions: ExecutiveActionCapability[] = [];
+    const targetActions: ExecutiveActionCapability[] = [];
+    const useActions: ExecutiveActionCapability[] = [];
+    const placeActions: ExecutiveActionCapability[] = [];
+    const craftActions: ExecutiveActionCapability[] = [];
 
     for (const target of targets) {
       if (
@@ -219,7 +222,7 @@ export class CapabilityRegistry {
         target.kind !== 'resource_source' &&
         target.kind !== 'item_drop'
       ) {
-        actions.push({
+        targetActions.push({
           id: `move:${target.id}`,
           kind: 'move_to',
           description: `Move to semantic target ${target.id}.`,
@@ -239,7 +242,7 @@ export class CapabilityRegistry {
         const blockTargetId = stringMeta(target, 'blockTargetId');
         const blockName = stringMeta(target, 'blockName');
         if (blockTargetId && blockName) {
-          actions.push({
+          targetActions.push({
             id: `break:${blockTargetId}`,
             kind: 'break_block',
             description: `Break visible harvestable block ${blockName}.`,
@@ -260,14 +263,13 @@ export class CapabilityRegistry {
       }
 
       if (target.kind === 'entity') {
-        const entityTargetId = target.id;
         const entityName = stringMeta(target, 'entityName') ?? 'unknown';
-        actions.push({
-          id: `attack:${entityTargetId}`,
+        targetActions.push({
+          id: `attack:${target.id}`,
           kind: 'attack_entity',
           description: `Attack currently observed entity ${entityName}.`,
           targetId: target.id,
-          entityTargetId,
+          entityTargetId: target.id,
           position: { ...target.position },
           preconditions: {
             distance: target.distance,
@@ -281,7 +283,7 @@ export class CapabilityRegistry {
       }
 
       if (target.kind === 'item_drop') {
-        actions.push({
+        targetActions.push({
           id: `collect:${target.id}`,
           kind: 'collect_drop',
           description: 'Move to the observed dropped item so normal pickup mechanics can collect it.',
@@ -297,11 +299,12 @@ export class CapabilityRegistry {
       }
     }
 
+    const placementPositions = this.findPlacementPositions().slice(0, 6);
     for (const item of this.bot.inventory.items()) {
       const data = (this.bot.registry.items as any)?.[item.type] ?? {};
       const foodPoints = Number(data.foodPoints ?? data.food_points ?? 0);
       if (foodPoints > 0) {
-        actions.push({
+        useActions.push({
           id: `use:${item.name}`,
           kind: 'use_item',
           description: `Use carried item ${item.name}.`,
@@ -318,8 +321,8 @@ export class CapabilityRegistry {
 
       const placeableBlock = (this.bot.registry.blocksByName as any)?.[item.name];
       if (placeableBlock) {
-        for (const position of this.findPlacementPositions().slice(0, 6)) {
-          actions.push({
+        for (const position of placementPositions) {
+          placeActions.push({
             id: `place:${item.name}:${position.x}:${position.y}:${position.z}`,
             kind: 'place_item',
             description: `Place carried block item ${item.name} at the specified reachable position.`,
@@ -341,7 +344,7 @@ export class CapabilityRegistry {
     const recipeByItem = new Map(recipes.map(recipe => [recipe.item, recipe]));
     for (const entry of craft) {
       const recipe = recipeByItem.get(entry.item);
-      actions.push({
+      craftActions.push({
         id: `craft:${entry.item}`,
         kind: 'craft_recipe',
         description: `Craft ${entry.item} using an executable Minecraft recipe.`,
@@ -358,30 +361,36 @@ export class CapabilityRegistry {
       });
     }
 
-    actions.push(...this.discoverBreakBlockAffordances());
-    actions.push(...this.discoverProcessingAffordances());
-    actions.push(...this.discoverInteractionAffordances());
-
+    const breakActions = this.discoverBreakBlockAffordances();
+    const processActions = this.discoverProcessingAffordances();
+    const interactionActions = this.discoverInteractionAffordances();
     const time = this.bot.time.timeOfDay;
-    if (time >= 12500 && time < 23500) {
-      actions.push({
-        id: 'wait:daylight',
-        kind: 'wait_condition',
-        description: 'Wait until Minecraft daylight, while allowing safety interruptions.',
-        preconditions: { isNight: true },
-        specification: { condition: 'daylight' },
-      });
-    } else {
-      actions.push({
-        id: 'wait:night',
-        kind: 'wait_condition',
-        description: 'Wait until Minecraft night, while allowing safety interruptions.',
-        preconditions: { isNight: false },
-        specification: { condition: 'night' },
-      });
-    }
+    const waitAction: ExecutiveActionCapability = time >= 12500 && time < 23500
+      ? {
+          id: 'wait:daylight',
+          kind: 'wait_condition',
+          description: 'Wait until Minecraft daylight, while allowing safety interruptions.',
+          preconditions: { isNight: true },
+          specification: { condition: 'daylight' },
+        }
+      : {
+          id: 'wait:night',
+          kind: 'wait_condition',
+          description: 'Wait until Minecraft night, while allowing safety interruptions.',
+          preconditions: { isNight: false },
+          specification: { condition: 'night' },
+        };
 
-    return dedupeAffordances(actions).slice(0, 96);
+    return dedupeAffordances([
+      ...targetActions.slice(0, 28),
+      ...breakActions.slice(0, 24),
+      ...useActions.slice(0, 10),
+      ...processActions.slice(0, 8),
+      ...interactionActions.slice(0, 8),
+      ...placeActions.slice(0, 24),
+      ...craftActions.slice(0, 24),
+      waitAction,
+    ]).slice(0, 127);
   }
 
   private findPlacementPositions(): Array<{ x: number; y: number; z: number }> {
@@ -390,7 +399,7 @@ export class CapabilityRegistry {
     for (let dy = -1; dy <= 2; dy++) {
       for (let dx = -2; dx <= 2; dx++) {
         for (let dz = -2; dz <= 2; dz++) {
-          if (dx === 0 && dy === 0 && dz === 0) continue;
+          if (dx === 0 && dz === 0 && (dy === 0 || dy === 1)) continue;
           const target = base.offset(dx, dy, dz);
           const block = this.bot.blockAt(target);
           if (!block || (block.name !== 'air' && block.boundingBox !== 'empty')) continue;
@@ -687,17 +696,12 @@ function recipeItemIds(raw: any): number[] {
 
 function isInteractiveBlockName(name: string): boolean {
   return (
-    name === 'crafting_table' ||
-    name === 'furnace' ||
-    name === 'smoker' ||
-    name === 'blast_furnace' ||
-    name === 'chest' ||
-    name === 'trapped_chest' ||
-    name === 'barrel' ||
     name.endsWith('_bed') ||
     name.endsWith('_door') ||
+    name.endsWith('_trapdoor') ||
+    name.endsWith('_fence_gate') ||
     name.endsWith('_button') ||
-    name.endsWith('_lever')
+    name === 'lever'
   );
 }
 
