@@ -65,6 +65,7 @@ export class TaskExecutor {
     });
 
     let affordance: ExecutiveActionCapability | undefined;
+    let learningBefore: LearningSnapshot | undefined;
     try {
       let detail = '';
       switch (decision.task) {
@@ -73,13 +74,18 @@ export class TaskExecutor {
           const state = this.semantic.capture(this.snapshot());
           affordance = state.capabilities.actions.find(action => action.id === decision.capabilityId);
           if (!affordance) throw new Error(`affordance_unavailable:${decision.capabilityId}`);
+          learningBefore = captureLearningSnapshot(this.bot);
           detail = await this.executeAffordance(affordance, startedGoal);
+          const learningAfter = captureLearningSnapshot(this.bot);
           this.memory.recordProcedureOutcome({
             key: procedureKey(affordance),
             label: affordance.description,
             success: true,
             detail,
-            metadata: procedureMetadata(affordance),
+            metadata: {
+              ...procedureMetadata(affordance),
+              observedEffect: summarizeEffect(learningBefore, learningAfter),
+            },
           });
           break;
         }
@@ -102,7 +108,12 @@ export class TaskExecutor {
           label: affordance.description,
           success: false,
           detail: message,
-          metadata: procedureMetadata(affordance),
+          metadata: {
+            ...procedureMetadata(affordance),
+            observedEffect: learningBefore
+              ? summarizeEffect(learningBefore, captureLearningSnapshot(this.bot))
+              : 'unknown',
+          },
         });
       }
       const status = message.startsWith('task_replan:') ? 'interrupted' : 'failed';
@@ -451,6 +462,56 @@ function procedureMetadata(
 function stringSpec(affordance: ExecutiveActionCapability, key: string): string | null {
   const value = affordance.specification[key];
   return typeof value === 'string' && value ? value : null;
+}
+
+interface LearningSnapshot {
+  hp: number;
+  hunger: number;
+  position: { x: number; y: number; z: number };
+  inventory: Record<string, number>;
+}
+
+function captureLearningSnapshot(bot: mineflayer.Bot): LearningSnapshot {
+  const inventory: Record<string, number> = {};
+  for (const item of bot.inventory.items()) {
+    inventory[item.name] = (inventory[item.name] ?? 0) + item.count;
+  }
+  return {
+    hp: bot.health,
+    hunger: bot.food,
+    position: {
+      x: bot.entity.position.x,
+      y: bot.entity.position.y,
+      z: bot.entity.position.z,
+    },
+    inventory,
+  };
+}
+
+function summarizeEffect(before: LearningSnapshot, after: LearningSnapshot): string {
+  const changes: string[] = [];
+  const hpDelta = after.hp - before.hp;
+  const hungerDelta = after.hunger - before.hunger;
+  if (hpDelta !== 0) changes.push(`hp:${signed(hpDelta)}`);
+  if (hungerDelta !== 0) changes.push(`hunger:${signed(hungerDelta)}`);
+
+  const names = new Set([...Object.keys(before.inventory), ...Object.keys(after.inventory)]);
+  for (const name of [...names].sort()) {
+    const delta = (after.inventory[name] ?? 0) - (before.inventory[name] ?? 0);
+    if (delta !== 0) changes.push(`inventory:${name}:${signed(delta)}`);
+  }
+
+  const moved = Math.hypot(
+    after.position.x - before.position.x,
+    after.position.y - before.position.y,
+    after.position.z - before.position.z,
+  );
+  if (moved >= 0.5) changes.push(`moved:${Math.round(moved * 10) / 10}`);
+  return changes.length > 0 ? changes.join(',') : 'no_observable_state_change';
+}
+
+function signed(value: number): string {
+  return value > 0 ? `+${value}` : String(value);
 }
 
 function round1(value: number): number {
