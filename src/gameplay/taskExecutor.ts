@@ -636,6 +636,7 @@ function isRetriableShelterSiteFailure(detail: string): boolean {
     'shelter_door_ground_missing',
     'shelter_doorway_blocked',
     'shelter_door_failed',
+    'shelter_site_obstructed',
     'shelter_too_incomplete',
   ].some(reason => detail.includes(reason));
 }
