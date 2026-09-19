@@ -272,7 +272,7 @@ function executiveInstructions(): string {
     'Capabilities are affordances, not a progression script. Do not assume wood->stone->shelter or any other canonical route.',
     'Choose one executable task and its parameters. The body handles pathfinding, physical mining, crafting execution, and short certified excavation segments.',
     'For GATHER_RESOURCE choose a concrete resource exposed by state.capabilities.gather. amount is the desired TOTAL inventory count.',
-    'For CRAFT_ITEM choose only an item exposed by state.capabilities.craft. These are recipes currently executable from Minecraft recipe data.',
+    'For CRAFT_ITEM choose only an item exposed by state.capabilities.craft. These are recipes currently executable from Minecraft recipe data. amount means the desired TOTAL count of that crafted item in inventory, just like GATHER_RESOURCE.',
     'EXCAVATE_TARGET opens one short world-model-certified excavation segment to discover or access terrain; it is not tied to any specific resource.',
     'ATTACK_TARGET acts on a concrete observed entity. Decide yourself whether attacking it serves the current plan and survival objective.',
     'Use semantic target IDs when a location, resource source, or entity matters. Never invent coordinates or target IDs.',
