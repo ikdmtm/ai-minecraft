@@ -1,10 +1,12 @@
 import Database from 'better-sqlite3';
 import * as fs from 'node:fs';
-import * as childProcess from 'node:child_process';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { prepareIsolatedEvaluation, runIsolatedEvaluation, parseEvaluationArgs, evaluationServerProperties } from './evaluationRunner.js';
+import { prepareIsolatedEvaluation, runIsolatedEvaluation, parseEvaluationArgs, evaluationServerProperties, evaluationToolEnvironment } from './evaluationRunner.js';
 
+// TypeScript's namespace wrapper has non-configurable accessors. Spy on the
+// native module exports so calls remain observable without changing the test.
+const childProcess = require('node:child_process') as typeof import('node:child_process');
 let cwd: string;
 let env: NodeJS.ProcessEnv;
 beforeEach(() => {
@@ -124,6 +126,13 @@ test('server properties bind loopback, disable RCON and use a new hardcore world
 });
 test.each([0, -1, 65536, 1.5, NaN])('invalid port %p is rejected', port => {
   expect(() => evaluationServerProperties(port)).toThrow('evaluation_port_invalid');
+});
+
+test('Java and export subprocesses receive system paths but not model secrets or injected options', () => {
+  const source = { ...env, PATH: '/fixture/bin', JAVA_HOME: '/fixture/java', HOME: '/fixture/home',
+    NODE_OPTIONS: '--require unwanted', JAVA_TOOL_OPTIONS: '-agentlib:unwanted', TYPESAFE_API_KEY: 'private' };
+  expect(evaluationToolEnvironment(source)).toEqual({ PATH: '/fixture/bin', JAVA_HOME: '/fixture/java', HOME: '/fixture/home' });
+  expect(source.OPENAI_API_KEY).toBe('fixture-private-key');
 });
 
 test('CLI defaults to prepare, and run/fresh modes must be explicit', () => {
