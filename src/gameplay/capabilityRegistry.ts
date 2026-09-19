@@ -61,6 +61,8 @@ export class CapabilityRegistry {
       .slice(0, 20);
 
     return {
+      itemSpecs: this.discoverItemSpecs(),
+      blockSpecs: this.discoverBlockSpecs(),
       gather,
       craft,
       recipes,
@@ -68,6 +70,57 @@ export class CapabilityRegistry {
       entityActions,
       canExcavate: targets.some(target => target.kind === 'excavation_site'),
     };
+  }
+
+  private discoverItemSpecs(): ExecutiveCapabilitySnapshot['itemSpecs'] {
+    return this.bot.inventory.items()
+      .map(item => {
+        const data = (this.bot.registry.items as any)?.[item.type] ?? {};
+        const placeable = (this.bot.registry.blocksByName as any)?.[item.name];
+        const foodPoints = Number(data.foodPoints ?? data.food_points);
+        const saturation = Number(data.saturation ?? data.saturationModifier);
+        const maxDurability = Number(data.maxDurability ?? data.max_durability);
+        const stackSize = Number(data.stackSize ?? data.stack_size);
+        return {
+          name: item.name,
+          count: item.count,
+          stackSize: Number.isFinite(stackSize) ? stackSize : null,
+          foodPoints: Number.isFinite(foodPoints) && foodPoints > 0 ? foodPoints : null,
+          saturation: Number.isFinite(saturation) ? saturation : null,
+          maxDurability: Number.isFinite(maxDurability) && maxDurability > 0 ? maxDurability : null,
+          placeableBlock: placeable?.name ?? null,
+        };
+      })
+      .sort((a, b) => a.name.localeCompare(b.name));
+  }
+
+  private discoverBlockSpecs(): ExecutiveCapabilitySnapshot['blockSpecs'] {
+    let positions: any[] = [];
+    try {
+      positions = this.bot.findBlocks({
+        matching: block => block.name !== 'air',
+        maxDistance: 10,
+        count: 160,
+      }) as any[];
+    } catch {
+      return [];
+    }
+
+    const byName = new Map<string, ExecutiveCapabilitySnapshot['blockSpecs'][number]>();
+    for (const pos of positions) {
+      const block = this.bot.blockAt(pos);
+      if (!block || byName.has(block.name)) continue;
+      byName.set(block.name, {
+        name: block.name,
+        diggable: Boolean(block.diggable),
+        hardness: Number.isFinite(Number(block.hardness)) ? Number(block.hardness) : null,
+        boundingBox: typeof block.boundingBox === 'string' ? block.boundingBox : null,
+        declaredDrops: blockDropNames(this.bot, block),
+      });
+      if (byName.size >= 48) break;
+    }
+
+    return [...byName.values()].sort((a, b) => a.name.localeCompare(b.name));
   }
 
   private discoverCraftableItems(strategyText: string): ExecutiveCapabilitySnapshot['craft'] {
