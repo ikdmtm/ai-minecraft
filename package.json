@@ -6,7 +6,7 @@
   "scripts": {
     "build": "tsc",
     "start": "tsx src/index.ts",
-    "start:gameplay": "tsx src/gameplay/jevMain.ts",
+    "start:gameplay": "tsx src/gameplay/runRecorder.ts",
     "dev": "tsx watch src/index.ts",
     "dev:gameplay": "tsx watch src/gameplay/jevMain.ts",
     "mc:setup": "bash scripts/mc-setup-local.sh",

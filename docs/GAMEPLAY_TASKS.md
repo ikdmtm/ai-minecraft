@@ -61,7 +61,7 @@
 
 基準コミットの `.github/workflows/gameplay-ci.yml` は一回限りのパッチ適用と自動 commit/push を実行する構成だった。一方、その run の最後に `scripts/.autonomy-update` は削除されていたため、次の通常 push では適用ステップが失敗する見込みだった。
 
-T01ではこの処理を検証専用CIへ置換した。変更は [PR #1](https://github.com/ikdmtm/ai-minecraft/pull/1) の `docs/autonomy-task-plan-20260919` にあり、本チェックポイント時点では未マージ。`revive/gameplay-first-jev` 側で既に有効になったと取り違えない。
+T01ではこの処理を検証専用CIへ置換した。[PR #1](https://github.com/ikdmtm/ai-minecraft/pull/1) の最終head `f5c9d3c` のrun `35430757373`も両job成功を確認し、T02着手時に `73379eb38de74bdac8eff5c4d57bc56b4e860d75` で取り込み済み。
 
 ## 4. 作業単位と完了条件
 
@@ -79,8 +79,8 @@ T01ではこの処理を検証専用CIへ置換した。変更は [PR #1](https:
 | ID | 作業単位 | 状態 | 依存 | 完了の証拠 |
 | --- | --- | --- | --- | --- |
 | T00 | 現状監査・設計契約・タスク分割 | VERIFIED（文書・監査のみ） | なし | この文書、固定した基準SHA、読んだCIログ |
-| T01 | 一回限りの移行CIを通常の検証専用CIへ置換 | VERIFIED（PR上、未マージ） | T00 | run 35430600966、両job成功、追跡済みソース差分なし |
-| T02 | 自律実走の記録・停止・再開の形式を固定 | READY（T01取り込み後） | T01 | 試験マニフェストとログ検証テスト |
+| T01 | 一回限りの移行CIを通常の検証専用CIへ置換 | VERIFIED・取り込み済み | T00 | run 35430600966 / 35430757373、merge 73379eb |
+| T02 | 自律実走の記録・停止・再開の形式を固定 | IMPLEMENTED（PR #2の最新CIを確認） | T01 | [T02記録](T02_RUN_RECORDING.md)、runRecorder.test.ts、対応PRのCI |
 | T03 | 基本操作の未検証箇所を1操作ずつ検証 | TODO | T01 | 対象操作の失敗再現・修正・回帰テスト |
 | T04 | ワールド変更・再起動での記憶分離を検証 | TODO | T01 | 同seed別world、再起動、dimension等の検証結果 |
 | T05 | LLM自身による手順保存と別環境再利用を検証 | TODO | T02・T03・T04 | 保存元証拠、再bind、再実行結果、失敗時更新 |
@@ -117,6 +117,8 @@ T01の実装・検証記録:
 操作要求/結果/割込み/観測変化、knowledge lookup、手順保存・再生、LLM失敗・遅延を同じ run ID へ結びつける。既存ログの必要項目をまず棚卸しし、欠落のみ追加する。
 
 完了条件: 停止/クラッシュしても、そのrunがどのコード・世界・経験で動いたか復元できる。意図的WAITと不具合による無進捗をレポートで区別できる。
+
+実装範囲・保存先・制限・テストは [T02_RUN_RECORDING.md](T02_RUN_RECORDING.md) に記録。seedの取得不能、dirty checkout、親ごとの強制停止は明示的に不明/不完全と扱う。CI結果は [PR #2](https://github.com/ikdmtm/ai-minecraft/pull/2) の最新headとrunで確認する。
 
 ### T03: 操作アダプターの検証（1回1操作群）
 
@@ -178,22 +180,18 @@ Next single task:
 ## 6. 現在のチェックポイント
 
 ```text
-Task ID: T01
-Base SHA: 68c6a0478893072a76d5c84083e1b0b1fe60f23c
-Work branch: docs/autonomy-task-plan-20260919 / PR #1 (not merged)
-CI implementation head: 95a33e2b8c4ce56f4bc8248bd76742ade6bf2296
-Tested PR merge: 9fe7e10cd160402eb5f422cc9652a0b622bfd0de
-Status: VERIFIED (normal PR CI; base-branch rollout pending)
-Changed files: .github/workflows/gameplay-ci.yml, docs/GAMEPLAY_TASKS.md
-Observed result: No one-shot patches or automated source publication. Both read-only CI jobs succeeded.
-Tests actually run: Run 35430600966; typecheck/build, 42 suites/567 tests, 4 export tests, disposable-world adapter smoke, tracked-source guards. Local YAML/blob checks also passed.
-Tests not run: New autonomous LLM gameplay, new cross-world behavior, workflow_dispatch and base push were not tested in T01.
-Remaining blocker: PR #1 is still unmerged; the runtime branch retains the old CI until the change is integrated. Dependency/deprecation warnings are deferred maintenance.
-Next single task: Integrate the reviewed T01 PR, then T02 only (run manifest/logging). Do not mix memory consolidation or gameplay changes.
+Task ID: T02
+Base SHA: 73379eb38de74bdac8eff5c4d57bc56b4e860d75 (PR #1 integrated)
+Work branch: feat/t02-run-recording / PR #2
+Status: IMPLEMENTED; consult PR #2 for the exact latest-head CI result before integration.
+Changed files: src/gameplay/runRecorder.ts, src/gameplay/runRecorder.test.ts, src/gameplay/taskExecutor.ts, package.json, docs/T02_RUN_RECORDING.md, docs/GAMEPLAY_TASKS.md
+Observed result: Run manifest/JSONL journal and pre-run SQLite/knowledge snapshots are implemented. Operation evidence and task requests are correlated. Gameplay policy and memory semantics are unchanged.
+Tests actually run / evidence: T01 final run 35430757373 was checked before merging PR #1. New T02 CI is recorded on PR #2; do not treat a pending or superseded run as verification of the latest head.
+Tests not run: Autonomous Hardcore play; behavior learning/cross-world evaluation. New tests use fixture child processes and temporary SQLite only.
+Remaining blocker: Verify the final T02 CI and review/integrate PR #2. Unknown seed and dirty source limitations remain explicit.
+Next single task: After T02 verification/integration, T03a only (real-server CRAFT/USE). Do not combine with T04/T05/T06.
 ```
-
-この文書のT01完了記録は、上記CIが両jobとも成功した後に追加したもの。記録追加による後続CIがある場合は、PRの最新headと対応runを別途確認し、上記runが将来のコミットまで検証したとは解釈しない。
 
 ## 7. 再開時の最小手順
 
-この文書と `GAMEPLAY_AUTONOMY.md` を読み、PR #1・作業ブランチの最新SHA・直近CI・未完了変更を確認する。T01はPR上で検証済みなので再実装しない。取り込み状況を確認した後、次はT02だけを対象とする。現状が変わっていれば証拠と差分を更新する。停止前の会話に出てきた古いファイル内容を、そのまま現行コードへ貼り戻さない。
+この文書と `GAMEPLAY_AUTONOMY.md` / `T02_RUN_RECORDING.md` を読み、PR #2・作業ブランチの最新SHA・対応CI・取り込み状況を確認する。T01は取り込み済みなので再実装しない。T02が検証済みなら記録を更新してT03aへ進む。停止前の会話に出てきた古いファイル内容を、そのまま現行コードへ貼り戻さない。
