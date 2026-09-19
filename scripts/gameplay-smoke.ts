@@ -82,6 +82,11 @@ async function main() {
       const result = await executePrimitiveOperation(bot!, op, context);
       console.log(JSON.stringify({ operation: op, result })); return result;
     };
+    const reject = async (op: PrimitiveOperation, reason: RegExp) => {
+      console.log(JSON.stringify({ phase: 'before_expected_rejection', operation: op }));
+      await assert.rejects(() => executePrimitiveOperation(bot!, op, context), reason);
+      console.log(JSON.stringify({ phase: 'expected_rejection_verified', operation: op, reason: reason.source }));
+    };
     const count = (name: string) => bot!.inventory.items()
       .filter(item => item.name === name)
       .reduce((sum, item) => sum + item.count, 0);
@@ -116,6 +121,32 @@ async function main() {
     await run({ action: 'OPEN', position: p });
     const slots = () => windowSnapshot(bot!);
     assert.deepEqual(slots().slots.slice(0, 3).map(s => s.role), ['smelted', 'fuel', 'result']);
+
+    const openedWindowId = slots().id;
+    await reject({ action: 'OPEN', position: p }, /operation_window_already_open/);
+    assert.equal(slots().id, openedWindowId);
+
+    await reject({ action: 'CLOSE', windowId: openedWindowId + 1 }, /operation_stale_window/);
+    assert.equal(slots().id, openedWindowId);
+
+    command('give AdapterSmoke minecraft:cobblestone 65');
+    await until(() => {
+      const stacks = slots().slots.filter(s => s.zone === 'inventory' && s.item === 'cobblestone').map(s => s.count);
+      return stacks.includes(64) && stacks.includes(1);
+    }, 'full_stack_fixture');
+    const fullCobble = slots().slots.find(s => s.zone === 'inventory' && s.item === 'cobblestone' && s.count === 64)!;
+    const spareCobble = slots().slots.find(s => s.zone === 'inventory' && s.item === 'cobblestone' && s.count === 1)!;
+    await reject({
+      action: 'TRANSFER',
+      windowId: openedWindowId,
+      sourceSlot: spareCobble.index,
+      destinationSlot: fullCobble.index,
+      item: 'cobblestone',
+      count: 1,
+    }, /operation_destination_full/);
+    assert.equal(slots().slots[fullCobble.index].count, 64);
+    assert.equal(slots().slots[spareCobble.index].count, 1);
+    console.log('REAL_SERVER_WINDOW_GUARDS_PASSED: double-open stale-close and full-destination transfer rejected');
     const transfer = async (name: string, destinationSlot: number) => {
       const sourceSlot = slots().slots.find(s => s.zone === 'inventory' && s.item === name)!.index;
       await run({ action: 'TRANSFER', windowId: slots().id, sourceSlot, destinationSlot, item: name, count: 1 });
@@ -125,7 +156,33 @@ async function main() {
     await until(() => slots().slots[2].item === 'cooked_chicken', 'cooked_output');
     const destination = slots().slots.find(s => s.zone === 'inventory' && !s.item)!.index;
     await run({ action: 'TRANSFER', windowId: slots().id, sourceSlot: 2, destinationSlot: destination, item: 'cooked_chicken', count: 1 });
-    await run({ action: 'CLOSE', windowId: slots().id });
+    const closedWindowId = slots().id;
+    await run({ action: 'CLOSE', windowId: closedWindowId });
+    assert.equal(bot.currentWindow, null);
+    await reject({
+      action: 'TRANSFER',
+      windowId: closedWindowId,
+      sourceSlot: 0,
+      destinationSlot: 1,
+      count: 1,
+    }, /operation_stale_window/);
+    console.log('REAL_SERVER_STALE_WINDOW_PASSED: transfer rejected after window close');
+
+    const timeoutResult = await run({ action: 'WAIT', until: 'night', durationMs: 300 });
+    assert.equal(timeoutResult, 'condition_timeout:night');
+
+    let waitActive = true;
+    setTimeout(() => { waitActive = false; }, 150);
+    await assert.rejects(
+      () => executePrimitiveOperation(bot!, { action: 'WAIT', until: 'timeout', durationMs: 5000 }, {
+        assertActive: () => { if (!waitActive) throw new Error('fixture_wait_cancelled'); },
+      }),
+      /fixture_wait_cancelled/,
+    );
+    await run({ action: 'EQUIP', item: 'wooden_pickaxe' });
+    assert.equal(bot.heldItem?.name, 'wooden_pickaxe');
+    console.log('REAL_SERVER_WAIT_BOUNDARIES_PASSED: timeout distinguished and cancellation allowed next operation');
+
     await until(() => bot!.inventory.items().some(i => i.name === 'cooked_chicken'), 'output_in_inventory');
 
     // A strong, short Hunger effect deterministically burns through initial
@@ -212,7 +269,7 @@ async function main() {
     assert.equal(bot.blockAt(new Vec3(p.x, p.y, p.z))?.name, 'air');
     await run({ action: 'MOVE', position: p });
     await until(() => bot!.inventory.items().some(i => i.name === 'furnace'), 'normal_drop_pickup');
-    console.log('REAL_SERVER_SMOKE_PASSED: craft/use/equip/attack/interact-entity/place/open/transfer/process-output/close/break/move/pickup');
+    console.log('REAL_SERVER_SMOKE_PASSED: craft/use/equip/attack/interact-entity/place/open/transfer/window-guards/wait-boundaries/process-output/close/break/move/pickup');
   } finally {
     live = false; try { bot?.quit(); } catch { /* best effort */ }
     if (server && server.exitCode == null) {
