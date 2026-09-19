@@ -78,6 +78,22 @@ export interface ExecutiveMemoryRecord {
 }
 
 export interface ExecutiveCapabilitySnapshot {
+  itemSpecs: Array<{
+    name: string;
+    count: number;
+    stackSize: number | null;
+    foodPoints: number | null;
+    saturation: number | null;
+    maxDurability: number | null;
+    placeableBlock: string | null;
+  }>;
+  blockSpecs: Array<{
+    name: string;
+    diggable: boolean;
+    hardness: number | null;
+    boundingBox: string | null;
+    declaredDrops: string[];
+  }>;
   gather: Array<{
     resource: string;
     targetIds: string[];
