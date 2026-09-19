@@ -174,6 +174,9 @@ export class SkillExecutor {
       action: decision.action,
       target_id: targetId,
       craft_item: decision.craftItem ?? null,
+      place_item: decision.placeItem ?? null,
+      cook_item: decision.cookItem ?? null,
+      consume_item: decision.consumeItem ?? null,
       direction: decision.direction ?? null,
       excavation_mode: decision.excavationMode ?? null,
       target_position: decision.targetPosition ?? null,
@@ -213,6 +216,12 @@ export class SkillExecutor {
         case 'CRAFT':
           await this.craft(decision.craftItem ?? 'none', token);
           break;
+        case 'PLACE_ITEM':
+          await this.placeInventoryItem(decision.placeItem ?? 'none', token);
+          break;
+        case 'COOK_FOOD':
+          await this.cookFood(decision.cookItem ?? 'none', token);
+          break;
         case 'BUILD_SHELTER':
           await this.buildShelter(token, decision.targetPosition);
           break;
@@ -220,7 +229,7 @@ export class SkillExecutor {
           await this.huntFood(this.findEntityCandidate(world, decision.entityTargetId), token);
           break;
         case 'EAT':
-          await this.eat(token);
+          await this.eat(token, decision.consumeItem);
           break;
         case 'FLEE':
           await this.flee(decision.direction ?? 'E', token, decision.reason);
@@ -870,7 +879,11 @@ export class SkillExecutor {
     }
   }
 
-  private async placeAdjacent(item: any, token: number): Promise<any | null> {
+  private async placeAdjacent(
+    item: any,
+    token: number,
+    role: 'workstation' | 'utility' = 'workstation',
+  ): Promise<any | null> {
     const base = this.bot.entity.position.floored();
     const offsets = [[1, 0], [-1, 0], [0, 1], [0, -1]] as const;
     await this.bot.equip(item, 'hand');
@@ -882,7 +895,7 @@ export class SkillExecutor {
       try {
         await this.bot.placeBlock(ground, new Vec3(0, 1, 0));
         const placedPos = base.offset(dx, 0, dz);
-        this.provenance?.markPlaced(placedPos, 'workstation');
+        this.provenance?.markPlaced(placedPos, role);
         await delay(150);
         return this.bot.blockAt(placedPos);
       } catch {
@@ -890,6 +903,94 @@ export class SkillExecutor {
       }
     }
     return null;
+  }
+
+  private async placeInventoryItem(itemName: string, token: number): Promise<void> {
+    if (!itemName || itemName === 'none') throw new Error('place_item_missing_item');
+    const item = this.bot.inventory.items().find(entry => entry.name === itemName);
+    if (!item) throw new Error(`place_item_not_in_inventory:${itemName}`);
+
+    this.updateDetail(`placing ${itemName}`);
+    const role = placementRole(itemName);
+    const placed = await this.placeAdjacent(item, token, role);
+    if (!placed) throw new Error(`place_item_no_valid_location:${itemName}`);
+
+    this.shared.pushEvent({
+      type: 'item_placed',
+      detail: `${itemName}@${placed.position.x},${placed.position.y},${placed.position.z}`,
+      importance: 'medium',
+    });
+  }
+
+  private async cookFood(inputName: string, token: number): Promise<void> {
+    if (!inputName || inputName === 'none') throw new Error('cook_food_missing_input');
+    const input = this.bot.inventory.items().find(entry => entry.name === inputName);
+    if (!input) throw new Error(`cook_food_input_missing:${inputName}`);
+
+    const station = this.bot.findBlock({
+      matching: block => block.name === 'smoker' || block.name === 'furnace',
+      maxDistance: 8,
+    });
+    if (!station) throw new Error('cook_food_station_missing');
+
+    const fuel = this.findFuelItem();
+    if (!fuel) throw new Error('cook_food_fuel_missing');
+
+    const movements = this.normalMovements();
+    movements.canDig = false;
+    this.bot.pathfinder.setMovements(movements);
+    await withTimeout(
+      this.bot.pathfinder.goto(new goals.GoalNear(station.position.x, station.position.y, station.position.z, 2)),
+      8_000,
+      'cook_station_path_timeout',
+      () => this.bot.pathfinder.stop(),
+    );
+    this.assertActive(token);
+
+    this.updateDetail(`cooking ${inputName} in ${station.name}`);
+    const window: any = await (this.bot as any).openFurnace(station);
+    try {
+      await withTimeout(Promise.resolve(window.putInput(input.type, input.metadata ?? null, 1)), 5_000, 'cook_put_input_timeout');
+      this.assertActive(token);
+      const freshFuel = this.bot.inventory.items().find(entry => entry.name === fuel.name);
+      if (!freshFuel) throw new Error('cook_food_fuel_disappeared');
+      await withTimeout(Promise.resolve(window.putFuel(freshFuel.type, freshFuel.metadata ?? null, 1)), 5_000, 'cook_put_fuel_timeout');
+      this.assertActive(token);
+
+      const expected = COOKED_FOOD[inputName] ?? null;
+      const started = Date.now();
+      while (Date.now() - started < 18_000) {
+        this.assertActive(token);
+        const output = typeof window.outputItem === 'function' ? window.outputItem() : null;
+        if (output && (!expected || output.name === expected)) {
+          await withTimeout(Promise.resolve(window.takeOutput()), 5_000, 'cook_take_output_timeout');
+          this.shared.pushEvent({
+            type: 'food_cooked',
+            detail: `${inputName}->${output.name ?? expected ?? 'output'}`,
+            importance: 'medium',
+          });
+          return;
+        }
+        await delay(250);
+      }
+      throw new Error(`cook_output_timeout:${inputName}`);
+    } finally {
+      try { window.close(); } catch { /* best effort */ }
+    }
+  }
+
+  private findFuelItem(): any | null {
+    const preferred = ['coal', 'charcoal'];
+    for (const name of preferred) {
+      const item = this.bot.inventory.items().find(entry => entry.name === name);
+      if (item) return item;
+    }
+    return this.bot.inventory.items().find(item =>
+      item.name.endsWith('_log') ||
+      item.name.endsWith('_wood') ||
+      item.name.endsWith('_planks') ||
+      item.name === 'stick',
+    ) ?? null;
   }
 
   private async buildShelter(
@@ -1064,8 +1165,13 @@ export class SkillExecutor {
       entity = this.bot.nearestEntity(e => Boolean(e.name && isFoodAnimal(e.name)));
     }
     if (!entity) throw new Error('no_food_animal_target');
+    const name = entity.name ?? 'animal';
+    await this.equipBestWeapon();
     await this.approachAndAttack(entity, token, 8);
-    this.shared.pushEvent({ type: 'hunted', detail: entity.name ?? 'animal', importance: 'medium' });
+    await delay(250);
+    this.assertActive(token);
+    await this.collectNearbyDrops(token, 7);
+    this.shared.pushEvent({ type: 'hunted', detail: name, importance: 'medium' });
   }
 
   private async attack(candidate: WorldCandidate | null, token: number): Promise<void> {
@@ -1096,12 +1202,24 @@ export class SkillExecutor {
     }
   }
 
-  private async eat(token: number): Promise<void> {
-    const food = this.bot.inventory.items().find(item => FOOD_ITEMS.has(item.name));
-    if (!food) throw new Error('no_food_available');
+  private async eat(token: number, requestedItem?: string): Promise<void> {
+    const food = requestedItem
+      ? this.bot.inventory.items().find(item => item.name === requestedItem && isEdibleItem(this.bot, item))
+      : this.bot.inventory.items().find(item => isEdibleItem(this.bot, item));
+    if (!food) throw new Error(requestedItem
+      ? `requested_food_unavailable:${requestedItem}`
+      : 'no_food_available');
+    const before = this.bot.food;
     await this.bot.equip(food, 'hand');
     this.assertActive(token);
     await this.bot.consume();
+    this.assertActive(token);
+    if (this.bot.food <= before) throw new Error(`eat_no_hunger_progress:${food.name}`);
+    this.shared.pushEvent({
+      type: 'ate_food',
+      detail: `${food.name} hunger=${before}->${this.bot.food}`,
+      importance: 'medium',
+    });
   }
 
   private async flee(direction: CompassDirection, token: number, reason?: string): Promise<void> {
@@ -1209,6 +1327,8 @@ function actionToReflexState(action: TypedGameplayDecision['action']): ReflexSta
     case 'MINE':
     case 'DIG_STAIRCASE': return 'mining';
     case 'CRAFT':
+    case 'PLACE_ITEM':
+    case 'COOK_FOOD':
     case 'BUILD_SHELTER': return 'crafting';
     case 'HUNT_FOOD': return 'gathering';
     case 'EAT': return 'eating';
@@ -1231,6 +1351,37 @@ function directionVector(direction: CompassDirection): [number, number] {
     case 'W': return [-1, 0];
     case 'NW': return [-diag, -diag];
   }
+}
+
+const COOKED_FOOD: Record<string, string> = {
+  beef: 'cooked_beef',
+  porkchop: 'cooked_porkchop',
+  chicken: 'cooked_chicken',
+  mutton: 'cooked_mutton',
+  rabbit: 'cooked_rabbit',
+  cod: 'cooked_cod',
+  salmon: 'cooked_salmon',
+  potato: 'baked_potato',
+  kelp: 'dried_kelp',
+};
+
+function placementRole(itemName: string): 'workstation' | 'utility' {
+  if (
+    itemName === 'crafting_table' ||
+    itemName === 'furnace' ||
+    itemName === 'smoker' ||
+    itemName === 'blast_furnace' ||
+    itemName === 'campfire'
+  ) {
+    return 'workstation';
+  }
+  return 'utility';
+}
+
+function isEdibleItem(bot: mineflayer.Bot, item: any): boolean {
+  const data = (bot.registry.items as any)?.[item?.type] ?? {};
+  const foodPoints = Number(data.foodPoints ?? data.food_points ?? 0);
+  return foodPoints > 0 || FOOD_ITEMS.has(item?.name ?? '');
 }
 
 function isDangerous(name: string): boolean {
