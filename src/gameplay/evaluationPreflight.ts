@@ -13,7 +13,7 @@ export interface EvaluationPreflight {
   missingTasks: ExecutiveTaskType[];
   issues: string[];
   remoteModelVerified: false;
-  credentialsVerified: false;
+  remoteAuthVerified: false;
 }
 
 /** This describes the actual choice-only adapter, NOT the remote model's ability.
@@ -33,7 +33,7 @@ export function inspectEvaluationProvider(env: NodeJS.ProcessEnv): EvaluationPre
     effectiveProvider: null, executiveModel: null,
     strategicModel: env.STRATEGIC_MODEL?.trim() || 'gpt-5.6-terra',
     supportedTasks: [], missingTasks: [...EXECUTIVE_TASKS], issues: [],
-    remoteModelVerified: false, credentialsVerified: false,
+    remoteModelVerified: false, remoteAuthVerified: false,
   };
   if (!['auto', 'openai', 'jev'].includes(requested)) {
     report.issues.push('invalid_policy_provider');
