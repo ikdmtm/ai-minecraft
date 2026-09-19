@@ -28,7 +28,8 @@ describe('T06a continuation integrity and accumulated coverage', () => {
   test('editing a cursor position cannot fabricate an exhausted search', () => {
     for (let i = 0; i < 20; i++) insert(`e-${i}`);
     const first = memory.search(context, { query: 'bread' });
-    const tampered = { ...JSON.parse(first.nextCursor!), before: [0, 0, 0] };
+    const issued = JSON.parse(first.nextCursor!);
+    const tampered = { ...issued, before: issued.before.map(() => 0) };
     expect(() => memory.search(context, { query: 'bread', cursor: JSON.stringify(tampered) })).toThrow('memory_cursor_not_issued_or_changed');
     // An unchanged issued cursor remains a valid read-only continuation.
     const next = memory.search(context, { query: 'bread', cursor: first.nextCursor! });
