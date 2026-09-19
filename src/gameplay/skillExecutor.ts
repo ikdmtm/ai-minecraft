@@ -122,7 +122,17 @@ export class SkillExecutor {
       this.current.status === 'running' &&
       this.current.action === decision.action
     ) {
-      if (decision.action !== 'FLEE' || this.current.detail === 'swimming_to_surface') return;
+      if (decision.action !== 'FLEE') return;
+
+      const incomingWaterEscape = decision.reason?.startsWith('low_oxygen') ?? false;
+      const currentWaterEscape =
+        this.current.detail === 'swimming_to_surface' ||
+        this.current.detail.startsWith('low_oxygen');
+
+      // Keep an active hostile/hazard flee moving instead of restarting it on
+      // every 100ms safety tick. Drowning is the one mode that may replace a
+      // non-water flee because it requires different controls.
+      if (!incomingWaterEscape || currentWaterEscape) return;
     }
 
     if (decision.action === 'CONTINUE') {
