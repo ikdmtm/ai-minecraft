@@ -23,6 +23,7 @@ export interface TypedGameplayDecision {
   entityTargetId?: string;
   craftItem?: CraftItem;
   direction?: CompassDirection;
+  excavationMode?: 'down' | 'up';
   targetPosition?: { x: number; y: number; z: number };
   confidence: number;
   reason?: string;
