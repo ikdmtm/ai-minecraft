@@ -481,9 +481,12 @@ export class SkillExecutor {
     const fresh = this.bot.blockAt(pos);
     if (!fresh || fresh.name === 'air') return;
     if (!this.bot.canSeeBlock(fresh)) throw new Error(`target_not_visible:${fresh.name}`);
-    if (!this.bot.canDigBlock(fresh)) throw new Error(`cannot_dig:${fresh.name}`);
 
+    // canDigBlock depends on the currently equipped harvest tool. Equip first
+    // so diggability reflects the bot's actual capability rather than whatever
+    // item happened to be in hand from the previous action.
     await this.equipAppropriateTool(fresh, token);
+    if (!this.bot.canDigBlock(fresh)) throw new Error(`cannot_dig:${fresh.name}`);
 
     const held = this.bot.heldItem?.name ?? 'hand';
     this.updateDetail(`digging ${fresh.name} with ${held}`);
@@ -672,7 +675,18 @@ export class SkillExecutor {
     }
 
     const gained = this.inventoryCount('cobblestone') - startingCobble;
-    if (gained <= 0) throw new Error('staircase_no_stone_reached');
+    if (gained <= 0) {
+      // Completing a certified staircase segment is still useful progress even
+      // when the local soil layer is deeper than four blocks. The task layer
+      // will re-observe the world and may continue only through a newly
+      // certified excavation site.
+      this.shared.pushEvent({
+        type: 'staircase_segment_completed',
+        detail: 'cobblestone_gained=0',
+        importance: 'low',
+      });
+      return;
+    }
     this.shared.pushEvent({
       type: 'staircase_reached_stone',
       detail: `cobblestone_gained=${gained}`,
@@ -687,8 +701,8 @@ export class SkillExecutor {
 
     await this.bot.lookAt(block.position.offset(0.5, 0.5, 0.5), true);
     this.assertActive(token);
-    if (!this.bot.canDigBlock(block)) throw new Error(`staircase_cannot_dig:${block.name}`);
     await this.equipAppropriateTool(block, token);
+    if (!this.bot.canDigBlock(block)) throw new Error(`staircase_cannot_dig:${block.name}`);
 
     const held = this.bot.heldItem?.name ?? 'hand';
     const expectedDigMs = Math.max(0, Number(this.bot.digTime(block)) || 0);
