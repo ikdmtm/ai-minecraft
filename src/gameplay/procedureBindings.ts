@@ -96,7 +96,10 @@ export function bindProcedureStep(
   const op = { ...step.operation }, state = stateFor(bindings);
   if (step.binding?.kind === 'relative') {
     if (!finitePosition(anchor) || !finitePosition(step.binding.offset)) reject('relative_position_invalid');
-    op.position = anchor.plus(vec(step.binding.offset));
+    // A demonstrated BREAK -> PLACE at one coordinate must replace the live
+    // bound block, not jump back to the default translated layout coordinate.
+    const existing = step.binding.ref ? state.blocks.get(step.binding.ref) : undefined;
+    op.position = existing ? vec(existing) : anchor.plus(vec(step.binding.offset));
     if (step.binding.ref) state.blocks.set(step.binding.ref, vec(op.position));
   }
   if (step.binding?.kind === 'block') {
