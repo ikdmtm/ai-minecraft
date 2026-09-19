@@ -345,9 +345,15 @@ export class CapabilityRegistry {
       .sort((a, b) => b.foodPoints - a.foodPoints || b.count - a.count);
   }
 
-  private discoverPlaceableUtilities(): ExecutiveCapabilitySnapshot['place'] {
+  private discoverPlaceableUtilities(): Array<{
+    item: string;
+    role: 'workstation' | 'storage' | 'sleep' | 'utility';
+  }> {
     const seen = new Set<string>();
-    const result: ExecutiveCapabilitySnapshot['place'] = [];
+    const result: Array<{
+      item: string;
+      role: 'workstation' | 'storage' | 'sleep' | 'utility';
+    }> = [];
     for (const item of this.bot.inventory.items()) {
       const role = placeableRole(item.name);
       if (!role || seen.has(item.name)) continue;
@@ -357,7 +363,12 @@ export class CapabilityRegistry {
     return result;
   }
 
-  private discoverCookableFood(): ExecutiveCapabilitySnapshot['cook'] {
+  private discoverCookableFood(): Array<{
+    input: string;
+    output: string;
+    count: number;
+    fuelAvailable: boolean;
+  }> {
     const fuelAvailable = this.bot.inventory.items().some(item => isFuelItem(item.name));
     const inventory = new Map(this.bot.inventory.items().map(item => [item.name, item.count]));
     return Object.entries(COOKABLE_FOOD)
