@@ -87,11 +87,21 @@ export class SemanticWorldModel {
       strategy,
       activeTask,
       targets,
-      memory: this.memory.recall({
-        origin: position,
-        minConfidence: 0.1,
-        limit: 24,
-      }).map(record => ({
+      memory: [
+        ...this.memory.recall({
+          origin: position,
+          minConfidence: 0.1,
+          limit: 12,
+          includeWorld: true,
+          includeGlobal: false,
+        }),
+        ...this.memory.recall({
+          minConfidence: 0.1,
+          limit: 12,
+          includeWorld: false,
+          includeGlobal: true,
+        }),
+      ].map(record => ({
         id: record.id,
         kind: record.kind,
         label: record.label,
