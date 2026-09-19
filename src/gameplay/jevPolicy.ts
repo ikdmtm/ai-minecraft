@@ -1,6 +1,5 @@
 import {
   COMPASS_DIRECTIONS,
-  CRAFT_ITEMS,
   GAMEPLAY_ACTIONS,
   type CompassDirection,
   type CraftItem,
@@ -276,9 +275,9 @@ function policyInstructions(): string {
     'Choose the single best immediate Minecraft action for the next few seconds.',
     'Follow strategy.mainGoal and subGoals, but react to the actual world state.',
     'Prefer CONTINUE when currentSkill is running, appropriate, and still capable of progress.',
-    'Use EXPLORE when the desired resource is not currently available as a candidate.',
+    'Use EXPLORE when the desired affordance is not currently available as a candidate.',
     'Never choose MINE unless an appropriate visible block candidate exists.',
-    'Choose DIG_STAIRCASE when strategy needs stone/cobblestone, a wooden-or-better pickaxe exists, no visible stone/cobblestone target exists, and the player is standing on solid dry ground.',
+    'Use DIG_STAIRCASE only when the current strategy independently calls for controlled excavation and the player is standing on solid dry ground.',
     'Do not choose BUILD_SHELTER while the player is in water or standing on non-solid terrain.',
     'Never choose ATTACK or HUNT_FOOD unless an appropriate entity candidate exists.',
     'Choose CRAFT only when inventory plausibly supports the requested recipe.',
@@ -300,7 +299,7 @@ function openAIDecisionSchema(state: JevWorldState): Record<string, unknown> {
         type: 'string',
         enum: ['none', ...state.entityCandidates.map(candidate => candidate.id)],
       },
-      craft_item: { type: 'string', enum: CRAFT_ITEMS },
+      craft_item: { type: 'string' },
       direction: { type: 'string', enum: COMPASS_DIRECTIONS },
       confidence: { type: 'number', minimum: 0, maximum: 1 },
     },
@@ -383,7 +382,7 @@ function actionCriteria(): Record<GameplayActionType, string> {
     EXPLORE: 'Move through the world to discover a needed resource, safer terrain, or a better route.',
     MINE: 'Move to and break a specific visible block candidate such as a log, stone, coal, or iron ore.',
     DIG_STAIRCASE: 'Dig a short safe descending staircase to expose stone when stone progression is needed but no visible stone target exists.',
-    CRAFT: 'Craft the next concrete progression item from available inventory, using a crafting table when needed.',
+    CRAFT: 'Craft a concrete item that serves the current plan when its recipe is actually executable.',
     BUILD_SHELTER: 'Build a small protective shelter when night or nearby danger makes protection necessary.',
     HUNT_FOOD: 'Approach and kill a food animal to obtain food when food supply is insufficient.',
     EAT: 'Consume food now because hunger or health recovery makes eating useful.',
@@ -404,19 +403,9 @@ function candidateCriteria(candidates: WorldCandidate[]): Record<string, string>
   return result;
 }
 
-function craftCriteria(): Record<CraftItem, string> {
+function craftCriteria(): Record<string, string> {
   return {
     none: 'Do not craft anything right now.',
-    planks: 'Convert a log into wooden planks.',
-    sticks: 'Craft sticks for tools.',
-    crafting_table: 'Craft a crafting table.',
-    wooden_pickaxe: 'Craft the first wooden pickaxe to unlock stone mining.',
-    wooden_axe: 'Craft a wooden axe for faster wood gathering and basic combat.',
-    wooden_sword: 'Craft a wooden sword for early defense.',
-    stone_pickaxe: 'Craft a stone pickaxe after obtaining cobblestone.',
-    stone_axe: 'Craft a stone axe after obtaining cobblestone.',
-    stone_sword: 'Craft a stone sword after obtaining cobblestone.',
-    furnace: 'Craft a furnace after obtaining enough cobblestone.',
   };
 }
 
@@ -438,7 +427,7 @@ function validateDirection(value: string | undefined): CompassDirection | undefi
 
 function validateCraftItem(value: string | undefined): CraftItem | undefined {
   if (!value || value === 'none') return undefined;
-  return (CRAFT_ITEMS as string[]).includes(value) ? value as CraftItem : undefined;
+  return value;
 }
 
 function validateCandidateChoice(value: string | undefined, candidates: WorldCandidate[]): string | undefined {
