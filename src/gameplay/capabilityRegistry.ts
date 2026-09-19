@@ -232,8 +232,11 @@ export function blockDropNames(bot: mineflayer.Bot, block: any): string[] {
     .map(id => (bot.registry.items as any)?.[id]?.name as string | undefined)
     .filter((name): name is string => Boolean(name));
 
-  if (names.length > 0) return names;
-  return bot.registry.itemsByName[block?.name]?.name ? [block.name] : [];
+  // Never infer "the block drops itself" just because an item with the same
+  // registry name exists. Leaves, grass and many special blocks can be broken
+  // without yielding themselves. Only advertise drops Minecraft data actually
+  // declares; uncertain/probabilistic loot can still appear later as item_drop.
+  return names;
 }
 
 export function canHarvestBlockNow(bot: mineflayer.Bot, block: any): boolean {
