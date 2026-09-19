@@ -5,7 +5,8 @@ import { SkillExecutor } from './skillExecutor.js';
 
 const SAFETY_TICK_MS = 100;
 const CRITICAL_HP = 4;
-const CREEPER_FLEE_DISTANCE = 5;
+const CREEPER_FLEE_DISTANCE = 7;
+const HOSTILE_FLEE_DISTANCE = 7;
 const LOW_OXYGEN_LEVEL = 5;
 
 export class SafetyKernel {
@@ -45,6 +46,15 @@ export class SafetyKernel {
         this.dispatch({
           action: 'FLEE', confidence: 1, source: 'safety',
           reason: `creeper_${creeper.distance.toFixed(1)}m`,
+        });
+        return;
+      }
+
+      const immediateHostile = hostiles.find(item => item.distance < HOSTILE_FLEE_DISTANCE);
+      if (immediateHostile) {
+        this.dispatch({
+          action: 'FLEE', confidence: 1, source: 'safety',
+          reason: `hostile_${immediateHostile.entity.name}_${immediateHostile.distance.toFixed(1)}m`,
         });
         return;
       }
